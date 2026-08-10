@@ -68,17 +68,18 @@ var (
 )
 
 type serviceIdentityMigrationRequest struct {
-	Service           string
-	Requested         string
-	Target            resolvedServiceIdentity
-	RootPlan          *serviceRootMigrationPlan
-	ReplacementUnit   string
-	TargetService     *db.Service
-	StageGeneration   func(context.Context) error
-	InstallGeneration func(context.Context) error
-	GenerationPaths   []string
-	GenerationIntents []serviceIdentityPathState
-	GenerationUnits   []string
+	Service              string
+	Requested            string
+	Target               resolvedServiceIdentity
+	RootPlan             *serviceRootMigrationPlan
+	ReplacementUnit      string
+	TargetService        *db.Service
+	StageGeneration      func(context.Context) error
+	InstallGeneration    func(context.Context) error
+	GenerationPaths      []string
+	GenerationIntents    []serviceIdentityPathState
+	GenerationUnits      []string
+	GenerationDiagnostic serviceIdentityGenerationDiagnostic
 	// GenerationEnablement separates the complete staged unit inventory from
 	// the exact enablement intent. Nil preserves the legacy behavior where each
 	// GenerationUnits entry is enabled; a non-nil empty slice explicitly
@@ -89,6 +90,7 @@ type serviceIdentityMigrationRequest struct {
 	// Generation-only mutations use this while still supplying Target for
 	// ownership, validation, and rendered-unit behavior.
 	PreserveTargetServiceIdentity bool
+	SandboxPreflightComplete      bool
 	// Schedule marks the transaction as a schedule-only generation change. It
 	// is captured in the durable journal before any stable unit mutation and
 	// keeps payload and sidecar runtime outside the timer activation protocol.
@@ -100,6 +102,11 @@ type serviceIdentityMigrationRequest struct {
 	ops *serviceIdentityMigrationOps
 }
 
+type serviceIdentityGenerationDiagnostic struct {
+	Mutation string
+	Retry    string
+}
+
 type serviceIdentityMigrationResult struct {
 	Previous    resolvedServiceIdentity
 	Current     resolvedServiceIdentity
@@ -107,6 +114,7 @@ type serviceIdentityMigrationResult struct {
 	ZFSSnapshot string
 	WasRunning  bool
 	Restarted   bool
+	Committed   bool
 }
 
 type serviceIdentityMigrationOps struct {
@@ -310,12 +318,12 @@ func (s *Server) runServiceIdentityMigration(
 	ctx context.Context,
 	m *serviceIdentityMigration,
 ) (serviceIdentityMigrationResult, error) {
+	if err := m.preflightRootSandboxActivation(ctx, m.previous, "current"); err != nil {
+		return serviceIdentityMigrationResult{}, err
+	}
 	if err := m.run(ctx); err != nil {
 		if m.completed {
-			committedErr := fmt.Errorf(
-				"service identity migration for %q committed as %s; post-commit cleanup failed and will be retried from %s: %w",
-				m.req.Service, formatServiceIdentity(m.req.Target.Persisted), m.journalPath, err,
-			)
+			committedErr := m.committedMigrationError(err)
 			s.setServiceIdentityMutationBlock(m.req.Service, committedErr)
 			return m.result, committedErr
 		}
@@ -457,7 +465,7 @@ func (m *serviceIdentityMigration) capturePreviousServiceIdentityState(ctx conte
 	if err := m.capturePreviousServiceIdentityUnit(); err != nil {
 		return err
 	}
-	if err := m.prepareReplacementServiceIdentityUnit(); err != nil {
+	if err := m.prepareReplacementServiceIdentityUnit(ctx); err != nil {
 		return err
 	}
 	return m.capturePreviousServiceIdentityRuntime(ctx)
@@ -497,7 +505,7 @@ func validateCapturedPreviousServiceIdentityUnit(path string, raw []byte, presen
 	return nil
 }
 
-func (m *serviceIdentityMigration) prepareReplacementServiceIdentityUnit() error {
+func (m *serviceIdentityMigration) prepareReplacementServiceIdentityUnit(ctx context.Context) error {
 	if m.req.ReplacementUnit == "" && !m.deferredReplacementUnit {
 		replacementUnit, err := m.replacementUnit()
 		if err != nil {
@@ -505,6 +513,74 @@ func (m *serviceIdentityMigration) prepareReplacementServiceIdentityUnit() error
 		}
 		m.req.ReplacementUnit = replacementUnit
 	}
+	if !m.shouldPrepareServiceIdentitySandboxReplacement() {
+		return nil
+	}
+	return m.prepareServiceIdentitySandboxReplacement(ctx)
+}
+
+func (m *serviceIdentityMigration) shouldPrepareServiceIdentitySandboxReplacement() bool {
+	return !m.deferredReplacementUnit && m.req.ReplacementUnit != "" && !m.req.PreserveTargetServiceIdentity &&
+		!m.req.SandboxPreflightComplete && m.req.StageGeneration == nil && m.req.TargetService == nil &&
+		m.target.Generation == m.previous.Generation
+}
+
+func (m *serviceIdentityMigration) prepareServiceIdentitySandboxReplacement(ctx context.Context) error {
+	currentPolicy, err := serviceSandboxPolicyForExactGeneration(m.previous, m.previous.Generation)
+	if err != nil {
+		return fmt.Errorf("load current sandbox policy for identity migration: %w", err)
+	}
+	targetPolicy, err := serviceSandboxPolicyForExactGeneration(m.target, m.target.Generation)
+	if err != nil {
+		return fmt.Errorf("load target sandbox policy for identity migration: %w", err)
+	}
+	if targetPolicy.State != "on" {
+		return nil
+	}
+	return m.prepareActiveServiceIdentitySandboxReplacement(ctx, currentPolicy, targetPolicy)
+}
+
+func (m *serviceIdentityMigration) prepareActiveServiceIdentitySandboxReplacement(
+	ctx context.Context,
+	currentPolicy, targetPolicy serviceSandboxPolicy,
+) error {
+	payload, ok := m.target.Artifacts.Gen(db.ArtifactBinary, m.target.Generation)
+	if !ok || strings.TrimSpace(payload) == "" {
+		return fmt.Errorf("target native service %q generation %d has no binary artifact", m.req.Service, m.target.Generation)
+	}
+	resolver := serviceSandboxMutationResolver(m.target.View())
+	request := serviceSandboxPlanRequest{
+		Service: m.req.Service, Policy: targetPolicy, Payload: payload,
+		DataDir: serviceDataDirForRoot(m.result.Root), ResolverSource: resolver,
+		UID: m.req.Target.Persisted.UID, GID: m.req.Target.Persisted.GID, Hostname: m.req.Service,
+	}
+	validatedPolicy, plan, err := prepareServiceSandboxMutationTarget(ctx, m.req.Service, request, true)
+	if err != nil {
+		return fmt.Errorf("preflight identity sandbox target: %w", err)
+	}
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return err
+	}
+	rendered, renderedPlan, err := renderNativeSandboxUnitWithPlan(m.req.ReplacementUnit, nativeSandboxUnitRequest{
+		CurrentPolicy: currentPolicy, TargetPolicy: validatedPolicy, Identity: m.req.Target.Persisted,
+		Payload: payload, DataDir: request.DataDir, Resolver: resolver, Hostname: m.req.Service,
+	}, plan)
+	if err != nil {
+		return fmt.Errorf("render identity sandbox target: %w", err)
+	}
+	if renderedPlan == nil {
+		return errors.New("identity sandbox target render returned no probe plan")
+	}
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return err
+	}
+	if err := probeServiceSandboxForMutation(ctx, *renderedPlan, m.req.Target.Persisted.UID, m.req.Target.Persisted.GID); err != nil {
+		return fmt.Errorf("probe identity sandbox target: %w", err)
+	}
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return err
+	}
+	m.req.ReplacementUnit = rendered
 	return nil
 }
 
@@ -577,10 +653,30 @@ func (m *serviceIdentityMigration) prepareServiceIdentityRuntime(ctx context.Con
 	if err != nil {
 		return false, err
 	}
+	if err := m.preflightRootSandboxActivation(ctx, m.target, "target"); err != nil {
+		return false, err
+	}
 	if err := m.backupServiceIdentityRuntime(); err != nil {
 		return false, err
 	}
 	return snapshotted, nil
+}
+
+func (m *serviceIdentityMigration) preflightRootSandboxActivation(ctx context.Context, service *db.Service, record string) error {
+	if m.req.RootPlan == nil {
+		return nil
+	}
+	policy, err := serviceSandboxPolicyForExactGeneration(service, service.Generation)
+	if err != nil {
+		return fmt.Errorf("load exact %s sandbox policy before root migration: %w", record, err)
+	}
+	if policy.State != "on" {
+		return nil
+	}
+	if err := m.server.preflightSandboxGenerationActivation(ctx, service, service.Generation); err != nil {
+		return fmt.Errorf("preflight exact %s sandbox generation before root migration: %w", record, err)
+	}
+	return nil
 }
 
 func (m *serviceIdentityMigration) activateServiceIdentityGeneration(ctx context.Context) error {
@@ -1126,6 +1222,7 @@ func (m *serviceIdentityMigration) finalizeServiceIdentityJournal() error {
 		return err
 	}
 	m.completed = true
+	m.result.Committed = true
 	if err := m.journal.Close(); err != nil {
 		return fmt.Errorf("%s: close journal: %w", serviceIdentityPhaseComplete, err)
 	}
@@ -2311,12 +2408,7 @@ func (m *serviceIdentityMigration) verifyRolledBackServiceIdentityRuntime(ctx co
 
 func (m *serviceIdentityMigration) migrationError(cause, rollbackErr error) error {
 	root := serviceRootFromConfig(m.server.cfg, *m.previous)
-	err := fmt.Errorf(
-		"service identity migration for native systemd service %q failed in %v (%s -> %s, root %s, dataset %q); journal: %s; snapshot: %s; retry: %s: %w",
-		m.req.Service, phaseFromMigrationError(cause), formatServiceIdentity(m.result.Previous.Persisted),
-		formatServiceIdentity(m.req.Target.Persisted), root, m.previous.ServiceRootZFS,
-		m.journalPath, m.result.ZFSSnapshot, m.retryCommand(), cause,
-	)
+	err := m.migrationFailure(cause, root)
 	if phaseFromMigrationError(cause) == serviceIdentityPhaseStart && m.req.Target.Persisted.UID != 0 {
 		if diagnostic := m.startFailureDiagnostic(); diagnostic != "" {
 			err = fmt.Errorf("%w\n%s", err, diagnostic)
@@ -2325,7 +2417,54 @@ func (m *serviceIdentityMigration) migrationError(cause, rollbackErr error) erro
 	if rollbackErr != nil {
 		return errors.Join(err, fmt.Errorf("rollback incomplete; old unit/ownership/running state may require repair and the journal was retained: %w", rollbackErr))
 	}
+	if m.req.PreserveTargetServiceIdentity {
+		return fmt.Errorf("%w; rollback restored the old unit, generation artifacts, database record, and runtime state", err)
+	}
 	return fmt.Errorf("%w; rollback restored the old unit, ownership, database identity, root, and running state", err)
+}
+
+func (m *serviceIdentityMigration) committedMigrationError(cause error) error {
+	if !m.req.PreserveTargetServiceIdentity {
+		return fmt.Errorf(
+			"service identity migration for %q committed as %s; post-commit cleanup failed and will be retried from %s: %w",
+			m.req.Service, formatServiceIdentity(m.req.Target.Persisted), m.journalPath, cause,
+		)
+	}
+	return fmt.Errorf(
+		"%s for %q committed generation %d; post-commit cleanup failed and will be retried from %s: %w",
+		m.generationMutationName(), m.req.Service, m.target.Generation, m.journalPath, cause,
+	)
+}
+
+func (m *serviceIdentityMigration) migrationFailure(cause error, root string) error {
+	if !m.req.PreserveTargetServiceIdentity {
+		return fmt.Errorf(
+			"service identity migration for native systemd service %q failed in %v (%s -> %s, root %s, dataset %q); journal: %s; snapshot: %s; retry: %s: %w",
+			m.req.Service, phaseFromMigrationError(cause), formatServiceIdentity(m.result.Previous.Persisted),
+			formatServiceIdentity(m.req.Target.Persisted), root, m.previous.ServiceRootZFS,
+			m.journalPath, m.result.ZFSSnapshot, m.retryCommand(), cause,
+		)
+	}
+	return fmt.Errorf(
+		"%s for native systemd service %q failed in %v (generation %d -> %d, root %s, dataset %q); journal: %s; snapshot: %s; retry: %s: %w",
+		m.generationMutationName(), m.req.Service, phaseFromMigrationError(cause), m.previous.Generation,
+		m.target.Generation, root, m.previous.ServiceRootZFS, m.journalPath, m.result.ZFSSnapshot,
+		m.generationRetryGuidance(), cause,
+	)
+}
+
+func (m *serviceIdentityMigration) generationMutationName() string {
+	if mutation := strings.TrimSpace(m.req.GenerationDiagnostic.Mutation); mutation != "" {
+		return mutation
+	}
+	return "service generation mutation"
+}
+
+func (m *serviceIdentityMigration) generationRetryGuidance() string {
+	if retry := strings.TrimSpace(m.req.GenerationDiagnostic.Retry); retry != "" {
+		return retry
+	}
+	return "retry the original generation-changing service command"
 }
 
 func (m *serviceIdentityMigration) startFailureDiagnostic() string {
@@ -3835,15 +3974,19 @@ func rewriteServiceIdentityUnit(raw string, identity db.ServiceIdentity, root st
 	if strings.TrimSpace(raw) == "" {
 		return "", fmt.Errorf("installed primary unit is empty")
 	}
+	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
+	workingDirectory := serviceDataDirForRoot(root)
+	if recognizedHome, currentWorkingDirectory := serviceIdentityUnitManagedLayout(lines); recognizedHome && currentWorkingDirectory == "/" {
+		workingDirectory = "/"
+	}
 	rewriter := serviceIdentityUnitRewriter{
 		updates: map[string]string{
 			"User": identity.RequestedUser, "Group": identity.RequestedGroup,
-			"WorkingDirectory": serviceDataDirForRoot(root),
+			"WorkingDirectory": workingDirectory,
 		},
 		seen:        map[string]bool{},
 		environment: nativeSystemdIdentityEnvironment(identity.RequestedUser, serviceDataDirForRoot(root)),
 	}
-	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
 	rewriter.out = make([]string, 0, len(lines)+4)
 	for _, line := range lines {
 		rewriter.appendLine(line)
@@ -3855,6 +3998,29 @@ func rewriteServiceIdentityUnit(raw string, identity db.ServiceIdentity, root st
 		rewriter.flush()
 	}
 	return strings.Join(rewriter.out, "\n") + "\n", nil
+}
+
+func serviceIdentityUnitManagedLayout(lines []string) (bool, string) {
+	inService := false
+	recognizedHome := false
+	workingDirectory := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inService = trimmed == "[Service]"
+			continue
+		}
+		if !inService {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "WorkingDirectory=") {
+			workingDirectory = strings.TrimSpace(strings.TrimPrefix(trimmed, "WorkingDirectory="))
+		}
+		if isNativeSystemdIdentityEnvironment(trimmed) {
+			recognizedHome = true
+		}
+	}
+	return recognizedHome, workingDirectory
 }
 
 type serviceIdentityUnitRewriter struct {
@@ -3918,8 +4084,13 @@ func nativeSystemdIdentityEnvironment(user, workingDirectory string) string {
 }
 
 func isNativeSystemdIdentityEnvironment(line string) bool {
-	return strings.HasPrefix(line, "Environment=HOME=") && strings.Contains(line, " USER=") &&
-		strings.Contains(line, " LOGNAME=") && strings.HasSuffix(line, " SHELL=/bin/sh")
+	if !strings.HasPrefix(line, "Environment=") {
+		return false
+	}
+	assignments := strings.Fields(strings.TrimPrefix(line, "Environment="))
+	return len(assignments) == 4 && strings.HasPrefix(assignments[0], "HOME=") &&
+		strings.HasPrefix(assignments[1], "USER=") && strings.HasPrefix(assignments[2], "LOGNAME=") &&
+		assignments[3] == "SHELL=/bin/sh"
 }
 
 func serviceIdentityUnitDirectives(raw string) map[string]string {

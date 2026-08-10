@@ -363,6 +363,85 @@ func TestCommitGenAppliesServiceArtifactsAndOwnImagesOnly(t *testing.T) {
 	}
 }
 
+func TestCommitGeneratedServiceRefsPromotesStagedSandboxPolicy(t *testing.T) {
+	service := &db.Service{
+		Name:             "api",
+		LatestGeneration: 2,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			"staged": {
+				State:    "on",
+				ReadOnly: []db.ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}},
+				Writable: []db.ServiceSandboxExposure{{Source: "/srv/api/data", Destination: "/var/lib/api"}},
+			},
+		}},
+	}
+
+	commitGeneratedServiceRefs(nil, service, "api", generatedServiceCommitForGen(0, service.LatestGeneration))
+
+	for _, ref := range []db.ArtifactRef{"latest", db.Gen(3)} {
+		policy, ok := service.Sandbox.Refs[ref]
+		if !ok || policy.State != "on" || !reflect.DeepEqual(policy.ReadOnly, []db.ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}}) {
+			t.Fatalf("sandbox %s = %#v, %t; want staged policy", ref, policy, ok)
+		}
+	}
+	staged := service.Sandbox.Refs["staged"]
+	latest := service.Sandbox.Refs["latest"]
+	gen3 := service.Sandbox.Refs[db.Gen(3)]
+	if staged == latest || staged == gen3 || latest == gen3 {
+		t.Fatalf("sandbox policies alias after staged commit: staged=%p latest=%p gen-3=%p", staged, latest, gen3)
+	}
+
+	staged.State = "off"
+	if latest.State != "on" || gen3.State != "on" {
+		t.Fatalf("destination states = %q/%q after staged mutation, want on/on", latest.State, gen3.State)
+	}
+	latest.ReadOnly[0].Destination = "/latest-only"
+	if staged.ReadOnly[0].Destination != "/etc/ssl" || gen3.ReadOnly[0].Destination != "/etc/ssl" {
+		t.Fatalf("source/other destination = %q/%q after latest mutation, want /etc/ssl", staged.ReadOnly[0].Destination, gen3.ReadOnly[0].Destination)
+	}
+	gen3.Writable[0].Source = "/gen-3-only"
+	if staged.Writable[0].Source != "/srv/api/data" || latest.Writable[0].Source != "/srv/api/data" {
+		t.Fatalf("source/other writable sources = %q/%q after gen-3 mutation, want /srv/api/data", staged.Writable[0].Source, latest.Writable[0].Source)
+	}
+}
+
+func TestCommitGeneratedServiceRefsRollsBackSandboxPolicyToLatest(t *testing.T) {
+	service := &db.Service{
+		Name:             "api",
+		LatestGeneration: 9,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(7): {
+				State:    "off",
+				ReadOnly: []db.ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}},
+				Writable: []db.ServiceSandboxExposure{{Source: "/srv/api/data", Destination: "/var/lib/api"}},
+			},
+			"latest": {State: "on"},
+		}},
+	}
+
+	commitGeneratedServiceRefs(nil, service, "api", generatedServiceCommitForGen(7, service.LatestGeneration))
+
+	if policy := service.Sandbox.Refs["latest"]; policy == nil || policy.State != "off" {
+		t.Fatalf("latest sandbox policy = %#v, want gen-7 off policy", policy)
+	}
+	if policy := service.Sandbox.Refs[db.Gen(7)]; policy == nil || policy.State != "off" {
+		t.Fatalf("gen-7 sandbox policy = %#v, want preserved off policy", policy)
+	}
+	gen7 := service.Sandbox.Refs[db.Gen(7)]
+	latest := service.Sandbox.Refs["latest"]
+	if gen7 == latest {
+		t.Fatalf("sandbox policies alias after rollback: gen-7=%p latest=%p", gen7, latest)
+	}
+	gen7.ReadOnly[0].Destination = "/gen-7-only"
+	if latest.ReadOnly[0].Destination != "/etc/ssl" {
+		t.Fatalf("latest read-only destination = %q after gen-7 mutation, want /etc/ssl", latest.ReadOnly[0].Destination)
+	}
+	latest.Writable[0].Source = "/latest-only"
+	if gen7.Writable[0].Source != "/srv/api/data" {
+		t.Fatalf("gen-7 writable source = %q after latest mutation, want /srv/api/data", gen7.Writable[0].Source)
+	}
+}
+
 func TestPruneServiceArtifactsRemovesOldGenerationsAndTracksKnownFiles(t *testing.T) {
 	known := defaultKnownInstallFiles("api")
 	service := &db.Service{
@@ -399,6 +478,31 @@ func TestPruneServiceArtifactsRemovesOldGenerationsAndTracksKnownFiles(t *testin
 	}
 	if known.Contains("api-4") {
 		t.Fatalf("known files kept pruned generation file api-4: %#v", known)
+	}
+}
+
+func TestPruneServiceArtifactsRemovesOldSandboxPolicies(t *testing.T) {
+	service := &db.Service{
+		Name:             "api",
+		LatestGeneration: 15,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			"latest":   {State: "on"},
+			"staged":   {State: "off"},
+			db.Gen(4):  {State: "off"},
+			db.Gen(5):  {State: "on"},
+			db.Gen(15): {State: "on"},
+		}},
+	}
+
+	pruneServiceArtifacts(service, defaultKnownInstallFiles("api"))
+
+	if _, ok := service.Sandbox.Refs[db.Gen(4)]; ok {
+		t.Fatalf("gen-4 sandbox policy was kept, want pruned: %#v", service.Sandbox.Refs)
+	}
+	for _, ref := range []db.ArtifactRef{"latest", "staged", db.Gen(5), db.Gen(15)} {
+		if _, ok := service.Sandbox.Refs[ref]; !ok {
+			t.Fatalf("sandbox policy %s was pruned, want kept: %#v", ref, service.Sandbox.Refs)
+		}
 	}
 }
 

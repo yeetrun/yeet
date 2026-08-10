@@ -73,6 +73,9 @@ var (
 	updateServiceScheduleLockedForServiceSet = func(ctx context.Context, e *ttyExecer, cron string) error {
 		return e.s.updateServiceScheduleLocked(ctx, e.sn, cron, e.rw)
 	}
+	updateServiceSandboxLockedForServiceSet = func(ctx context.Context, s *Server, name string, options cli.SandboxOptions, out io.Writer) error {
+		return s.updateServiceSandboxLocked(ctx, name, options, out)
+	}
 )
 
 func (e *ttyExecer) serviceCmdFunc(args []string) error {
@@ -138,13 +141,16 @@ func hasServiceCommandArg(args []string) bool {
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	changes := serviceSetChangesFromFlags(flags)
 	if !changes.any() {
-		return fmt.Errorf("service set requires --cron, --run-as, network settings, --service-root, snapshot settings, or published ports")
+		return fmt.Errorf("service set requires --cron, --run-as, sandbox settings, network settings, --service-root, snapshot settings, or published ports")
 	}
 	if err := validateServiceSetMutationCombination(flags, changes); err != nil {
 		return err
 	}
 	if err := validateServiceSetSnapshotChange(flags, changes); err != nil {
 		return err
+	}
+	if changes.sandbox {
+		return e.applyServiceSetSandboxChange(flags)
 	}
 	if changes.schedule {
 		return e.applyServiceSetScheduleChange(flags, changes)
@@ -153,6 +159,16 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 		return e.applyServiceSetNetworkChange(flags)
 	}
 	return e.applyServiceSetNonNetworkChanges(flags, changes)
+}
+
+func (e *ttyExecer) applyServiceSetSandboxChange(flags cli.ServiceSetFlags) error {
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return e.withLockedServiceMutation(func() error {
+		return updateServiceSandboxLockedForServiceSet(ctx, e.s, e.sn, flags.Sandbox, e.rw)
+	})
 }
 
 func (e *ttyExecer) applyServiceSetScheduleChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
@@ -200,6 +216,9 @@ func (e *ttyExecer) applyServiceSetNonNetworkChanges(flags cli.ServiceSetFlags, 
 }
 
 func validateServiceSetMutationCombination(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if err := validateServiceSetSandboxCombination(changes); err != nil {
+		return err
+	}
 	if err := validateServiceSetScheduleCombination(flags, changes); err != nil {
 		return err
 	}
@@ -207,6 +226,15 @@ func validateServiceSetMutationCombination(flags cli.ServiceSetFlags, changes se
 		return err
 	}
 	return validateServiceSetIdentityCombination(flags, changes)
+}
+
+func validateServiceSetSandboxCombination(changes serviceSetChanges) error {
+	other := changes
+	other.sandbox = false
+	if changes.sandbox && other.any() {
+		return fmt.Errorf("sandbox changes cannot be combined with other service settings; apply them with separate service set commands")
+	}
+	return nil
 }
 
 func validateServiceSetScheduleCombination(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
@@ -237,6 +265,7 @@ func validateServiceSetIdentityCombination(flags cli.ServiceSetFlags, changes se
 
 type serviceSetChanges struct {
 	schedule bool
+	sandbox  bool
 	identity bool
 	network  bool
 	root     bool
@@ -247,6 +276,7 @@ type serviceSetChanges struct {
 func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 	return serviceSetChanges{
 		schedule: flags.CronSet,
+		sandbox:  flags.Sandbox.HasChange(),
 		identity: flags.RunAsSet,
 		network:  flags.HasNetworkChange(),
 		root:     strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS,
@@ -256,7 +286,7 @@ func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 }
 
 func (c serviceSetChanges) any() bool {
-	return c.schedule || c.identity || c.network || c.root || c.publish || c.snapshot
+	return c.schedule || c.sandbox || c.identity || c.network || c.root || c.publish || c.snapshot
 }
 
 func (e *ttyExecer) validateServiceSetIdentityType() error {

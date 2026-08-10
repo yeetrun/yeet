@@ -122,6 +122,35 @@ func TestServiceSetCronDispatchHoldsServiceOperationLock(t *testing.T) {
 	}
 }
 
+func TestServiceSetSandboxDispatchHoldsServiceOperationLock(t *testing.T) {
+	oldUpdate := updateServiceSandboxLockedForServiceSet
+	t.Cleanup(func() { updateServiceSandboxLockedForServiceSet = oldUpdate })
+
+	called := false
+	server := newTestServer(t)
+	execer := &ttyExecer{s: server, sn: "reports", rw: &bytes.Buffer{}}
+	updateServiceSandboxLockedForServiceSet = func(_ context.Context, got *Server, name string, options cli.SandboxOptions, out io.Writer) error {
+		called = true
+		if got != server || name != "reports" || out != execer.rw {
+			t.Fatalf("sandbox callback = (%p, %q, %p), want (%p, %q, %p)", got, name, out, server, "reports", execer.rw)
+		}
+		if !execer.serviceOperationLockHeld {
+			t.Fatal("sandbox callback ran without the service operation lock")
+		}
+		if options.State != "on" || !options.StateSet {
+			t.Fatalf("sandbox options = %#v, want explicit on", options)
+		}
+		return nil
+	}
+
+	if err := execer.dispatch([]string{"service", "set", "--sandbox=on"}); err != nil {
+		t.Fatalf("dispatch service set sandbox: %v", err)
+	}
+	if !called {
+		t.Fatal("sandbox callback was not called")
+	}
+}
+
 func TestServiceSetCronRejectsOtherMutationsCatchSide(t *testing.T) {
 	oldUpdate := updateServiceScheduleLockedForServiceSet
 	t.Cleanup(func() { updateServiceScheduleLockedForServiceSet = oldUpdate })
@@ -1133,6 +1162,145 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 	assertFileContents(t, filepath.Join(newRoot, "data", "payload.txt"), "payload")
 	assertServiceLayout(t, newRoot)
 	assertNoServiceSetStages(t, filepath.Dir(newRoot))
+}
+
+func TestPlannedServiceForRootMigrationRelocatesSandboxExposurePathsWithoutAliasing(t *testing.T) {
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	insideConfig := filepath.Join(oldRoot, "data", "config")
+	insideCache := filepath.Join(oldRoot, "data", "cache")
+	oldish := oldRoot + "ish/input"
+	external := "/opt/shared/input"
+	externalDestination := filepath.Join(oldRoot, "operator-target")
+	policy := func() *db.ServiceSandboxPolicy {
+		return &db.ServiceSandboxPolicy{
+			State: "on",
+			ReadOnly: []db.ServiceSandboxExposure{
+				{Source: insideConfig, Destination: "/config"},
+				{Source: oldish, Destination: oldish},
+				{Source: external, Destination: externalDestination},
+			},
+			Writable: []db.ServiceSandboxExposure{{Source: insideCache, Destination: insideCache}},
+		}
+	}
+	previous := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: oldRoot, Generation: 7,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(7): policy(), "latest": policy(), "staged": policy(),
+		}},
+	}
+	target, err := plannedServiceForRootMigration(Config{}, serviceRootMigrationPlan{
+		ServiceName: previous.Name, OldRoot: oldRoot, NewRoot: newRoot, Mode: serviceRootMigrationCopy,
+	}, previous)
+	if err != nil {
+		t.Fatalf("plan service root migration: %v", err)
+	}
+	for ref, got := range target.Sandbox.Refs {
+		if got.ReadOnly[0] != (db.ServiceSandboxExposure{Source: filepath.Join(newRoot, "data", "config"), Destination: "/config"}) {
+			t.Fatalf("%s custom-destination exposure = %#v", ref, got.ReadOnly[0])
+		}
+		if got.Writable[0] != (db.ServiceSandboxExposure{Source: filepath.Join(newRoot, "data", "cache"), Destination: filepath.Join(newRoot, "data", "cache")}) {
+			t.Fatalf("%s same-path exposure = %#v", ref, got.Writable[0])
+		}
+		if got.ReadOnly[1] != (db.ServiceSandboxExposure{Source: oldish, Destination: oldish}) {
+			t.Fatalf("%s old-root prefix collision changed: %#v", ref, got.ReadOnly[1])
+		}
+		if got.ReadOnly[2] != (db.ServiceSandboxExposure{Source: external, Destination: externalDestination}) {
+			t.Fatalf("%s external exposure changed: %#v", ref, got.ReadOnly[2])
+		}
+	}
+	target.Sandbox.Refs[db.Gen(7)].ReadOnly[0].Source = "/mutated"
+	if previous.Sandbox.Refs[db.Gen(7)].ReadOnly[0].Source != insideConfig {
+		t.Fatal("target sandbox exposure aliases the previous service")
+	}
+	if target.Sandbox.Refs[db.ArtifactRef("latest")].ReadOnly[0].Source != filepath.Join(newRoot, "data", "config") {
+		t.Fatal("exact-generation sandbox exposure aliases latest")
+	}
+}
+
+func TestRewriteCopiedServiceRootSandboxUnitRelocatesManagedPathsOnly(t *testing.T) {
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	unitPath := filepath.Join(serviceBinDirForRoot(newRoot), "api.service")
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPayload := filepath.Join(serviceRunDirForRoot(oldRoot), "api")
+	oldData := serviceDataDirForRoot(oldRoot)
+	oldResolver := filepath.Join(serviceBinDirForRoot(oldRoot), "resolv.conf")
+	oldExposure := filepath.Join(oldRoot, "shared", "config")
+	oldish := oldRoot + "ish/shared"
+	external := "/opt/shared/config"
+	raw := "[Service]\nExecStart=" + bubblewrapPath +
+		" --ro-bind " + oldResolver + " /etc/resolv.conf" +
+		" --ro-bind " + oldPayload + " " + oldPayload +
+		" --bind " + oldData + " " + oldData +
+		" --ro-bind " + oldExposure + " " + oldExposure +
+		" --ro-bind " + oldish + " " + oldish +
+		" --ro-bind " + external + " /config" +
+		" --chdir " + oldData + " -- " + oldPayload + " --serve\n" +
+		"WorkingDirectory=/\nEnvironment=HOME=" + oldData + " USER=1000 LOGNAME=1000 SHELL=/bin/sh\n"
+	if err := os.WriteFile(unitPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rewriteCopiedServiceRootArtifact(db.ArtifactSystemdUnit, unitPath, oldRoot, newRoot); err != nil {
+		t.Fatalf("rewrite copied sandbox unit: %v", err)
+	}
+	rewrittenRaw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := string(rewrittenRaw)
+	for _, want := range []string{
+		filepath.Join(serviceRunDirForRoot(newRoot), "api"),
+		serviceDataDirForRoot(newRoot),
+		filepath.Join(serviceBinDirForRoot(newRoot), "resolv.conf"),
+		filepath.Join(newRoot, "shared", "config"),
+		oldish,
+		external,
+		"Environment=HOME=" + serviceDataDirForRoot(newRoot),
+	} {
+		if !strings.Contains(rewritten, want) {
+			t.Fatalf("rewritten sandbox unit missing %q:\n%s", want, rewritten)
+		}
+	}
+	if strings.Contains(rewritten, oldPayload) || strings.Contains(rewritten, "Environment=HOME="+oldData) {
+		t.Fatalf("rewritten sandbox unit retained managed old-root paths:\n%s", rewritten)
+	}
+	argv := serviceIdentityExecStartArgv(t, rewritten)
+	separator := 0
+	for _, arg := range argv {
+		if arg == "--" {
+			separator++
+		}
+	}
+	if separator != 1 || len(argv) < 2 || argv[len(argv)-2] != filepath.Join(serviceRunDirForRoot(newRoot), "api") || argv[len(argv)-1] != "--serve" {
+		t.Fatalf("rewritten sandbox argv = %#v, want one separator and exact payload argv", argv)
+	}
+}
+
+func TestRewriteCopiedServiceRootArtifactsRecognizesResolverArtifact(t *testing.T) {
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	resolver := filepath.Join(serviceBinDirForRoot(newRoot), "resolv.conf")
+	if err := os.MkdirAll(filepath.Dir(resolver), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldData := serviceDataDirForRoot(oldRoot)
+	if err := os.WriteFile(resolver, []byte("# managed data "+oldData+"\nnameserver 127.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := db.ArtifactStore{db.ArtifactNetNSResolv: {Refs: map[db.ArtifactRef]string{db.Gen(3): resolver}}}
+	if err := rewriteCopiedServiceRootArtifacts(artifacts, oldRoot, newRoot); err != nil {
+		t.Fatalf("rewrite copied resolver artifact: %v", err)
+	}
+	raw, err := os.ReadFile(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), oldData) || !strings.Contains(string(raw), serviceDataDirForRoot(newRoot)) {
+		t.Fatalf("rewritten resolver artifact = %q, want relocated managed data path", raw)
+	}
 }
 
 func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {

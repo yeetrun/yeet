@@ -48,6 +48,7 @@ type FileInstallerCfg struct {
 	EnvFile  bool
 	RunAs    string
 	RunAsSet bool
+	Sandbox  cli.SandboxOptions
 
 	Args                 []string
 	Network              NetworkOpts
@@ -91,26 +92,36 @@ type FileInstaller struct {
 	cfg FileInstallerCfg
 	ch  chan struct{}
 
-	existingService             db.ServiceView
-	persistInitialNetwork       bool
-	resolvedIdentity            resolvedServiceIdentity
-	installedGeneration         int
-	readInstalledGeneration     func() (int, error)
-	installGenerationIfCurrent  func(*Installer, int, int) error
-	completeNativeISOInstall    func(context.Context, *db.Service) error
-	ensureManagedServiceAccount func() (resolvedServiceIdentity, error)
-	identityMigrationNeeded     bool
-	newNativeIdentity           bool
-	nativePredecessorAbsent     bool
-	migrateServiceIdentityFunc  func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
-	svcNet                      *db.SvcNetwork
-	macvlan                     *db.MacvlanNetwork
-	tsNet                       *db.TailscaleNetwork
-	isoAllocation               *db.ISOAllocation
-	tsAuthKey                   string
-	artifacts                   map[db.ArtifactName]string
-	networkArtifactTxn          *regularNetworkArtifactTransaction
-	lazyNetwork                 lazy.GValue[*networkConfig]
+	existingService                  db.ServiceView
+	persistInitialNetwork            bool
+	resolvedIdentity                 resolvedServiceIdentity
+	resolvedSandbox                  serviceSandboxPolicy
+	resolvedSandboxPresent           bool
+	unitSandboxCurrent               serviceSandboxPolicy
+	sandboxResolver                  string
+	ensureBubblewrapFunc             func(context.Context) error
+	validateServiceSandboxPolicyFunc func(serviceSandboxPlanRequest, bool) (serviceSandboxPolicy, error)
+	renderNativeSandboxUnitFunc      func(string, nativeSandboxUnitRequest, *serviceSandboxPlan) (string, *serviceSandboxPlan, error)
+	probeServiceSandboxFunc          func(context.Context, serviceSandboxPlan, uint32, uint32) error
+	verifyGeneratedSystemdUnitFunc   func(context.Context, string) error
+	installedGeneration              int
+	readInstalledGeneration          func() (int, error)
+	installGenerationIfCurrent       func(*Installer, int, int) error
+	completeNativeISOInstall         func(context.Context, *db.Service) error
+	ensureManagedServiceAccount      func() (resolvedServiceIdentity, error)
+	identityMigrationNeeded          bool
+	newNativeIdentity                bool
+	nativePredecessorAbsent          bool
+	migrateServiceIdentityFunc       func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
+	svcNet                           *db.SvcNetwork
+	macvlan                          *db.MacvlanNetwork
+	tsNet                            *db.TailscaleNetwork
+	isoAllocation                    *db.ISOAllocation
+	tsAuthKey                        string
+	artifacts                        map[db.ArtifactName]string
+	installedEnvArtifact             serviceIdentityPathProof
+	networkArtifactTxn               *regularNetworkArtifactTransaction
+	lazyNetwork                      lazy.GValue[*networkConfig]
 
 	File     *os.File
 	received atomic.Int64
@@ -445,12 +456,8 @@ func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ 
 			releaseServiceLock()
 		}
 	}()
-	existingService := First(s.serviceView(cfg.ServiceName))
-	resolvedRoot, rootExisted, err := s.prepareFileInstallerRoot(cfg)
+	existingService, resolvedRoot, rootExisted, err := prepareNewFileInstaller(s, cfg)
 	if err != nil {
-		return nil, err
-	}
-	if err := validateExistingRunNetwork(cfg, existingService); err != nil {
 		return nil, err
 	}
 	cfg.ServiceRoot = resolvedRoot.Root
@@ -473,6 +480,40 @@ func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ 
 	return i, nil
 }
 
+func prepareNewFileInstaller(s *Server, cfg FileInstallerCfg) (db.ServiceView, resolvedServiceRoot, bool, error) {
+	existing := First(s.serviceView(cfg.ServiceName))
+	if err := validateFileInstallerSandboxCarrier(cfg, existing); err != nil {
+		return db.ServiceView{}, resolvedServiceRoot{}, false, err
+	}
+	if err := validateExistingRunSandbox(cfg, existing); err != nil {
+		return db.ServiceView{}, resolvedServiceRoot{}, false, err
+	}
+	root, existed, err := s.prepareFileInstallerRoot(cfg)
+	if err != nil {
+		return db.ServiceView{}, resolvedServiceRoot{}, false, err
+	}
+	if err := validateExistingRunNetwork(cfg, existing); err != nil {
+		return db.ServiceView{}, resolvedServiceRoot{}, false, err
+	}
+	return existing, root, existed, nil
+}
+
+func validateFileInstallerSandboxCarrier(cfg FileInstallerCfg, existing db.ServiceView) error {
+	if !cfg.Sandbox.HasChange() {
+		return nil
+	}
+	if cfg.EnvFile {
+		return errors.New(sandboxNativePayloadOnlyMessage)
+	}
+	if !cfg.NoBinary {
+		return nil
+	}
+	if existing.Valid() && existing.ServiceType() == db.ServiceTypeSystemd {
+		return nil
+	}
+	return errors.New(sandboxNativePayloadOnlyMessage)
+}
+
 func validateExistingRunNetwork(cfg FileInstallerCfg, existing db.ServiceView) error {
 	if !existing.Valid() || cfg.EnvFile || cfg.ServiceName == CatchService || cfg.ServiceName == SystemService {
 		return nil
@@ -493,6 +534,32 @@ func validateExistingRunNetwork(cfg FileInstallerCfg, existing db.ServiceView) e
 		guidance += "; move the explicit --ts-auth-key to service set"
 	}
 	return errors.New(guidance)
+}
+
+func validateExistingRunSandbox(cfg FileInstallerCfg, existing db.ServiceView) error {
+	if !existing.Valid() || cfg.ServiceName == CatchService || cfg.ServiceName == SystemService {
+		return nil
+	}
+	service := existing.AsStruct()
+	if service.ServiceType != db.ServiceTypeSystemd {
+		return nil
+	}
+	current, err := serviceSandboxPolicyForExactGeneration(service, service.Generation)
+	if err != nil {
+		return fmt.Errorf("load installed sandbox policy: %w", err)
+	}
+	if cfg.EnvFile {
+		return nil
+	}
+	requested, err := applyServiceSandboxPolicyPatch(cfg.ServiceName, current, false, cfg.Sandbox)
+	if err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current, requested) {
+		return nil
+	}
+	guidance := sandboxPatchCommand(cfg.ServiceName, current, requested, cfg.Sandbox, true, false, false)
+	return fmt.Errorf("sandbox changes for existing services require `%s`", guidance)
 }
 
 func desiredNetworkConfigFromOpts(opts NetworkOpts) (db.ServiceNetworkConfig, error) {
@@ -529,7 +596,12 @@ func (s *Server) prepareFileInstallerRoot(cfg FileInstallerCfg) (resolvedService
 func newPreparedFileInstaller(s *Server, cfg FileInstallerCfg, existing db.ServiceView, root resolvedServiceRoot, release func()) *FileInstaller {
 	return &FileInstaller{
 		s: s, cfg: cfg, ch: make(chan struct{}), installGenerationIfCurrent: (*Installer).InstallGenIfCurrent,
-		ensureManagedServiceAccount: EnsureManagedServiceAccount,
+		ensureManagedServiceAccount:      EnsureManagedServiceAccount,
+		ensureBubblewrapFunc:             EnsureBubblewrap,
+		validateServiceSandboxPolicyFunc: validateServiceSandboxPolicy,
+		renderNativeSandboxUnitFunc:      renderNativeSandboxUnitWithPlan,
+		probeServiceSandboxFunc:          probeServiceSandbox,
+		verifyGeneratedSystemdUnitFunc:   verifyGeneratedSystemdUnit,
 		readInstalledGeneration: func() (int, error) {
 			sv, err := s.serviceView(cfg.ServiceName)
 			if err != nil {
@@ -1474,15 +1546,17 @@ func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
 		return false, fmt.Errorf("failed to rewrite systemd unit: %w", err)
 	}
 	mak.Set(&i.artifacts, db.ArtifactSystemdUnit, p)
+	i.unitSandboxCurrent = serviceSandboxPolicy{State: "legacy"}
+	i.sandboxResolver = "/etc/resolv.conf"
 	return true, nil
 }
 
 func (i *FileInstaller) canReuseExistingSystemdUnit() bool {
-	return i.existingService.Valid() && i.cfg.Timer == nil && i.cfg.ServiceName != CatchService && !i.identityMigrationNeeded && !i.newNativeIdentity
+	return i.existingService.Valid() && i.cfg.Timer == nil && i.cfg.ServiceName != CatchService && !i.identityMigrationNeeded && !i.newNativeIdentity && i.resolvedSandbox.State != "on"
 }
 
 func (i *FileInstaller) skipSystemdUnitGeneration() bool {
-	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil && i.cfg.Timer == nil
+	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil && i.cfg.Timer == nil && i.resolvedSandbox.State != "on"
 }
 
 func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
@@ -1502,6 +1576,11 @@ func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 	}
 	if err := i.applyNetworkToSystemdUnit(su); err != nil {
 		return nil, err
+	}
+	i.unitSandboxCurrent = serviceSandboxPolicy{State: "legacy"}
+	i.sandboxResolver = su.ResolvConf
+	if i.sandboxResolver == "" {
+		i.sandboxResolver = "/etc/resolv.conf"
 	}
 	return su, nil
 }
@@ -1569,12 +1648,372 @@ func (i *FileInstaller) installOnClose() error {
 	if err != nil {
 		return err
 	}
-	return i.withRegularServiceNetworkAllocationLock(func() error {
+	ctx := context.Background()
+	if err := i.prepareInactiveNativeUnit(ctx, plan); err != nil {
+		return err
+	}
+	if err := i.preflightNativeSandbox(ctx, plan); err != nil {
+		return err
+	}
+	staged := false
+	err = i.withRegularServiceNetworkAllocationLock(func() error {
 		if err := i.configureAndStageInstall(plan); err != nil {
 			return err
 		}
+		staged = true
+		i.installedEnvArtifact = serviceIdentityPathProof{}
 		return i.installIfRequested()
 	})
+	if err != nil && !staged {
+		return errors.Join(err, i.cleanupInstalledEnvArtifact())
+	}
+	return err
+}
+
+func (i *FileInstaller) preflightNativeSandbox(ctx context.Context, installPlan fileInstallPlan) error {
+	if installPlan.detectedServiceType != db.ServiceTypeSystemd || i.resolvedSandbox.State != "on" {
+		return nil
+	}
+	payload, err := i.nativeInstallPayload()
+	if err != nil {
+		return err
+	}
+	transaction, err := i.beginNativeSandboxISOTransaction()
+	if err != nil {
+		return err
+	}
+	prepared, err := i.prepareActiveNativeSandbox(ctx, payload, transaction)
+	if err != nil {
+		return transaction.rollback(err)
+	}
+	if err := i.renderProbeAndVerifyNativeSandbox(ctx, payload, prepared, transaction); err != nil {
+		return transaction.rollback(err)
+	}
+	transaction.commit()
+	return nil
+}
+
+func (i *FileInstaller) prepareInactiveNativeUnit(ctx context.Context, installPlan fileInstallPlan) error {
+	if installPlan.detectedServiceType != db.ServiceTypeSystemd || i.resolvedSandbox.State == "on" {
+		return nil
+	}
+	payload := i.artifacts[db.ArtifactBinary]
+	if payload == "" {
+		payload, _ = activeGenerationArtifactPath(i.existingService, db.ArtifactBinary)
+	}
+	if payload == "" && networkRequestsISO(i.cfg.Network) {
+		return errors.New("native service preparation requires an immutable payload artifact")
+	}
+	return i.prepareDirectNativeUnit(ctx, payload)
+}
+
+func (i *FileInstaller) nativeInstallPayload() (string, error) {
+	payload := i.artifacts[db.ArtifactBinary]
+	if payload == "" {
+		payload, _ = activeGenerationArtifactPath(i.existingService, db.ArtifactBinary)
+	}
+	if payload == "" {
+		return "", errors.New("native service preparation requires an immutable payload artifact")
+	}
+	return payload, nil
+}
+
+func (i *FileInstaller) prepareDirectNativeUnit(ctx context.Context, payload string) error {
+	if err := i.prepareNativeISOIfNeeded(ctx, nil); err != nil {
+		return err
+	}
+	if err := i.ensureSystemdUnit(payload); err != nil {
+		return fmt.Errorf("prepare direct native systemd unit: %w", err)
+	}
+	return nil
+}
+
+func (i *FileInstaller) prepareNativeISOIfNeeded(ctx context.Context, transaction *nativeSandboxISOTransaction) error {
+	if !networkRequestsISO(i.cfg.Network) || i.isoAllocation != nil {
+		return nil
+	}
+	return i.prepareNativeISO(ctx, transaction)
+}
+
+type nativeSandboxISOTransaction struct {
+	installer                      *FileInstaller
+	previousService                *db.Service
+	reservedService                *db.Service
+	artifacts                      *regularNetworkArtifactTransaction
+	previousAllocation             *db.ISOAllocation
+	previousArtifacts              map[db.ArtifactName]string
+	previousResolvedSandbox        serviceSandboxPolicy
+	previousResolvedSandboxPresent bool
+	previousUnitSandbox            serviceSandboxPolicy
+	previousResolver               string
+}
+
+func (i *FileInstaller) beginNativeSandboxISOTransaction() (*nativeSandboxISOTransaction, error) {
+	if !networkRequestsISO(i.cfg.Network) || i.isoAllocation != nil {
+		return nil, nil
+	}
+	dv, err := i.s.cfg.DB.Get()
+	if err != nil {
+		return nil, fmt.Errorf("capture native ISO sandbox preflight record: %w", err)
+	}
+	previous := dv.AsStruct().Services[i.cfg.ServiceName]
+	artifacts, err := beginRegularNetworkArtifactTransaction(i.serviceRoot, previous)
+	if err != nil {
+		return nil, fmt.Errorf("begin native ISO sandbox artifact transaction: %w", err)
+	}
+	return &nativeSandboxISOTransaction{
+		installer: i, previousService: previous, artifacts: artifacts,
+		previousAllocation: cloneISOAllocation(i.isoAllocation), previousArtifacts: cloneFileInstallerArtifacts(i.artifacts),
+		previousResolvedSandbox: cloneServiceSandboxPolicy(i.resolvedSandbox), previousResolvedSandboxPresent: i.resolvedSandboxPresent,
+		previousUnitSandbox: cloneServiceSandboxPolicy(i.unitSandboxCurrent), previousResolver: i.sandboxResolver,
+	}, nil
+}
+
+func (t *nativeSandboxISOTransaction) reserve(ctx context.Context, request isoReservationRequest) (*db.ISOAllocation, error) {
+	if t == nil {
+		return nil, nil
+	}
+	allocation, reserved, err := t.installer.s.reserveISOAllocationExact(ctx, t.installer.cfg.ServiceName, request)
+	if err != nil {
+		return nil, err
+	}
+	t.reservedService = reserved
+	return allocation, nil
+}
+
+func (t *nativeSandboxISOTransaction) registerCurrentArtifacts() error {
+	if t == nil {
+		return nil
+	}
+	for _, name := range []db.ArtifactName{
+		db.ArtifactSystemdUnit, db.ArtifactSystemdTimerFile, db.ArtifactNetNSService, db.ArtifactNetNSResolv,
+	} {
+		path := t.installer.artifacts[name]
+		if path == "" || path == t.previousArtifacts[name] {
+			continue
+		}
+		if err := t.artifacts.registerStagedPath(path); err != nil {
+			return fmt.Errorf("register %s artifact %s: %w", name, path, err)
+		}
+	}
+	return nil
+}
+
+func (t *nativeSandboxISOTransaction) rollback(cause error) error {
+	if t == nil {
+		return cause
+	}
+	var restoreErr, failClosedErr error
+	if t.reservedService != nil {
+		restoreErr = t.restoreService()
+		if restoreErr != nil {
+			failClosedErr = t.tombstoneCurrentReservation(errors.Join(cause, restoreErr))
+		}
+	}
+	artifactErr := t.artifacts.rollback(t.installer.s)
+	t.restoreInstallerState()
+	return errors.Join(cause, restoreErr, failClosedErr, artifactErr)
+}
+
+func (t *nativeSandboxISOTransaction) restoreService() error {
+	_, err := t.installer.s.cfg.DB.MutateData(func(data *db.Data) error {
+		current := data.Services[t.installer.cfg.ServiceName]
+		if !serviceNetworkRecordsEqual(current, t.reservedService) {
+			return fmt.Errorf("service %q changed while rolling back native ISO sandbox preflight", t.installer.cfg.ServiceName)
+		}
+		if t.previousService == nil {
+			delete(data.Services, t.installer.cfg.ServiceName)
+		} else {
+			data.Services[t.installer.cfg.ServiceName] = t.previousService.Clone()
+		}
+		return nil
+	})
+	return err
+}
+
+func (t *nativeSandboxISOTransaction) tombstoneCurrentReservation(cause error) error {
+	dv, err := t.installer.s.cfg.DB.Get()
+	if err != nil {
+		return fmt.Errorf("load conflicted native ISO sandbox reservation: %w", err)
+	}
+	current := dv.AsStruct().Services[t.installer.cfg.ServiceName]
+	if !nativeSandboxISOReservationOwned(current, t.reservedService) {
+		return fmt.Errorf("service %q no longer contains the attributable native ISO sandbox reservation", t.installer.cfg.ServiceName)
+	}
+	return t.installer.s.markISOStateExact(
+		t.installer.cfg.ServiceName, current, string(iso.StateTombstoned), cause, "failing closed native ISO sandbox preflight",
+	)
+}
+
+func nativeSandboxISOReservationOwned(current, reserved *db.Service) bool {
+	if current == nil || reserved == nil || current.ISO == nil || reserved.ISO == nil {
+		return false
+	}
+	currentISO := current.ISO.Clone()
+	reservedISO := reserved.ISO.Clone()
+	currentISO.State = reservedISO.State
+	currentISO.LastError = reservedISO.LastError
+	return reflect.DeepEqual(currentISO, reservedISO)
+}
+
+func (t *nativeSandboxISOTransaction) restoreInstallerState() {
+	t.installer.isoAllocation = cloneISOAllocation(t.previousAllocation)
+	t.installer.artifacts = cloneFileInstallerArtifacts(t.previousArtifacts)
+	t.installer.resolvedSandbox = cloneServiceSandboxPolicy(t.previousResolvedSandbox)
+	t.installer.resolvedSandboxPresent = t.previousResolvedSandboxPresent
+	t.installer.unitSandboxCurrent = cloneServiceSandboxPolicy(t.previousUnitSandbox)
+	t.installer.sandboxResolver = t.previousResolver
+}
+
+func (t *nativeSandboxISOTransaction) commit() {
+	if t != nil && t.artifacts != nil {
+		t.artifacts.finished = true
+	}
+}
+
+func cloneISOAllocation(allocation *db.ISOAllocation) *db.ISOAllocation {
+	if allocation == nil {
+		return nil
+	}
+	return allocation.Clone()
+}
+
+func cloneFileInstallerArtifacts(artifacts map[db.ArtifactName]string) map[db.ArtifactName]string {
+	if artifacts == nil {
+		return nil
+	}
+	cloned := make(map[db.ArtifactName]string, len(artifacts))
+	for name, path := range artifacts {
+		cloned[name] = path
+	}
+	return cloned
+}
+
+func cloneServiceSandboxPolicy(policy serviceSandboxPolicy) serviceSandboxPolicy {
+	policy.ReadOnly = slices.Clone(policy.ReadOnly)
+	policy.Writable = slices.Clone(policy.Writable)
+	return policy
+}
+
+type preparedNativeSandbox struct {
+	policy   serviceSandboxPolicy
+	identity db.ServiceIdentity
+	resolver string
+	plan     serviceSandboxPlan
+}
+
+func (i *FileInstaller) prepareActiveNativeSandbox(ctx context.Context, payload string, transaction *nativeSandboxISOTransaction) (preparedNativeSandbox, error) {
+	if !i.nativeSandboxPreflightDependenciesReady() {
+		return preparedNativeSandbox{}, errors.New("native sandbox preflight dependencies are incomplete")
+	}
+	if err := i.ensureBubblewrapFunc(ctx); err != nil {
+		return preparedNativeSandbox{}, fmt.Errorf("ensure Bubblewrap: %w", err)
+	}
+	if err := i.prepareNativeISOIfNeeded(ctx, transaction); err != nil {
+		return preparedNativeSandbox{}, err
+	}
+	identity := i.resolvedIdentity.Persisted
+	resolver, err := i.prepareNativeSandboxResolver()
+	if err != nil {
+		return preparedNativeSandbox{}, err
+	}
+	request := i.nativeSandboxPlanRequest(payload, resolver, identity)
+	policy, err := i.validateServiceSandboxPolicyFunc(request, true)
+	if err != nil {
+		return preparedNativeSandbox{}, fmt.Errorf("validate native sandbox policy: %w", err)
+	}
+	i.resolvedSandbox = policy
+	request.Policy = policy
+	if err := i.ensureSystemdUnit(payload); err != nil {
+		return preparedNativeSandbox{}, fmt.Errorf("prepare native sandbox systemd unit: %w", err)
+	}
+	if err := transaction.registerCurrentArtifacts(); err != nil {
+		return preparedNativeSandbox{}, fmt.Errorf("track native ISO sandbox artifacts: %w", err)
+	}
+	plan, err := buildValidatedServiceSandboxPlan(request)
+	if err != nil {
+		return preparedNativeSandbox{}, fmt.Errorf("build validated native sandbox plan: %w", err)
+	}
+	return preparedNativeSandbox{policy: policy, identity: identity, resolver: resolver, plan: plan}, nil
+}
+
+func (i *FileInstaller) nativeSandboxPreflightDependenciesReady() bool {
+	return i.ensureBubblewrapFunc != nil && i.validateServiceSandboxPolicyFunc != nil &&
+		i.renderNativeSandboxUnitFunc != nil && i.probeServiceSandboxFunc != nil && i.verifyGeneratedSystemdUnitFunc != nil
+}
+
+func (i *FileInstaller) nativeSandboxPlanRequest(payload, resolver string, identity db.ServiceIdentity) serviceSandboxPlanRequest {
+	return serviceSandboxPlanRequest{
+		Service: i.cfg.ServiceName, Policy: i.resolvedSandbox, Payload: payload,
+		DataDir: i.serviceDataDir(), ResolverSource: resolver, UID: identity.UID,
+		GID: identity.GID, Hostname: i.cfg.ServiceName,
+	}
+}
+
+func (i *FileInstaller) renderProbeAndVerifyNativeSandbox(ctx context.Context, payload string, prepared preparedNativeSandbox, transaction *nativeSandboxISOTransaction) error {
+	unitPath := i.artifacts[db.ArtifactSystemdUnit]
+	if unitPath == "" {
+		return errors.New("native sandbox preflight requires a staged systemd unit artifact")
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		return fmt.Errorf("read staged native systemd unit: %w", err)
+	}
+	rendered, sandboxPlan, err := i.renderNativeSandboxUnitFunc(string(raw), nativeSandboxUnitRequest{
+		CurrentPolicy: i.unitSandboxCurrent,
+		TargetPolicy:  prepared.policy,
+		Identity:      prepared.identity,
+		Payload:       payload,
+		DataDir:       i.serviceDataDir(),
+		Resolver:      prepared.resolver,
+		Hostname:      i.cfg.ServiceName,
+	}, &prepared.plan)
+	if err != nil {
+		return fmt.Errorf("render native sandbox systemd unit: %w", err)
+	}
+	if sandboxPlan == nil {
+		return errors.New("render native sandbox systemd unit returned no active plan")
+	}
+	if err := os.WriteFile(unitPath, []byte(rendered), 0o644); err != nil {
+		return fmt.Errorf("write staged native sandbox systemd unit: %w", err)
+	}
+	if err := transaction.registerCurrentArtifacts(); err != nil {
+		return fmt.Errorf("track rendered native ISO sandbox artifacts: %w", err)
+	}
+	if err := i.probeServiceSandboxFunc(ctx, *sandboxPlan, prepared.identity.UID, prepared.identity.GID); err != nil {
+		return fmt.Errorf("probe native sandbox: %w", err)
+	}
+	if err := i.verifyGeneratedSystemdUnitFunc(ctx, unitPath); err != nil {
+		return fmt.Errorf("verify native sandbox systemd unit: %w", err)
+	}
+	return nil
+}
+
+func buildValidatedServiceSandboxPlan(request serviceSandboxPlanRequest) (serviceSandboxPlan, error) {
+	deps := defaultServiceSandboxPlanDeps()
+	deps.validation.checkAccess = func(string, []string, uint32, uint32) error { return nil }
+	return buildServiceSandboxPlanWith(request, deps)
+}
+
+func (i *FileInstaller) prepareNativeSandboxResolver() (string, error) {
+	if i.isoAllocation != nil && i.isoAllocation.Kind == string(iso.PayloadNative) {
+		resolver := i.artifacts[db.ArtifactNetNSResolv]
+		if strings.TrimSpace(resolver) == "" {
+			return "", errors.New("native ISO resolver artifact is missing")
+		}
+		i.sandboxResolver = resolver
+		return resolver, nil
+	}
+	network, err := i.configureNetwork()
+	if err != nil {
+		return "", fmt.Errorf("prepare native sandbox network: %w", err)
+	}
+	resolver := "/etc/resolv.conf"
+	if network != nil && strings.TrimSpace(network.ResolvConf) != "" {
+		resolver = network.ResolvConf
+	}
+	i.sandboxResolver = resolver
+	return resolver, nil
 }
 
 func (i *FileInstaller) withRegularServiceNetworkAllocationLock(run func() error) error {
@@ -1856,16 +2295,14 @@ func (i *FileInstaller) prepareNoBinaryNativeService() error {
 	if err := i.resolveNativeInstallIdentity(); err != nil {
 		return err
 	}
-	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
+	if err := i.resolveNativeInstallSandbox(); err != nil {
 		return err
 	}
-	if networkRequestsISO(i.cfg.Network) && i.isoAllocation == nil {
-		if err := i.prepareNativeISO(context.Background()); err != nil {
-			return err
-		}
+	if err := i.preserveExistingNativeSandboxArgs(); err != nil {
+		return err
 	}
-	if err := i.ensureSystemdUnit(); err != nil {
-		return fmt.Errorf("failed to ensure systemd unit: %w", err)
+	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1875,27 +2312,36 @@ func (i *FileInstaller) preparePayloadInstall(bin string) (fileInstallPlan, erro
 	if err != nil {
 		return fileInstallPlan{}, err
 	}
+	if !systemdPayloadType(binFT) && i.cfg.Sandbox.HasChange() {
+		return fileInstallPlan{}, errors.New(sandboxNativePayloadOnlyMessage)
+	}
 	if err := i.resolveScheduledTimer(binFT); err != nil {
 		return fileInstallPlan{}, err
 	}
 	if err := validatePullPayloadType(i.cfg.Pull, binFT); err != nil {
 		return fileInstallPlan{}, err
 	}
-	serviceType, ok := payloadServiceType(binFT)
-	if ok {
-		composePublished := false
-		if networkRequestsISO(i.cfg.Network) {
-			composePublished, err = i.composePayloadPublishesPorts(bin, binFT)
-			if err != nil {
-				return fileInstallPlan{}, err
-			}
-		}
-		published := i.cfg.PublishReset || len(normalizePublish(i.cfg.Publish)) != 0 || composePublished
-		if err := i.normalizeNetworkForServiceType(serviceType, published); err != nil {
-			return fileInstallPlan{}, err
-		}
+	if err := i.preparePayloadNetwork(bin, binFT); err != nil {
+		return fileInstallPlan{}, err
 	}
 	return i.preparePayloadByType(bin, binFT)
+}
+
+func (i *FileInstaller) preparePayloadNetwork(bin string, binFT ftdetect.FileType) error {
+	serviceType, ok := payloadServiceType(binFT)
+	if !ok {
+		return nil
+	}
+	composePublished := false
+	if networkRequestsISO(i.cfg.Network) {
+		var err error
+		composePublished, err = i.composePayloadPublishesPorts(bin, binFT)
+		if err != nil {
+			return err
+		}
+	}
+	published := i.cfg.PublishReset || len(normalizePublish(i.cfg.Publish)) != 0 || composePublished
+	return i.normalizeNetworkForServiceType(serviceType, published)
 }
 
 func (i *FileInstaller) resolveScheduledTimer(binFT ftdetect.FileType) error {
@@ -2105,31 +2551,133 @@ func (i *FileInstaller) prepareSystemdPayload(binFT ftdetect.FileType) (fileInst
 	if err := i.resolveNativeInstallIdentity(); err != nil {
 		return plan, err
 	}
+	if err := i.resolveNativeInstallSandbox(); err != nil {
+		return plan, err
+	}
+	if err := i.preserveExistingNativeSandboxArgs(); err != nil {
+		return plan, err
+	}
 	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
 		return plan, err
 	}
 	mak.Set(&i.artifacts, db.ArtifactBinary, dst)
-	if networkRequestsISO(i.cfg.Network) {
-		if err := i.prepareNativeISO(context.Background()); err != nil {
-			return plan, err
-		}
-	}
-	if err := i.ensureSystemdUnit(dst); err != nil {
-		return plan, fmt.Errorf("failed to ensure systemd unit: %w", err)
-	}
 	return plan, nil
 }
 
-func (i *FileInstaller) prepareNativeISO(ctx context.Context) error {
-	allocation, err := i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, isoReservationRequest{
+func (i *FileInstaller) preserveExistingNativeSandboxArgs() error {
+	if i.cfg.Args != nil || !i.existingService.Valid() {
+		return nil
+	}
+	service := i.existingService.AsStruct()
+	current, err := serviceSandboxPolicyForExactGeneration(service, service.Generation)
+	if err != nil {
+		return fmt.Errorf("load installed sandbox policy before preserving arguments: %w", err)
+	}
+	if current.State != "on" {
+		return nil
+	}
+	payload, ok := activeGenerationArtifactPath(i.existingService, db.ArtifactBinary)
+	if !ok {
+		return errors.New("active sandbox service is missing its binary artifact")
+	}
+	unitPath, ok := activeGenerationArtifactPath(i.existingService, db.ArtifactSystemdUnit)
+	if !ok {
+		return errors.New("active sandbox service is missing its systemd unit artifact")
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		return fmt.Errorf("read active sandbox systemd unit: %w", err)
+	}
+	lines, _ := splitNativeSandboxUnit(string(raw))
+	_, argv, err := nativeSandboxExecStart(lines)
+	if err != nil {
+		return err
+	}
+	payloadArgv, err := nativeSandboxPayloadArgv(argv, nativeSandboxUnitRequest{CurrentPolicy: current, Payload: payload})
+	if err != nil {
+		return err
+	}
+	i.cfg.Args = append([]string(nil), payloadArgv[1:]...)
+	return nil
+}
+
+func (i *FileInstaller) resolveNativeInstallSandbox() error {
+	if i.cfg.ServiceName == CatchService || i.cfg.ServiceName == SystemService {
+		return i.resolveHelperInstallSandbox()
+	}
+	current, fresh, err := i.currentNativeInstallSandbox()
+	if err != nil {
+		return err
+	}
+	target, err := applyServiceSandboxPolicyPatch(i.cfg.ServiceName, current, fresh, i.cfg.Sandbox)
+	if err != nil {
+		return err
+	}
+	if err := i.rejectNativeInstallSandboxDrift(current, target, fresh); err != nil {
+		return err
+	}
+	i.resolvedSandbox = target
+	i.resolvedSandboxPresent = target.State == "on" || target.State == "off"
+	return nil
+}
+
+func (i *FileInstaller) resolveHelperInstallSandbox() error {
+	if i.cfg.Sandbox.HasChange() {
+		return errors.New(sandboxNativePayloadOnlyMessage)
+	}
+	i.resolvedSandbox = serviceSandboxPolicy{State: "legacy"}
+	i.resolvedSandboxPresent = false
+	return nil
+}
+
+func (i *FileInstaller) currentNativeInstallSandbox() (serviceSandboxPolicy, bool, error) {
+	current := serviceSandboxPolicy{State: "legacy"}
+	if !i.existingService.Valid() {
+		return current, true, nil
+	}
+	service := i.existingService.AsStruct()
+	if service.ServiceType != db.ServiceTypeSystemd {
+		return current, true, nil
+	}
+	current, err := serviceSandboxPolicyForExactGeneration(service, service.Generation)
+	if err != nil {
+		return serviceSandboxPolicy{}, false, fmt.Errorf("load installed sandbox policy: %w", err)
+	}
+	return current, false, nil
+}
+
+func (i *FileInstaller) rejectNativeInstallSandboxDrift(current, target serviceSandboxPolicy, fresh bool) error {
+	if fresh {
+		return nil
+	}
+	normalizedCurrent, err := normalizeServiceSandboxPolicy(current)
+	if err != nil {
+		return fmt.Errorf("normalize installed sandbox policy: %w", err)
+	}
+	if reflect.DeepEqual(normalizedCurrent, target) {
+		return nil
+	}
+	guidance := sandboxPatchCommand(i.cfg.ServiceName, normalizedCurrent, target, i.cfg.Sandbox, true, false, false)
+	return fmt.Errorf("sandbox changes for existing services require `%s`", guidance)
+}
+
+func (i *FileInstaller) prepareNativeISO(ctx context.Context, transaction *nativeSandboxISOTransaction) error {
+	request := isoReservationRequest{
 		Kind:  iso.PayloadNative,
 		Modes: slices.Clone(i.cfg.Network.Modes),
-	})
+	}
+	allocation, err := transaction.reserve(ctx, request)
+	if transaction == nil {
+		allocation, err = i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, request)
+	}
 	if err != nil {
 		return fmt.Errorf("reserve native ISO allocation: %w", err)
 	}
 	i.isoAllocation = allocation.Clone()
 	failReserved := func(cause error) error {
+		if transaction != nil {
+			return cause
+		}
 		cleanupErr := stopAndQuarantineISO(ctx, &isoConcreteReconcileSteps{server: i.s}, i.cfg.ServiceName, cause)
 		return errors.Join(cause, cleanupErr)
 	}
@@ -2138,8 +2686,14 @@ func (i *FileInstaller) prepareNativeISO(ctx context.Context) error {
 		return failReserved(fmt.Errorf("write native ISO resolver: %w", err))
 	}
 	mak.Set(&i.artifacts, db.ArtifactNetNSResolv, resolver)
+	if err := transaction.registerCurrentArtifacts(); err != nil {
+		return failReserved(fmt.Errorf("track native ISO resolver: %w", err))
+	}
 	if err := i.stageISONetworkGate(); err != nil {
 		return failReserved(err)
+	}
+	if err := transaction.registerCurrentArtifacts(); err != nil {
+		return failReserved(fmt.Errorf("track native ISO network gate: %w", err))
 	}
 	return nil
 }
@@ -2302,7 +2856,18 @@ func (i *FileInstaller) installPreparedFile(tmppath string, plan fileInstallPlan
 		removeFileIfExists(tmppath)
 		return nil
 	}
-	if err := os.Rename(tmppath, plan.dst); err != nil {
+	if i.cfg.EnvFile {
+		envProof, err := captureServiceIdentityPathProof(tmppath)
+		if err != nil {
+			return fmt.Errorf("capture uploaded env artifact provenance: %w", err)
+		}
+		if err := i.validateEnvFileSandboxBeforeMove(); err != nil {
+			return err
+		}
+		if err := i.publishEnvFileNoReplace(tmppath, &plan, envProof); err != nil {
+			return err
+		}
+	} else if err := os.Rename(tmppath, plan.dst); err != nil {
 		return fmt.Errorf("failed to move file in place: %w", err)
 	}
 	log.Printf("File moved to %q", plan.dst)
@@ -2311,6 +2876,73 @@ func (i *FileInstaller) installPreparedFile(tmppath string, plan fileInstallPlan
 			return fmt.Errorf("failed to run post-action: %w", err)
 		}
 	}
+	return nil
+}
+
+func (i *FileInstaller) publishEnvFileNoReplace(tmppath string, plan *fileInstallPlan, proof serviceIdentityPathProof) error {
+	base := filepath.Clean(plan.dst)
+	forbidden := map[string]struct{}{}
+	if i.existingService.Valid() {
+		forbidden = serviceScheduleArtifactRefPaths(i.existingService.AsStruct())
+	}
+	for attempt := 0; attempt < 1024; attempt++ {
+		candidate := envFileInstallAttemptPath(base, attempt)
+		if _, exists := forbidden[candidate]; exists {
+			continue
+		}
+		err := renameServiceIdentityRootNoReplace(tmppath, candidate)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("publish env artifact without replacing %s: %w", candidate, err)
+		}
+		proof.Path = candidate
+		i.installedEnvArtifact = proof
+		plan.dst = candidate
+		mak.Set(&i.artifacts, db.ArtifactEnvFile, candidate)
+		return nil
+	}
+	return fmt.Errorf("allocate collision-free env artifact path from %s", base)
+}
+
+func envFileInstallAttemptPath(base string, attempt int) string {
+	if attempt == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s.%d", base, attempt)
+}
+
+func (i *FileInstaller) validateEnvFileSandboxBeforeMove() error {
+	if !i.cfg.EnvFile || i.s == nil || i.cfg.ServiceName == CatchService || i.cfg.ServiceName == SystemService {
+		return nil
+	}
+	view, err := i.s.serviceView(i.cfg.ServiceName)
+	if errors.Is(err, errServiceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reload env-file service before artifact move: %w", err)
+	}
+	service := view.AsStruct()
+	if service.ServiceType != db.ServiceTypeSystemd {
+		return nil
+	}
+	if _, err := serviceSandboxPolicyForExactGeneration(service, service.Generation); err != nil {
+		return fmt.Errorf("revalidate env-file sandbox policy before artifact move: %w", err)
+	}
+	return nil
+}
+
+func (i *FileInstaller) cleanupInstalledEnvArtifact() error {
+	proof := i.installedEnvArtifact
+	if !proof.Present {
+		return nil
+	}
+	if err := removeProvenanceSafeArtifact(proof, "installed env artifact"); err != nil {
+		return fmt.Errorf("remove installed env artifact after failed staging: %w", err)
+	}
+	i.installedEnvArtifact = serviceIdentityPathProof{}
 	return nil
 }
 
@@ -2335,9 +2967,56 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
 	applyInstallPublish(s, plan)
 	stageArtifacts(s, i.artifacts)
+	if err := i.stageResolvedSandboxPolicy(s, plan); err != nil {
+		return err
+	}
 	if i.nativePredecessorAbsent && plan.detectedServiceType == db.ServiceTypeSystemd {
 		s.IdentityInstallPending = true
 	}
+	return nil
+}
+
+func (i *FileInstaller) stageResolvedSandboxPolicy(s *db.Service, plan fileInstallPlan) error {
+	if i.cfg.EnvFile {
+		if err := i.stageActiveSandboxPolicy(s); err != nil {
+			return fmt.Errorf("stage env-file sandbox policy: %w", err)
+		}
+		return nil
+	}
+	if plan.detectedServiceType != db.ServiceTypeSystemd || !i.resolvedSandboxPresent {
+		if s.Sandbox != nil {
+			delete(s.Sandbox.Refs, db.ArtifactRef("staged"))
+		}
+		return nil
+	}
+	if s.Sandbox == nil {
+		s.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{}}
+	}
+	if s.Sandbox.Refs == nil {
+		s.Sandbox.Refs = map[db.ArtifactRef]*db.ServiceSandboxPolicy{}
+	}
+	s.Sandbox.Refs[db.ArtifactRef("staged")] = serviceSandboxPolicyToDB(i.resolvedSandbox)
+	return nil
+}
+
+func (i *FileInstaller) stageActiveSandboxPolicy(s *db.Service) error {
+	policy, err := serviceSandboxPolicyForExactGeneration(s, s.Generation)
+	if err != nil {
+		return err
+	}
+	if policy.State == "legacy" {
+		if s.Sandbox != nil {
+			delete(s.Sandbox.Refs, db.ArtifactRef("staged"))
+		}
+		return nil
+	}
+	if s.Sandbox == nil {
+		s.Sandbox = &db.ServiceSandboxStore{}
+	}
+	if s.Sandbox.Refs == nil {
+		s.Sandbox.Refs = map[db.ArtifactRef]*db.ServiceSandboxPolicy{}
+	}
+	s.Sandbox.Refs[db.ArtifactRef("staged")] = serviceSandboxPolicyToDB(policy)
 	return nil
 }
 

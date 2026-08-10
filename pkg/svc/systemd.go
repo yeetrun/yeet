@@ -73,7 +73,7 @@ const (
 
 [Service]
 {{range .ExecStartPre}}ExecStartPre={{.}}{{end}}
-ExecStart={{.Executable}}{{range .Arguments}} {{.}}{{end}}
+ExecStart={{.ExecStart}}
 {{range .ExecStartPost}}ExecStartPost={{.}}{{end}}
 {{if or .OneShot .Timer}}Type=oneshot{{end}}
 {{if .WorkingDirectory}}WorkingDirectory={{.WorkingDirectory}}{{end}}
@@ -84,7 +84,7 @@ RestartMaxDelaySec=60
 {{if .User}}User={{.User}}{{end}}
 {{if .Group}}Group={{.Group}}{{end}}
 {{if .EnvFile}}EnvironmentFile={{.EnvFile}}{{end}}
-{{if and .User .WorkingDirectory}}Environment=HOME={{.WorkingDirectory}} USER={{.User}} LOGNAME={{.User}} SHELL=/bin/sh{{end}}
+{{if and .User .HomeDirectory}}Environment=HOME={{.HomeDirectory}} USER={{.User}} LOGNAME={{.User}} SHELL=/bin/sh{{end}}
 {{if .NetNS}}NetworkNamespacePath=/var/run/netns/{{.NetNS}}{{end}}
 {{if .OneShot}}RemainAfterExit=yes{{end}}
 {{if .StopCmd}}ExecStop={{.StopCmd}}{{end}}
@@ -159,6 +159,10 @@ type SystemdUnit struct {
 
 	// WorkingDirectory is the working directory for the service.
 	WorkingDirectory string
+
+	// HomeDirectory is exported as HOME independently of WorkingDirectory.
+	// Empty preserves the historical WorkingDirectory-based HOME.
+	HomeDirectory string
 
 	// NetNS is the network namespace the service is in.
 	// If empty, the service is on the host network.
@@ -273,6 +277,14 @@ func (u *SystemdUnit) writeOutService(path string) (err error) {
 	if conditionExecutable == "" {
 		conditionExecutable = u.Executable
 	}
+	execStart, err := RenderSystemdExecStart(append([]string{u.Executable}, u.Arguments...))
+	if err != nil {
+		return fmt.Errorf("render systemd ExecStart: %w", err)
+	}
+	homeDirectory := u.HomeDirectory
+	if homeDirectory == "" {
+		homeDirectory = u.WorkingDirectory
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -283,11 +295,15 @@ func (u *SystemdUnit) writeOutService(path string) (err error) {
 		Restart             string
 		WantedBy            string
 		ConditionExecutable string
+		ExecStart           string
+		HomeDirectory       string
 	}{
-		u,
-		restartDefault,
-		wantedBy,
-		conditionExecutable,
+		SystemdUnit:         u,
+		Restart:             restartDefault,
+		WantedBy:            wantedBy,
+		ConditionExecutable: conditionExecutable,
+		ExecStart:           execStart,
+		HomeDirectory:       homeDirectory,
 	})
 }
 
@@ -646,6 +662,7 @@ type installedSystemdIdentityRewriter struct {
 	inService        bool
 	seenService      bool
 	workingDirectory string
+	homeDirectory    string
 }
 
 func (r *installedSystemdIdentityRewriter) appendLine(line string) {
@@ -654,8 +671,14 @@ func (r *installedSystemdIdentityRewriter) appendLine(line string) {
 		r.appendSection(line, trimmed)
 		return
 	}
-	if r.inService && (r.appendUpdatedDirective(trimmed) || isSystemdIdentityEnvironment(trimmed)) {
-		return
+	if r.inService {
+		if r.appendUpdatedDirective(trimmed) {
+			return
+		}
+		if home, ok := parseSystemdIdentityEnvironmentHome(trimmed); ok {
+			r.homeDirectory = home
+			return
+		}
 	}
 	r.out = append(r.out, line)
 }
@@ -695,8 +718,12 @@ func (r *installedSystemdIdentityRewriter) flush() {
 			r.seen[key] = true
 		}
 	}
-	if r.workingDirectory != "" {
-		r.out = append(r.out, systemdIdentityEnvironment(r.user, r.workingDirectory))
+	home := r.homeDirectory
+	if home == "" {
+		home = r.workingDirectory
+	}
+	if home != "" {
+		r.out = append(r.out, systemdIdentityEnvironment(r.user, home))
 	}
 }
 
@@ -704,9 +731,15 @@ func systemdIdentityEnvironment(user, workingDirectory string) string {
 	return "Environment=HOME=" + workingDirectory + " USER=" + user + " LOGNAME=" + user + " SHELL=/bin/sh"
 }
 
-func isSystemdIdentityEnvironment(line string) bool {
-	return strings.HasPrefix(line, "Environment=HOME=") && strings.Contains(line, " USER=") &&
-		strings.Contains(line, " LOGNAME=") && strings.HasSuffix(line, " SHELL=/bin/sh")
+func parseSystemdIdentityEnvironmentHome(line string) (string, bool) {
+	assignments := strings.Fields(strings.TrimPrefix(line, "Environment="))
+	if !strings.HasPrefix(line, "Environment=") || len(assignments) != 4 ||
+		!strings.HasPrefix(assignments[0], "HOME=") || !strings.HasPrefix(assignments[1], "USER=") ||
+		!strings.HasPrefix(assignments[2], "LOGNAME=") || assignments[3] != "SHELL=/bin/sh" {
+		return "", false
+	}
+	home := strings.TrimPrefix(assignments[0], "HOME=")
+	return home, home != ""
 }
 
 func writeInstalledSystemdUnit(path string, raw []byte, mode os.FileMode) (retErr error) {

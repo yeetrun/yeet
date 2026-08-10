@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,ServiceSandboxStore,ServiceSandboxPolicy,ServiceSandboxExposure,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -189,9 +189,10 @@ func (v *ServiceView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 }
 
 // Name is the name of the service.
-func (v ServiceView) Name() string                  { return v.ж.Name }
-func (v ServiceView) ServiceType() ServiceType      { return v.ж.ServiceType }
-func (v ServiceView) Identity() ServiceIdentityView { return v.ж.Identity.View() }
+func (v ServiceView) Name() string                     { return v.ж.Name }
+func (v ServiceView) ServiceType() ServiceType         { return v.ж.ServiceType }
+func (v ServiceView) Identity() ServiceIdentityView    { return v.ж.Identity.View() }
+func (v ServiceView) Sandbox() ServiceSandboxStoreView { return v.ж.Sandbox.View() }
 
 // IdentityInstallPending marks a first native install that has staged its
 // database row but has not yet durably entered the identity journal.
@@ -245,6 +246,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	Name                   string
 	ServiceType            ServiceType
 	Identity               *ServiceIdentity
+	Sandbox                *ServiceSandboxStore
 	IdentityInstallPending bool
 	ServiceRoot            string
 	ServiceRootZFS         string
@@ -339,6 +341,242 @@ var _ServiceIdentityViewNeedsRegeneration = ServiceIdentity(struct {
 	RequestedGroup string
 	UID            uint32
 	GID            uint32
+}{})
+
+// View returns a read-only view of ServiceSandboxStore.
+func (p *ServiceSandboxStore) View() ServiceSandboxStoreView {
+	return ServiceSandboxStoreView{ж: p}
+}
+
+// ServiceSandboxStoreView provides a read-only view over ServiceSandboxStore.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ServiceSandboxStoreView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ServiceSandboxStore
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ServiceSandboxStoreView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ServiceSandboxStoreView) AsStruct() *ServiceSandboxStore {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceSandboxStoreView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceSandboxStoreView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ServiceSandboxStoreView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ServiceSandboxStore
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceSandboxStoreView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ServiceSandboxStore
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ServiceSandboxStoreView) Refs() views.MapFn[ArtifactRef, *ServiceSandboxPolicy, ServiceSandboxPolicyView] {
+	return views.MapFnOf(v.ж.Refs, func(t *ServiceSandboxPolicy) ServiceSandboxPolicyView {
+		return t.View()
+	})
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxStoreViewNeedsRegeneration = ServiceSandboxStore(struct {
+	Refs map[ArtifactRef]*ServiceSandboxPolicy
+}{})
+
+// View returns a read-only view of ServiceSandboxPolicy.
+func (p *ServiceSandboxPolicy) View() ServiceSandboxPolicyView {
+	return ServiceSandboxPolicyView{ж: p}
+}
+
+// ServiceSandboxPolicyView provides a read-only view over ServiceSandboxPolicy.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ServiceSandboxPolicyView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ServiceSandboxPolicy
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ServiceSandboxPolicyView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ServiceSandboxPolicyView) AsStruct() *ServiceSandboxPolicy {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceSandboxPolicyView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceSandboxPolicyView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ServiceSandboxPolicyView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ServiceSandboxPolicy
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceSandboxPolicyView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ServiceSandboxPolicy
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ServiceSandboxPolicyView) State() string { return v.ж.State }
+func (v ServiceSandboxPolicyView) ReadOnly() views.Slice[ServiceSandboxExposure] {
+	return views.SliceOf(v.ж.ReadOnly)
+}
+func (v ServiceSandboxPolicyView) Writable() views.Slice[ServiceSandboxExposure] {
+	return views.SliceOf(v.ж.Writable)
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxPolicyViewNeedsRegeneration = ServiceSandboxPolicy(struct {
+	State    string
+	ReadOnly []ServiceSandboxExposure
+	Writable []ServiceSandboxExposure
+}{})
+
+// View returns a read-only view of ServiceSandboxExposure.
+func (p *ServiceSandboxExposure) View() ServiceSandboxExposureView {
+	return ServiceSandboxExposureView{ж: p}
+}
+
+// ServiceSandboxExposureView provides a read-only view over ServiceSandboxExposure.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ServiceSandboxExposureView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ServiceSandboxExposure
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ServiceSandboxExposureView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ServiceSandboxExposureView) AsStruct() *ServiceSandboxExposure {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceSandboxExposureView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceSandboxExposureView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ServiceSandboxExposureView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ServiceSandboxExposure
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceSandboxExposureView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ServiceSandboxExposure
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ServiceSandboxExposureView) Source() string      { return v.ж.Source }
+func (v ServiceSandboxExposureView) Destination() string { return v.ж.Destination }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxExposureViewNeedsRegeneration = ServiceSandboxExposure(struct {
+	Source      string
+	Destination string
 }{})
 
 // View returns a read-only view of SnapshotPolicy.

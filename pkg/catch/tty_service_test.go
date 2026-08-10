@@ -13,7 +13,10 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,9 +139,8 @@ func TestSelectPreviousGenerationRejectsTooOldGeneration(t *testing.T) {
 
 func TestRollbackCmdFuncSelectsPreviousGenerationAndInstallsWithHook(t *testing.T) {
 	server := newTestServer(t)
-	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, db.ArtifactStore{
-		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/g1.service", db.Gen(2): "/tmp/g2.service", "latest": "/tmp/g3.service"}},
-	})
+	artifacts, staticVerifications := canonicalLegacyRollbackArtifacts(t, server, "svc-rollback", 1, 2, 3)
+	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, artifacts)
 	if _, _, err := server.cfg.DB.MutateService("svc-rollback", func(_ *db.Data, s *db.Service) error {
 		s.Generation = 3
 		s.LatestGeneration = 3
@@ -168,6 +170,9 @@ func TestRollbackCmdFuncSelectsPreviousGenerationAndInstallsWithHook(t *testing.
 	}
 	if installedGen != 2 {
 		t.Fatalf("installed generation = %d, want 2", installedGen)
+	}
+	if *staticVerifications != 1 {
+		t.Fatalf("sandbox static verifications = %d, want 1", *staticVerifications)
 	}
 	sv, err := server.serviceView("svc-rollback")
 	if err != nil {
@@ -292,21 +297,17 @@ func TestRollbackDispatchLocksExplicitTargetService(t *testing.T) {
 
 func TestRollbackAllowsScheduledToScheduledGeneration(t *testing.T) {
 	server := newTestServer(t)
+	artifacts, staticVerifications := canonicalLegacyRollbackArtifacts(t, server, "scheduled-rollback", 1, 2)
+	artifacts[db.ArtifactSystemdTimerFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(1): "/tmp/previous.timer",
+		db.Gen(2): "/tmp/current.timer",
+	}}
 	addTestServices(t, server, db.Service{
 		Name:             "scheduled-rollback",
 		ServiceType:      db.ServiceTypeSystemd,
 		Generation:       2,
 		LatestGeneration: 2,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
-				db.Gen(1): "/tmp/previous.service",
-				db.Gen(2): "/tmp/current.service",
-			}},
-			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
-				db.Gen(1): "/tmp/previous.timer",
-				db.Gen(2): "/tmp/current.timer",
-			}},
-		},
+		Artifacts:        artifacts,
 	})
 	installed := 0
 	execer := &ttyExecer{
@@ -322,13 +323,15 @@ func TestRollbackAllowsScheduledToScheduledGeneration(t *testing.T) {
 	if installed != 1 {
 		t.Fatalf("installed generation = %d, want 1", installed)
 	}
+	if *staticVerifications != 1 {
+		t.Fatalf("sandbox static verifications = %d, want 1", *staticVerifications)
+	}
 }
 
 func TestServiceCommandDispatchesRollbackAndGenerations(t *testing.T) {
 	server := newTestServer(t)
-	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, db.ArtifactStore{
-		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/g1.service", db.Gen(2): "/tmp/g2.service", "latest": "/tmp/g3.service"}},
-	})
+	artifacts, staticVerifications := canonicalLegacyRollbackArtifacts(t, server, "svc-rollback", 1, 2, 3)
+	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, artifacts)
 	if _, _, err := server.cfg.DB.MutateService("svc-rollback", func(_ *db.Data, s *db.Service) error {
 		s.Generation = 3
 		s.LatestGeneration = 3
@@ -358,6 +361,9 @@ func TestServiceCommandDispatchesRollbackAndGenerations(t *testing.T) {
 	}
 	if installedGen != 2 {
 		t.Fatalf("installed generation = %d, want 2", installedGen)
+	}
+	if *staticVerifications != 1 {
+		t.Fatalf("sandbox static verifications = %d, want 1", *staticVerifications)
 	}
 	sv, err := server.serviceView("svc-rollback")
 	if err != nil {
@@ -393,6 +399,654 @@ func TestServiceCommandDispatchesRollbackAndGenerations(t *testing.T) {
 	if !strings.Contains(out.String(), "\n  \"service\": \"svc-rollback\"") {
 		t.Fatalf("json-pretty output = %q, want indented service field", out.String())
 	}
+}
+
+func TestServiceRollbackStartAndRestartPreflightSandboxBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation int
+		run        func(*ttyExecer) error
+		wantAction string
+	}{
+		{name: "rollback", generation: 2, run: func(e *ttyExecer) error { return e.rollbackCmdFunc("api") }, wantAction: "install"},
+		{name: "start", generation: 3, run: (*ttyExecer).startCmdFunc, wantAction: "start"},
+		{name: "restart", generation: 3, run: (*ttyExecer).restartCmdFunc, wantAction: "restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			seedService(t, server, "api", db.ServiceTypeSystemd, db.ArtifactStore{
+				db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(2): "/tmp/api-2.service", db.Gen(3): "/tmp/api-3.service"}},
+			})
+			if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
+				service.Generation = 3
+				service.LatestGeneration = 3
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var events []string
+			runner := &recordingServiceRunner{onCall: func(action string) { events = append(events, action) }}
+			execer := &ttyExecer{
+				ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+				serviceInstallGenFunc: func(_ InstallerCfg, generation int) error {
+					events = append(events, "install")
+					if generation != 2 {
+						t.Fatalf("installed generation = %d, want 2", generation)
+					}
+					return nil
+				},
+				preflightSandboxGenerationActivationFunc: func(_ context.Context, service *db.Service, generation int) error {
+					events = append(events, "preflight")
+					if service.Generation != 3 || generation != tc.generation {
+						t.Fatalf("preflight service/target generation = %d/%d, want 3/%d", service.Generation, generation, tc.generation)
+					}
+					current, err := server.serviceView("api")
+					if err != nil || current.Generation() != 3 {
+						t.Fatalf("database generation changed before preflight: %d, %v", current.Generation(), err)
+					}
+					return nil
+				},
+			}
+			if err := tc.run(execer); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if !reflect.DeepEqual(events, []string{"preflight", tc.wantAction}) {
+				t.Fatalf("events = %v, want preflight before %s", events, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestServiceRollbackTreatsAbsentHistoricalSandboxPolicyAsLegacy(t *testing.T) {
+	server := newTestServer(t)
+	artifacts, staticVerifications := canonicalLegacyRollbackArtifacts(t, server, "api", 1, 2)
+	service := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: server.defaultServiceRootDir("api"),
+		Generation: 2, LatestGeneration: 2, Artifacts: artifacts,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(2): {State: "off"},
+			"latest":  {State: "off"},
+		}},
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": service.Clone()}}); err != nil {
+		t.Fatal(err)
+	}
+	oldEnsure, oldProbe := ensureBubblewrapForServiceSandboxMutation, probeServiceSandboxForMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		probeServiceSandboxForMutation = oldProbe
+	})
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		t.Fatal("legacy rollback ensured Bubblewrap")
+		return nil
+	}
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+		t.Fatal("legacy rollback probed Bubblewrap")
+		return nil
+	}
+	installed := 0
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceInstallGenFunc: func(_ InstallerCfg, generation int) error {
+			installed = generation
+			return nil
+		},
+	}
+
+	if err := execer.rollbackCmdFunc("api"); err != nil {
+		t.Fatalf("rollback to absent-policy legacy generation: %v", err)
+	}
+	current, err := server.serviceView("api")
+	if err != nil || current.Generation() != 1 || installed != 1 {
+		t.Fatalf("legacy rollback generation/install = %d/%d, %v; want 1/1", current.Generation(), installed, err)
+	}
+	if *staticVerifications != 1 {
+		t.Fatalf("legacy rollback static verifications = %d, want 1", *staticVerifications)
+	}
+}
+
+func TestPreflightSandboxGenerationActivationUsesExactTargetAndNeverExecutesTimerPayload(t *testing.T) {
+	server, service, counter := serviceActivationSandboxFixture(t, "on", true)
+	exactPolicy := service.Sandbox.Refs[db.Gen(service.Generation)].Clone()
+	resolver, _ := service.Artifacts.Gen(db.ArtifactNetNSResolv, service.Generation)
+	unit, _ := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+	payload, _ := service.Artifacts.Gen(db.ArtifactBinary, service.Generation)
+
+	oldEnsure := ensureBubblewrapForServiceSandboxMutation
+	oldValidate := validateServiceSandboxPolicyForMutation
+	oldProbe := probeServiceSandboxForMutation
+	oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+		verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+	})
+	var order []string
+	var capturedPolicy serviceSandboxPolicy
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		order = append(order, "ensure")
+		return nil
+	}
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+		order = append(order, fmt.Sprintf("validate:%t:%d:%d:%s", active, req.UID, req.GID, req.ResolverSource))
+		if req.Payload != payload {
+			t.Fatalf("validated payload = %q, want exact %q", req.Payload, payload)
+		}
+		capturedPolicy = req.Policy
+		return req.Policy, nil
+	}
+	probeServiceSandboxForMutation = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+		order = append(order, fmt.Sprintf("probe:%d:%d", uid, gid))
+		separator := slices.Index(plan.Arguments, "--")
+		if separator < 0 || separator != len(plan.Arguments)-1 || slices.Contains(plan.Arguments[separator+1:], payload) || slices.Contains(plan.Arguments, "--serve") {
+			t.Fatalf("timer probe would execute payload: %#v", plan.Arguments)
+		}
+		if !slicesContainAdjacent(plan.Arguments, "--ro-bind", resolver) {
+			t.Fatalf("timer probe resolver = %#v, want exact %q", plan.Arguments, resolver)
+		}
+		return nil
+	}
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		order = append(order, "verify")
+		if path != unit {
+			t.Fatalf("verified unit = %q, want exact %q", path, unit)
+		}
+		return nil
+	}
+
+	if err := server.preflightSandboxGenerationActivation(context.Background(), service, service.Generation); err != nil {
+		t.Fatalf("preflight exact sandbox generation: %v", err)
+	}
+	identity := effectiveServiceIdentity(service.View()).Persisted
+	want := []string{
+		"ensure",
+		fmt.Sprintf("validate:true:%d:%d:%s", identity.UID, identity.GID, resolver),
+		fmt.Sprintf("probe:%d:%d", identity.UID, identity.GID),
+		"verify",
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("preflight order = %v, want %v", order, want)
+	}
+	if _, err := os.Stat(counter); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("timer payload counter exists after preflight: %v", err)
+	}
+	if len(capturedPolicy.ReadOnly) == 0 {
+		t.Fatal("exact target policy was not passed to validation")
+	}
+	capturedPolicy.ReadOnly[0].Destination = "/mutated-after-preflight"
+	if !reflect.DeepEqual(service.Sandbox.Refs[db.Gen(service.Generation)], exactPolicy) {
+		t.Fatal("validated exact policy aliases persisted target generation")
+	}
+	if service.Sandbox.Refs["latest"].State != "off" || service.Sandbox.Refs["staged"].State != "off" {
+		t.Fatalf("preflight selected or mutated latest/staged policy: %#v", service.Sandbox.Refs)
+	}
+}
+
+func TestPreflightSandboxGenerationActivationAcceptsPreSandboxLegacyUnit(t *testing.T) {
+	server, service, _ := serviceActivationSandboxFixture(t, "legacy", false)
+	unit, _ := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+	raw, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	legacyLines := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(line, "BindReadOnlyPaths=") || line == "PrivateMounts=yes" {
+			continue
+		}
+		legacyLines = append(legacyLines, line)
+	}
+	legacyRaw := []byte(strings.Join(legacyLines, "\n"))
+	if err := os.WriteFile(unit, legacyRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	delete(service.Artifacts, db.ArtifactNetNSResolv)
+
+	oldEnsure, oldValidate := ensureBubblewrapForServiceSandboxMutation, validateServiceSandboxPolicyForMutation
+	oldProbe, oldVerify := probeServiceSandboxForMutation, verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+		verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+	})
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		t.Fatal("pre-sandbox legacy activation ensured Bubblewrap")
+		return nil
+	}
+	validateServiceSandboxPolicyForMutation = func(serviceSandboxPlanRequest, bool) (serviceSandboxPolicy, error) {
+		t.Fatal("pre-sandbox legacy activation validated a policy")
+		return serviceSandboxPolicy{}, nil
+	}
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+		t.Fatal("pre-sandbox legacy activation probed Bubblewrap")
+		return nil
+	}
+	verified := 0
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		verified++
+		if path != unit {
+			t.Fatalf("legacy static verification path = %q, want %q", path, unit)
+		}
+		return nil
+	}
+
+	if err := server.preflightSandboxGenerationActivation(context.Background(), service, service.Generation); err != nil {
+		t.Fatalf("preflight pre-sandbox legacy unit: %v", err)
+	}
+	if verified != 1 {
+		t.Fatalf("legacy static verifications = %d, want 1", verified)
+	}
+	if got, readErr := os.ReadFile(unit); readErr != nil || !bytes.Equal(got, legacyRaw) {
+		t.Fatalf("pre-sandbox legacy unit changed: %v\n%s", readErr, got)
+	}
+}
+
+func TestPreflightSandboxGenerationActivationHonorsCancellationBoundaries(t *testing.T) {
+	for _, stage := range []string{"before ensure", "after ensure", "after validation", "after probe", "after static verify"} {
+		t.Run(stage, func(t *testing.T) {
+			server, service, _ := serviceActivationSandboxFixture(t, "on", false)
+			ctx, cancel := context.WithCancel(context.Background())
+			if stage == "before ensure" {
+				cancel()
+			}
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+			t.Cleanup(func() {
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+			})
+			var events []string
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				events = append(events, "ensure")
+				if stage == "after ensure" {
+					cancel()
+				}
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+				events = append(events, "validate")
+				if stage == "after validation" {
+					cancel()
+				}
+				return req.Policy, nil
+			}
+			probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+				events = append(events, "probe")
+				if stage == "after probe" {
+					cancel()
+				}
+				return nil
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(context.Context, string) error {
+				events = append(events, "verify")
+				if stage == "after static verify" {
+					cancel()
+				}
+				return nil
+			}
+			err := server.preflightSandboxGenerationActivation(ctx, service, service.Generation)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("preflight error = %v, want context cancellation", err)
+			}
+			want := map[string][]string{
+				"before ensure":       nil,
+				"after ensure":        {"ensure"},
+				"after validation":    {"ensure", "validate"},
+				"after probe":         {"ensure", "validate", "probe"},
+				"after static verify": {"ensure", "validate", "probe", "verify"},
+			}[stage]
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("events = %v, want %v", events, want)
+			}
+		})
+	}
+}
+
+func TestPreflightSandboxGenerationActivationOffAndLegacySkipDependencyAndProbe(t *testing.T) {
+	for _, state := range []string{"off", "legacy"} {
+		t.Run(state, func(t *testing.T) {
+			server, service, _ := serviceActivationSandboxFixture(t, state, false)
+			unit, _ := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+			t.Cleanup(func() {
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+			})
+			validated, verified := 0, 0
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				t.Fatal("off/legacy activation installed Bubblewrap")
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+				validated++
+				if active {
+					t.Fatal("off activation validated as active")
+				}
+				return req.Policy, nil
+			}
+			probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+				t.Fatal("off/legacy activation probed Bubblewrap")
+				return nil
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+				verified++
+				if path != unit {
+					t.Fatalf("verified path = %q, want %q", path, unit)
+				}
+				return nil
+			}
+			if err := server.preflightSandboxGenerationActivation(context.Background(), service, service.Generation); err != nil {
+				t.Fatalf("preflight %s activation: %v", state, err)
+			}
+			wantValidated := 1
+			if state == "legacy" {
+				wantValidated = 0
+			}
+			if validated != wantValidated || verified != 1 {
+				t.Fatalf("%s validation/static calls = %d/%d, want %d/1", state, validated, verified, wantValidated)
+			}
+		})
+	}
+}
+
+func TestPreflightSandboxGenerationActivationRejectsExactRecordFailuresBeforeDependency(t *testing.T) {
+	for _, policyCase := range []string{"nil", "malformed"} {
+		t.Run("policy "+policyCase, func(t *testing.T) {
+			server, service, _ := serviceActivationSandboxFixture(t, "on", false)
+			switch policyCase {
+			case "nil":
+				service.Sandbox.Refs[db.Gen(service.Generation)] = nil
+			case "malformed":
+				service.Sandbox.Refs[db.Gen(service.Generation)].State = "sometimes"
+			}
+			assertActivationPreflightFailsBeforeEnsure(t, server, service)
+		})
+	}
+	for _, artifact := range []db.ArtifactName{db.ArtifactSystemdUnit, db.ArtifactBinary, db.ArtifactNetNSResolv} {
+		for _, failure := range []string{"missing", "nonregular", "unreadable"} {
+			t.Run(string(artifact)+" "+failure, func(t *testing.T) {
+				server, service, _ := serviceActivationSandboxFixture(t, "on", false)
+				record := service.Artifacts[artifact]
+				exact := db.Gen(service.Generation)
+				switch failure {
+				case "missing":
+					delete(record.Refs, exact)
+				case "nonregular":
+					record.Refs[exact] = serviceDataDirForRoot(server.serviceRootFromView(service.View()))
+				case "unreadable":
+					path := record.Refs[exact]
+					if err := os.Chmod(path, 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				assertActivationPreflightFailsBeforeEnsure(t, server, service)
+			})
+		}
+	}
+}
+
+func TestStartAndRestartSandboxPreflightFailureDoesNotTouchRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*ttyExecer) error
+		kind string
+	}{
+		{name: "start removed Bubblewrap", run: (*ttyExecer).startCmdFunc, kind: "removed"},
+		{name: "restart untrusted Bubblewrap", run: (*ttyExecer).restartCmdFunc, kind: "untrusted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, service, _ := serviceActivationSandboxFixture(t, "on", false)
+			if tc.kind == "untrusted" {
+				unit, _ := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+				raw, err := os.ReadFile(unit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(unit, []byte(strings.Replace(string(raw), bubblewrapPath, "/tmp/untrusted-bwrap", 1)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+			t.Cleanup(func() {
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+			})
+			removed := errors.New("Bubblewrap disappeared")
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				if tc.kind == "removed" {
+					return removed
+				}
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) { return req.Policy, nil }
+			probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+				t.Fatal("failed activation reached probe")
+				return nil
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(context.Context, string) error {
+				t.Fatal("failed activation reached static verification")
+				return nil
+			}
+			runner := &recordingServiceRunner{}
+			execer := &ttyExecer{
+				ctx: context.Background(), s: server, sn: service.Name, rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+			}
+			err := tc.run(execer)
+			if err == nil {
+				t.Fatal("activation unexpectedly succeeded")
+			}
+			if tc.kind == "removed" && !errors.Is(err, removed) {
+				t.Fatalf("activation error = %v, want removed Bubblewrap", err)
+			}
+			if tc.kind == "untrusted" && !strings.Contains(err.Error(), "fixed "+bubblewrapPath) {
+				t.Fatalf("activation error = %v, want untrusted Bubblewrap rejection", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("failed activation runtime calls = %v", runner.calls)
+			}
+			current, viewErr := server.serviceView(service.Name)
+			if viewErr != nil || current.Generation() != service.Generation {
+				t.Fatalf("failed activation generation = %d, %v, want %d", current.Generation(), viewErr, service.Generation)
+			}
+		})
+	}
+}
+
+func assertActivationPreflightFailsBeforeEnsure(t *testing.T, server *Server, service *db.Service) {
+	t.Helper()
+	oldEnsure := ensureBubblewrapForServiceSandboxMutation
+	t.Cleanup(func() { ensureBubblewrapForServiceSandboxMutation = oldEnsure })
+	ensured := false
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		ensured = true
+		return nil
+	}
+	if err := server.preflightSandboxGenerationActivation(context.Background(), service, service.Generation); err == nil {
+		t.Fatal("activation preflight unexpectedly accepted malformed exact target")
+	}
+	if ensured {
+		t.Fatal("activation preflight performed dependency work before exact target rejection")
+	}
+}
+
+func TestServiceRollbackExpectedCurrentGuardPreservesConcurrentGeneration(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "api", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/api-1.service", db.Gen(2): "/tmp/api-2.service", db.Gen(3): "/tmp/api-3.service"}},
+	})
+	if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
+		service.Generation, service.LatestGeneration = 3, 3
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	installed := false
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		preflightSandboxGenerationActivationFunc: func(context.Context, *db.Service, int) error {
+			_, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
+				service.Generation = 1
+				return nil
+			})
+			return err
+		},
+		serviceInstallGenFunc: func(InstallerCfg, int) error {
+			installed = true
+			return nil
+		},
+	}
+	err := execer.rollbackCmdFunc("api")
+	if err == nil || !strings.Contains(err.Error(), "changed from expected 3 to 1") {
+		t.Fatalf("rollback error = %v, want expected-current rejection", err)
+	}
+	if installed {
+		t.Fatal("rollback installed after concurrent generation change")
+	}
+	current, viewErr := server.serviceView("api")
+	if viewErr != nil || current.Generation() != 1 {
+		t.Fatalf("concurrent generation = %d, %v, want preserved 1", current.Generation(), viewErr)
+	}
+}
+
+func TestServiceRollbackCancellationBeforeExpectedCurrentCommitPreservesGeneration(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "api", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(2): "/tmp/api-2.service", db.Gen(3): "/tmp/api-3.service"}},
+	})
+	if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
+		service.Generation, service.LatestGeneration = 3, 3
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	installed := false
+	execer := &ttyExecer{
+		ctx: ctx, s: server, sn: "api", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		preflightSandboxGenerationActivationFunc: func(context.Context, *db.Service, int) error {
+			cancel()
+			return nil
+		},
+		serviceInstallGenFunc: func(InstallerCfg, int) error {
+			installed = true
+			return nil
+		},
+	}
+	if err := execer.rollbackCmdFunc("api"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("rollback error = %v, want context cancellation", err)
+	}
+	if installed {
+		t.Fatal("canceled rollback installed target generation")
+	}
+	current, err := server.serviceView("api")
+	if err != nil || current.Generation() != 3 {
+		t.Fatalf("canceled rollback generation = %d, %v, want 3", current.Generation(), err)
+	}
+}
+
+func serviceActivationSandboxFixture(t *testing.T, state string, timer bool) (*Server, *db.Service, string) {
+	t.Helper()
+	server := newTestServer(t)
+	root := server.defaultServiceRootDir("api")
+	dataDir := serviceDataDirForRoot(root)
+	binDir := serviceRunDirForRoot(root)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	counter := filepath.Join(t.TempDir(), "timer-payload-counter")
+	payload := filepath.Join(binDir, "api-1")
+	payloadContent := "#!/bin/sh\nprintf executed > " + counter + "\n"
+	if err := os.WriteFile(payload, []byte(payloadContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolver := filepath.Join(binDir, "resolv-1.conf")
+	if err := os.WriteFile(resolver, []byte("nameserver 127.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exposure := filepath.Join(dataDir, "config")
+	if err := os.WriteFile(exposure, []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	identity := db.ServiceIdentity{
+		RequestedUser: strconv.Itoa(os.Geteuid()), RequestedGroup: strconv.Itoa(os.Getegid()),
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}
+	policy := serviceSandboxPolicy{State: state}
+	if state != "legacy" {
+		policy.ReadOnly = []serviceSandboxExposure{{Source: exposure, Destination: "/config"}}
+	}
+	raw := "[Service]\nExecStart=" + payload + " --serve\nUser=" + identity.RequestedUser + "\nGroup=" + identity.RequestedGroup +
+		"\nWorkingDirectory=" + dataDir + "\nEnvironment=HOME=" + dataDir + " USER=" + identity.RequestedUser + " LOGNAME=" + identity.RequestedUser + " SHELL=/bin/sh\n"
+	unitRequest := nativeSandboxUnitRequest{
+		CurrentPolicy: serviceSandboxPolicy{State: "legacy"}, TargetPolicy: policy, Identity: identity,
+		Payload: payload, DataDir: dataDir, Resolver: resolver, Hostname: "api",
+	}
+	if state == "on" {
+		plan, err := buildValidatedServiceSandboxPlan(serviceSandboxPlanRequest{
+			Service: "api", Policy: policy, Payload: payload, DataDir: dataDir, ResolverSource: resolver,
+			UID: identity.UID, GID: identity.GID, Hostname: "api",
+		})
+		if err != nil {
+			t.Fatalf("build activation fixture plan: %v", err)
+		}
+		raw, _, err = renderNativeSandboxUnitWithPlan(raw, unitRequest, &plan)
+		if err != nil {
+			t.Fatalf("render activation fixture: %v", err)
+		}
+	} else {
+		var err error
+		raw, _, err = renderNativeSandboxUnitWithPlan(raw, unitRequest, nil)
+		if err != nil {
+			t.Fatalf("render direct activation fixture: %v", err)
+		}
+	}
+	unit := filepath.Join(binDir, "api-1.service")
+	if err := os.WriteFile(unit, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, Generation: 1, LatestGeneration: 1,
+		Identity: &identity,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{db.Gen(1): payload, "latest": "/wrong/latest-payload", "staged": "/wrong/staged-payload"}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): unit, "latest": "/wrong/latest-unit", "staged": "/wrong/staged-unit"}},
+			db.ArtifactNetNSResolv: {Refs: map[db.ArtifactRef]string{db.Gen(1): resolver, "latest": "/wrong/latest-resolver", "staged": "/wrong/staged-resolver"}},
+		},
+	}
+	if timer {
+		service.Artifacts[db.ArtifactSystemdTimerFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{db.Gen(1): filepath.Join(binDir, "api-1.timer")}}
+	}
+	if state != "legacy" {
+		service.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(1): serviceSandboxPolicyToDB(policy), "latest": {State: "off"}, "staged": {State: "off"},
+		}}
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{service.Name: service.Clone()}}); err != nil {
+		t.Fatal(err)
+	}
+	return server, service, counter
 }
 
 func TestServiceRollbackRejectsVM(t *testing.T) {
@@ -1513,6 +2167,72 @@ func TestServiceRunnerForTypeRejectsUnknownType(t *testing.T) {
 	if _, err := execer.serviceRunnerForType(db.ServiceType("unknown")); err == nil || !strings.Contains(err.Error(), "unhandled service type") {
 		t.Fatalf("serviceRunnerForType error = %v, want unhandled type", err)
 	}
+}
+
+func canonicalLegacyRollbackArtifacts(
+	t *testing.T,
+	server *Server,
+	serviceName string,
+	generations ...int,
+) (db.ArtifactStore, *int) {
+	t.Helper()
+	root := server.defaultServiceRootDir(serviceName)
+	runDir := serviceRunDirForRoot(root)
+	dataDir := serviceDataDirForRoot(root)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binaryRefs := make(map[db.ArtifactRef]string, len(generations)+1)
+	unitRefs := make(map[db.ArtifactRef]string, len(generations)+1)
+	writtenUnits := make(map[string]bool, len(generations))
+	identity := db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}
+	for _, generation := range generations {
+		payload := filepath.Join(runDir, fmt.Sprintf("%s-%d", serviceName, generation))
+		if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		raw := "[Service]\nExecStart=" + payload + "\n"
+		rendered, _, err := renderNativeSandboxUnitWithPlan(raw, nativeSandboxUnitRequest{
+			CurrentPolicy: serviceSandboxPolicy{State: "legacy"},
+			TargetPolicy:  serviceSandboxPolicy{State: "legacy"},
+			Identity:      identity,
+			Payload:       payload,
+			DataDir:       dataDir,
+			Resolver:      "/etc/resolv.conf",
+			Hostname:      serviceName,
+		}, nil)
+		if err != nil {
+			t.Fatalf("render generation %d rollback fixture: %v", generation, err)
+		}
+		unit := filepath.Join(runDir, fmt.Sprintf("%s-%d.service", serviceName, generation))
+		if err := os.WriteFile(unit, []byte(rendered), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ref := db.Gen(generation)
+		binaryRefs[ref] = payload
+		unitRefs[ref] = unit
+		binaryRefs["latest"] = payload
+		unitRefs["latest"] = unit
+		writtenUnits[unit] = true
+	}
+
+	staticVerifications := new(int)
+	previousVerify := verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() { verifyGeneratedSystemdUnitForSandboxMutation = previousVerify })
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		if !writtenUnits[path] {
+			t.Fatalf("verified unit = %q, want an exact rollback generation unit", path)
+		}
+		*staticVerifications++
+		return nil
+	}
+	return db.ArtifactStore{
+		db.ArtifactBinary:      {Refs: binaryRefs},
+		db.ArtifactSystemdUnit: {Refs: unitRefs},
+	}, staticVerifications
 }
 
 func seedService(t *testing.T, server *Server, name string, serviceType db.ServiceType, artifacts db.ArtifactStore) {

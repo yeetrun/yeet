@@ -45,6 +45,9 @@ type ServiceEntry struct {
 	SnapshotEvents   []string `toml:"snapshot_events,omitempty"`
 	Ports            []string `toml:"ports,omitempty"`
 	Schedule         string   `toml:"schedule,omitempty"`
+	Sandbox          string   `toml:"sandbox,omitempty"`
+	SandboxRO        []string `toml:"sandbox_ro,omitempty"`
+	SandboxRW        []string `toml:"sandbox_rw,omitempty"`
 	Args             []string `toml:"args,omitempty"`
 }
 
@@ -71,6 +74,9 @@ type serviceEntryTOML struct {
 	SnapshotEvents   []string `toml:"snapshot_events,omitempty"`
 	Ports            []string `toml:"ports,omitempty"`
 	Schedule         string   `toml:"schedule,omitempty"`
+	Sandbox          string   `toml:"sandbox,omitempty"`
+	SandboxRO        []string `toml:"sandbox_ro,omitempty"`
+	SandboxRW        []string `toml:"sandbox_rw,omitempty"`
 	Args             []string `toml:"args,omitempty"`
 }
 
@@ -102,6 +108,33 @@ func cloneBoolPtr(v *bool) *bool {
 
 func cloneStringSlice(values []string) []string {
 	return append([]string{}, values...)
+}
+
+func canonicalSandboxConfigValues(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cloneServiceEntrySandbox(entry *ServiceEntry) {
+	entry.Sandbox = strings.ToLower(strings.TrimSpace(entry.Sandbox))
+	entry.SandboxRO = canonicalSandboxConfigValues(entry.SandboxRO)
+	entry.SandboxRW = canonicalSandboxConfigValues(entry.SandboxRW)
 }
 
 var createProjectConfigFileFn = func(path string) (io.WriteCloser, error) {
@@ -445,6 +478,9 @@ func validateLoadedProjectConfig(cfg *ProjectConfig) error {
 			return fmt.Errorf("service %s uses removed type %q; remove type and keep schedule", entry.Name, entry.Type)
 		}
 	}
+	for i := range cfg.Services {
+		cloneServiceEntrySandbox(&cfg.Services[i])
+	}
 	return nil
 }
 
@@ -541,6 +577,9 @@ func serviceEntryForTOML(entry ServiceEntry) serviceEntryTOML {
 		SnapshotEvents:   cloneStringSlice(entry.SnapshotEvents),
 		Ports:            cloneStringSlice(entry.Ports),
 		Schedule:         entry.Schedule,
+		Sandbox:          strings.ToLower(strings.TrimSpace(entry.Sandbox)),
+		SandboxRO:        canonicalSandboxConfigValues(entry.SandboxRO),
+		SandboxRW:        canonicalSandboxConfigValues(entry.SandboxRW),
 		Args:             cloneStringSlice(entry.Args),
 	}
 	if entry.SnapshotKeepLast != 0 {
@@ -750,6 +789,7 @@ func (c *ProjectConfig) ServiceEntry(service, host string) (ServiceEntry, bool) 
 			entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 			entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 			entry.Ports = cloneStringSlice(entry.Ports)
+			cloneServiceEntrySandbox(&entry)
 			return entry, true
 		}
 	}
@@ -761,6 +801,7 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 	entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 	entry.Ports = cloneStringSlice(entry.Ports)
+	cloneServiceEntrySandbox(&entry)
 	for i := range c.Services {
 		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
 			c.Services[i].Type = entry.Type
@@ -784,6 +825,9 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 			c.Services[i].SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 			c.Services[i].SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 			c.Services[i].Ports = cloneStringSlice(entry.Ports)
+			c.Services[i].Sandbox = entry.Sandbox
+			c.Services[i].SandboxRO = cloneStringSlice(entry.SandboxRO)
+			c.Services[i].SandboxRW = cloneStringSlice(entry.SandboxRW)
 			c.addHost(entry.Host)
 			sortServiceEntries(c.Services)
 			return
@@ -799,6 +843,7 @@ func (c *ProjectConfig) ReplaceServiceEntry(entry ServiceEntry) {
 	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 	entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 	entry.Ports = cloneStringSlice(entry.Ports)
+	cloneServiceEntrySandbox(&entry)
 	for i := range c.Services {
 		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
 			c.Services[i] = entry

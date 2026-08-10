@@ -215,6 +215,9 @@ func plannedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, o
 	} else if err := relocateServiceRootArtifactRefs(updatedService.Artifacts, plan.OldRoot, plan.NewRoot); err != nil {
 		return nil, err
 	}
+	if err := relocateServiceRootSandboxRefs(updatedService.Sandbox, plan.OldRoot, plan.NewRoot); err != nil {
+		return nil, err
+	}
 	if updatedService.VM != nil {
 		mappings := hostStoragePathMappings{{
 			From: plan.OldRoot, To: plan.NewRoot, Reason: hostStoragePathReasonServiceRoot, Service: plan.ServiceName,
@@ -701,6 +704,34 @@ func relocateServiceRootArtifactRefs(artifacts db.ArtifactStore, oldRoot, newRoo
 	return nil
 }
 
+func relocateServiceRootSandboxRefs(store *db.ServiceSandboxStore, oldRoot, newRoot string) error {
+	if store == nil {
+		return nil
+	}
+	for ref, policy := range store.Refs {
+		if policy == nil {
+			continue
+		}
+		for _, exposures := range [][]db.ServiceSandboxExposure{policy.ReadOnly, policy.Writable} {
+			for index := range exposures {
+				originalSource := exposures[index].Source
+				relocated, moved, err := relocatePathUnderRoot(originalSource, oldRoot, newRoot)
+				if err != nil {
+					return fmt.Errorf("relocate sandbox policy %s exposure %q: %w", ref, originalSource, err)
+				}
+				if !moved {
+					continue
+				}
+				exposures[index].Source = relocated
+				if filepath.Clean(exposures[index].Destination) == filepath.Clean(originalSource) {
+					exposures[index].Destination = relocated
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func relocatePathUnderRoot(path, oldRoot, newRoot string) (string, bool, error) {
 	path = filepath.Clean(path)
 	oldRoot = filepath.Clean(oldRoot)
@@ -760,6 +791,7 @@ var serviceRootMigrationTextArtifacts = map[db.ArtifactName]bool{
 	db.ArtifactSystemdTimerFile:     true,
 	db.ArtifactNetNSService:         true,
 	db.ArtifactNetNSEnv:             true,
+	db.ArtifactNetNSResolv:          true,
 	db.ArtifactTSService:            true,
 	db.ArtifactTSEnv:                true,
 }

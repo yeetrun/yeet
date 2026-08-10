@@ -129,22 +129,23 @@ type ttyExecer struct {
 	serviceOperationLockHeld bool
 
 	// Optional override for tests.
-	serviceRunnerFn            func() (ServiceRunner, error)
-	migrateServiceIdentityFunc func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
-	installFunc                func(action string, in io.Reader, cfg FileInstallerCfg) error
-	editFileFunc               func(path string) error
-	systemdStatusFunc          func(string) (svc.Status, error)
-	systemdStatusesFunc        func() (map[string]svc.Status, error)
-	dockerComposeStatusFunc    func(string) (svc.DockerComposeStatus, error)
-	dockerComposeStatusesFunc  func() (map[string]svc.DockerComposeStatus, error)
-	dockerOutdatedFunc         func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error)
-	dockerOutdatedAllFunc      func(context.Context) ([]svc.DockerOutdatedRow, error)
-	serviceInstallFunc         func(InstallerCfg) error
-	serviceInstallGenFunc      func(InstallerCfg, int) error
-	vmRuntimeTransactionFunc   func(context.Context, *Config, func() error) error
-	closeNewStageInstallerFunc func(FileInstallerCfg) error
-	removeServiceFunc          func(string, RemoveOptions) (*RemoveReport, error)
-	nativeCopyHook             func(string)
+	serviceRunnerFn                          func() (ServiceRunner, error)
+	migrateServiceIdentityFunc               func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
+	installFunc                              func(action string, in io.Reader, cfg FileInstallerCfg) error
+	editFileFunc                             func(path string) error
+	systemdStatusFunc                        func(string) (svc.Status, error)
+	systemdStatusesFunc                      func() (map[string]svc.Status, error)
+	dockerComposeStatusFunc                  func(string) (svc.DockerComposeStatus, error)
+	dockerComposeStatusesFunc                func() (map[string]svc.DockerComposeStatus, error)
+	dockerOutdatedFunc                       func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error)
+	dockerOutdatedAllFunc                    func(context.Context) ([]svc.DockerOutdatedRow, error)
+	serviceInstallFunc                       func(InstallerCfg) error
+	serviceInstallGenFunc                    func(InstallerCfg, int) error
+	preflightSandboxGenerationActivationFunc func(context.Context, *db.Service, int) error
+	vmRuntimeTransactionFunc                 func(context.Context, *Config, func() error) error
+	closeNewStageInstallerFunc               func(FileInstallerCfg) error
+	removeServiceFunc                        func(string, RemoveOptions) (*RemoveReport, error)
+	nativeCopyHook                           func(string)
 }
 
 type ttyPtySession struct {

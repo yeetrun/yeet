@@ -1,3 +1,7 @@
+// Copyright (c) 2025 AUTHORS All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 // Package db provides a simple JSON file-backed database.
 package db
 
@@ -23,7 +27,7 @@ var (
 	syncDBDirectory = func(f *os.File) error { return f.Sync() }
 )
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,ServiceIdentity,ServiceSandboxStore,ServiceSandboxPolicy,ServiceSandboxExposure,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -167,13 +171,40 @@ type ServiceIdentity struct {
 	GID            uint32
 }
 
+type ServiceSandboxExposure struct {
+	Source      string
+	Destination string
+}
+
+type ServiceSandboxPolicy struct {
+	State    string
+	ReadOnly []ServiceSandboxExposure `json:",omitempty"`
+	Writable []ServiceSandboxExposure `json:",omitempty"`
+}
+
+type ServiceSandboxStore struct {
+	Refs map[ArtifactRef]*ServiceSandboxPolicy `json:",omitempty"`
+}
+
+func (s *Service) SandboxPolicy(gen int) (*ServiceSandboxPolicy, bool) {
+	if s == nil || s.Sandbox == nil {
+		return nil, false
+	}
+	policy, ok := s.Sandbox.Refs[Gen(gen)]
+	if !ok {
+		return nil, false
+	}
+	return policy.Clone(), true
+}
+
 // Service is the configuration for one service.
 type Service struct {
 	// Name is the name of the service.
 	Name string
 
 	ServiceType ServiceType
-	Identity    *ServiceIdentity `json:",omitempty"`
+	Identity    *ServiceIdentity     `json:",omitempty"`
+	Sandbox     *ServiceSandboxStore `json:",omitempty"`
 	// IdentityInstallPending marks a first native install that has staged its
 	// database row but has not yet durably entered the identity journal.
 	IdentityInstallPending bool `json:",omitempty"`

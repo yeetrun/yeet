@@ -32,6 +32,28 @@ func TestReleaseAssetsMatchCurrentCLI(t *testing.T) {
 	}
 
 	help := assets[".codex/skills/yeet-cli/references/yeet-help-agent.md"]
+	for _, assetPath := range assetPaths {
+		asset := assets[assetPath]
+		for _, flag := range []string{"--sandbox=on", "--sandbox-ro", "--sandbox-rw"} {
+			if !strings.Contains(asset, flag) {
+				t.Errorf("%s does not document %s", assetPath, flag)
+			}
+		}
+		for _, line := range strings.Split(asset, "\n") {
+			if strings.Contains(line, "yeet ") && strings.Contains(line, "--sandbox=legacy") {
+				t.Errorf("%s documents unsupported runnable --sandbox=legacy command: %s", assetPath, line)
+			}
+		}
+	}
+
+	readme := assets["README.md"]
+	if !strings.Contains(strings.ToLower(readme), "legacy") {
+		t.Error("README does not explain legacy native sandbox state")
+	}
+	if !strings.Contains(readme, "service set") {
+		t.Error("README does not document service set sandbox migration")
+	}
+
 	runStart := strings.Index(help, "## Command: run\n")
 	if runStart < 0 {
 		t.Fatal("generated help is missing the run command section")
@@ -52,11 +74,42 @@ func TestReleaseAssetsMatchCurrentCLI(t *testing.T) {
 		t.Error("generated service set help does not document --cron")
 	}
 
-	readme := assets["README.md"]
 	scheduleStart := strings.Index(readme, "### Scheduled job\n")
 	scheduleEnd := strings.Index(readme[scheduleStart+1:], "\n### ")
 	if scheduleStart < 0 || scheduleEnd < 0 || !strings.Contains(readme[scheduleStart:scheduleStart+1+scheduleEnd], "service set") || !strings.Contains(readme[scheduleStart:scheduleStart+1+scheduleEnd], "--cron") {
 		t.Error("README scheduled job section does not document service set --cron")
+	}
+
+	nativeSandboxPath := "website/docs/concepts/native-sandboxing.mdx"
+	nativeSandboxRaw, err := os.ReadFile(filepath.Join(repoRoot, nativeSandboxPath))
+	if err != nil {
+		t.Errorf("read %s: %v", nativeSandboxPath, err)
+	} else {
+		nativeSandboxText := string(nativeSandboxRaw)
+		nativeSandbox := strings.ToLower(nativeSandboxText)
+		if !strings.Contains(nativeSandbox, "read-only file or directory") {
+			t.Errorf("%s does not explain that read-only exposures accept files or directories", nativeSandboxPath)
+		}
+		if !strings.Contains(nativeSandbox, "writable directory") {
+			t.Errorf("%s does not explain that writable exposures accept directories", nativeSandboxPath)
+		}
+
+		const retainOffCommand = "yeet service set api --sandbox=off --sandbox-ro=/etc/api"
+		for _, doc := range []struct {
+			name string
+			body string
+		}{
+			{name: "README.md", body: readme},
+			{name: nativeSandboxPath, body: nativeSandboxText},
+		} {
+			if !strings.Contains(doc.body, retainOffCommand) {
+				t.Errorf("%s does not show the exact command for editing an exposure while retaining sandbox off", doc.name)
+			}
+			lower := strings.ToLower(doc.body)
+			if !strings.Contains(lower, "exposure-only") || !strings.Contains(lower, "changes an `off` service to `on`") {
+				t.Errorf("%s does not explain that an exposure-only edit changes sandbox off to on", doc.name)
+			}
+		}
 	}
 }
 

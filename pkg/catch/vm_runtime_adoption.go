@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"golang.org/x/sys/unix"
 )
 
@@ -1625,144 +1626,7 @@ func vmRuntimeAdoptionLineContinues(line string) bool {
 }
 
 func parseVMRuntimeAdoptionExecStart(value string) ([]string, error) {
-	parser := vmRuntimeAdoptionExecParser{value: value}
-	return parser.parse()
-}
-
-type vmRuntimeAdoptionExecParser struct {
-	value  string
-	args   []string
-	word   strings.Builder
-	inWord bool
-	quote  byte
-	index  int
-}
-
-func (parser *vmRuntimeAdoptionExecParser) parse() ([]string, error) {
-	for parser.index < len(parser.value) {
-		if err := parser.consume(); err != nil {
-			return nil, err
-		}
-	}
-	if parser.quote != 0 {
-		return nil, fmt.Errorf("unterminated quote")
-	}
-	parser.finishWord()
-	if len(parser.args) == 0 || strings.TrimSpace(parser.args[0]) == "" {
-		return nil, fmt.Errorf("empty command")
-	}
-	return parser.args, nil
-}
-
-func (parser *vmRuntimeAdoptionExecParser) consume() error {
-	c := parser.value[parser.index]
-	if parser.consumeUnquotedWhitespace(c) {
-		return nil
-	}
-	switch c {
-	case '\'', '"':
-		if !parser.consumeQuote(c) {
-			parser.writeByte(c)
-		}
-	case '\\':
-		return parser.consumeEscape()
-	case '%':
-		return parser.consumeDoubledLiteral('%', "unresolved systemd specifier")
-	case '$':
-		return parser.consumeDoubledLiteral('$', "unresolved systemd environment expansion")
-	default:
-		parser.writeByte(c)
-	}
-	return nil
-}
-
-func (parser *vmRuntimeAdoptionExecParser) consumeUnquotedWhitespace(value byte) bool {
-	if parser.quote != 0 || value != ' ' && value != '\t' {
-		return false
-	}
-	parser.finishWord()
-	parser.index++
-	return true
-}
-
-func (parser *vmRuntimeAdoptionExecParser) finishWord() {
-	if !parser.inWord {
-		return
-	}
-	parser.args = append(parser.args, parser.word.String())
-	parser.word.Reset()
-	parser.inWord = false
-}
-
-func (parser *vmRuntimeAdoptionExecParser) consumeQuote(value byte) bool {
-	if parser.quote == 0 {
-		parser.quote = value
-		parser.inWord = true
-		parser.index++
-		return true
-	}
-	if parser.quote != value {
-		return false
-	}
-	parser.quote = 0
-	parser.index++
-	return true
-}
-
-func (parser *vmRuntimeAdoptionExecParser) consumeEscape() error {
-	decoded, consumed, err := decodeVMRuntimeAdoptionEscape(parser.value[parser.index:])
-	if err != nil {
-		return err
-	}
-	parser.word.WriteString(decoded)
-	parser.inWord = true
-	parser.index += consumed
-	return nil
-}
-
-func (parser *vmRuntimeAdoptionExecParser) consumeDoubledLiteral(value byte, errorMessage string) error {
-	if parser.index+1 >= len(parser.value) || parser.value[parser.index+1] != value {
-		return errors.New(errorMessage)
-	}
-	parser.word.WriteByte(value)
-	parser.inWord = true
-	parser.index += 2
-	return nil
-}
-
-func (parser *vmRuntimeAdoptionExecParser) writeByte(value byte) {
-	parser.word.WriteByte(value)
-	parser.inWord = true
-	parser.index++
-}
-
-func decodeVMRuntimeAdoptionEscape(value string) (string, int, error) {
-	if len(value) < 2 {
-		return "", 0, fmt.Errorf("trailing escape")
-	}
-	if decoded, ok := vmRuntimeAdoptionSimpleEscape(value[1]); ok {
-		return decoded, 2, nil
-	}
-	if value[1] != 'x' {
-		return "", 0, fmt.Errorf("unsupported escape \\%c", value[1])
-	}
-	if len(value) < 4 {
-		return "", 0, fmt.Errorf("short hexadecimal escape")
-	}
-	decoded, err := strconv.ParseUint(value[2:4], 16, 8)
-	if err != nil || decoded == 0 {
-		return "", 0, fmt.Errorf("invalid hexadecimal escape")
-	}
-	return string([]byte{byte(decoded)}), 4, nil
-}
-
-func vmRuntimeAdoptionSimpleEscape(value byte) (string, bool) {
-	escapes := map[byte]string{
-		'a': "\a", 'b': "\b", 'f': "\f", 'n': "\n", 'r': "\r", 's': " ", 't': "\t", 'v': "\v",
-		'\\': "\\", '"': "\"", '\'': "'",
-	}
-	decoded, ok := escapes[value]
-	return decoded, ok
+	return svc.ParseSystemdExecStart(value)
 }
 
 func collectTrustedVMRuntimeAdoptionFileEvidence(path string, required bool, deps vmRuntimeAdoptionEvidenceDeps) (vmRuntimeAdoptionFileEvidence, error) {

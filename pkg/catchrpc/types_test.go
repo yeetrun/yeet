@@ -216,6 +216,43 @@ func TestServiceInfoIdentityOmittedWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestServiceSandboxJSONRoundTripAndOmission(t *testing.T) {
+	want := ServiceInfo{
+		Name: "native",
+		Sandbox: &ServiceSandbox{
+			State:    "on",
+			ReadOnly: []ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}},
+			Writable: []ServiceSandboxExposure{{Source: "/srv/native/data", Destination: "/var/lib/native"}},
+		},
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"sandbox":{"state":"on","readOnly":[{"source":"/etc/ssl","destination":"/etc/ssl"}],"writable":[{"source":"/srv/native/data","destination":"/var/lib/native"}]}`,
+	} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("ServiceInfo JSON = %s, want %s", raw, field)
+		}
+	}
+	var got ServiceInfo
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+
+	raw, err = json.Marshal(ServiceInfo{Name: "compose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sandbox") {
+		t.Fatalf("ServiceInfo JSON = %s, want sandbox omitted", raw)
+	}
+}
+
 func TestServiceNetworkPortsPresenceRoundTrip(t *testing.T) {
 	raw, err := json.Marshal(ServiceNetwork{
 		PortsPresent: true,

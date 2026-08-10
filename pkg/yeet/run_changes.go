@@ -30,6 +30,11 @@ type runChangeSummary struct {
 	payloadLabel   string
 }
 
+type runChangeResult struct {
+	sandbox      *clientSandboxPolicy
+	catchChanged bool
+}
+
 func (s runChangeSummary) hasChanges() bool {
 	return s.payloadChanged || s.envChanged || s.argsChanged
 }
@@ -164,6 +169,29 @@ func runArgsWithServiceRootOptions(args []string, opts serviceRootOptions) []str
 	out = append(out, prefix...)
 	out = append(out, args...)
 	return out
+}
+
+func runArgsWithSandboxOptions(args []string, entry ServiceEntry) []string {
+	args = append([]string{}, args...)
+	if runArgsHaveSandboxFlag(args) {
+		return args
+	}
+	state := strings.ToLower(strings.TrimSpace(entry.Sandbox))
+	if state != "on" && state != "off" {
+		return args
+	}
+	prefix := []string{"--sandbox=" + state}
+	for _, exposure := range canonicalSandboxConfigValues(entry.SandboxRO) {
+		prefix = append(prefix, "--sandbox-ro="+exposure)
+	}
+	for _, exposure := range canonicalSandboxConfigValues(entry.SandboxRW) {
+		prefix = append(prefix, "--sandbox-rw="+exposure)
+	}
+	return append(prefix, args...)
+}
+
+func runArgsHaveSandboxFlag(args []string) bool {
+	return runArgsHaveFlag(args, "--sandbox") || runArgsHaveFlag(args, "--sandbox-ro") || runArgsHaveFlag(args, "--sandbox-rw")
 }
 
 func serviceRootOptionArgs(opts serviceRootOptions) []string {
@@ -468,6 +496,9 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 		entry.SnapshotEvents = append([]string{}, existing.SnapshotEvents...)
 		entry.Ports = append([]string{}, existing.Ports...)
 		entry.Schedule = existing.Schedule
+		entry.Sandbox = existing.Sandbox
+		entry.SandboxRO = cloneSandboxStringSlice(existing.SandboxRO)
+		entry.SandboxRW = cloneSandboxStringSlice(existing.SandboxRW)
 		entry.Args = existing.Args
 	}
 	loc.Config.SetServiceEntry(entry)
@@ -476,7 +507,8 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 
 func effectiveRunArgsForExistingEntry(entry ServiceEntry, runArgs []string) ([]string, error) {
 	if len(normalizeRunArgs(runArgs)) == 0 {
-		return runArgsWithPublishOptions(rehydrateRunArgs(entry.Args), effectiveServiceEntryPorts(entry)), nil
+		args := runArgsWithPublishOptions(rehydrateRunArgs(entry.Args), effectiveServiceEntryPorts(entry))
+		return runArgsWithSandboxOptions(args, entry), nil
 	}
 	out, err := runArgsWithStoredLockedFlags(entry, runArgs)
 	if err != nil {
@@ -487,9 +519,9 @@ func effectiveRunArgsForExistingEntry(entry ServiceEntry, runArgs []string) ([]s
 		return nil, err
 	}
 	if publish.Changed {
-		return out, nil
+		return runArgsWithSandboxOptions(out, entry), nil
 	}
-	return runArgsWithPublishOptions(out, effectiveServiceEntryPorts(entry)), nil
+	return runArgsWithSandboxOptions(runArgsWithPublishOptions(out, effectiveServiceEntryPorts(entry)), entry), nil
 }
 
 func effectiveServiceEntryPorts(entry ServiceEntry) []string {
@@ -582,8 +614,14 @@ func runWithChangesToContext(ctx context.Context, stdout io.Writer, payload stri
 }
 
 func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) error {
-	if err := rejectExistingRunNetworkChange(ctx, entry, runArgs); err != nil {
-		return err
+	_, err := runWithChangesToWithContextRunnerResult(ctx, stdout, payload, runArgs, envFile, entry, forceDeploy, runner, alwaysDeployPayload)
+	return err
+}
+
+func runWithChangesToWithContextRunnerResult(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) (runChangeResult, error) {
+	response, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs)
+	if err != nil {
+		return runChangeResult{}, err
 	}
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
 	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
@@ -593,11 +631,43 @@ func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, pa
 		Required:  entry.SnapshotRequired,
 		Events:    entry.SnapshotEvents,
 	})
-	summary, err := detectRunChangesWithOptions(ctx, payload, runArgs, envFile, storedArgs, alwaysDeployPayload)
+	comparisonArgs := removeRunSandboxControlFlags(runArgs)
+	storedComparisonArgs := normalizeRunArgs(storedArgs)
+	summary, err := detectRunChangesWithOptions(ctx, payload, comparisonArgs, envFile, storedComparisonArgs, alwaysDeployPayload)
 	if err != nil {
-		return err
+		return runChangeResult{}, err
 	}
-	return applyRunChangeSummary(ctx, stdout, payload, runArgs, envFile, summary, forceDeploy, runner)
+	if err := applyRunChangeSummary(ctx, stdout, payload, runArgs, envFile, summary, forceDeploy, runner); err != nil {
+		return runChangeResult{}, err
+	}
+	runApplied := summary.requiresRun() || (!summary.hasChanges() && forceDeploy)
+	return captureRunSandboxResult(ctx, payload, entry, response, runApplied, runApplied || summary.envChanged)
+}
+
+func captureRunSandboxResult(ctx context.Context, payload string, entry ServiceEntry, response catchrpc.ServiceInfoResponse, runApplied, catchChanged bool) (runChangeResult, error) {
+	result := runChangeResult{catchChanged: catchChanged}
+	var err error
+	if runSandboxPostSuccessRefreshRequired(payload, entry, response, runApplied) {
+		response, err = fetchRunChangeServiceInfoFn(ctx, entry.Host, entry.Name)
+		if err != nil {
+			return result, runSandboxCaptureError(entry, err)
+		}
+		if !response.Found {
+			return result, runSandboxCaptureError(entry, fmt.Errorf("service info reports service not found"))
+		}
+	}
+	sandbox, captured, err := runSandboxCaptureFromResponse(entry, response)
+	if err != nil {
+		return result, runSandboxCaptureError(entry, err)
+	}
+	if !captured && runApplied && runSandboxRequestedBackendExcludesSandbox(payload, entry) {
+		sandbox = clientSandboxPolicy{}
+		captured = true
+	}
+	if captured {
+		result.sandbox = cloneClientSandboxPolicy(&sandbox)
+	}
+	return result, nil
 }
 
 func applyRunChangeSummary(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool, runner runPayloadContextFunc) error {
@@ -645,22 +715,46 @@ var fetchRunChangeServiceInfoFn = func(ctx context.Context, host, service string
 	return newRPCClient(host).ServiceInfo(ctx, service)
 }
 
-func rejectExistingRunNetworkChange(ctx context.Context, entry ServiceEntry, runArgs []string) error {
+func rejectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry, runArgs []string) error {
+	_, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs)
+	return err
+}
+
+func inspectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry, runArgs []string) (catchrpc.ServiceInfoResponse, error) {
 	if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Host) == "" || serviceEntryIsVM(entry) {
-		return nil
+		return catchrpc.ServiceInfoResponse{}, nil
 	}
-	requested, authKeySet, err := requestedRunNetworkSettings(runArgs)
+	flags, requested, authKeySet, err := parseProtectedRunSettings(runArgs)
 	if err != nil {
-		return err
+		return catchrpc.ServiceInfoResponse{}, err
 	}
 	response, err := fetchRunChangeServiceInfoFn(ctx, entry.Host, entry.Name)
 	if err != nil {
-		return err
+		return catchrpc.ServiceInfoResponse{}, err
 	}
 	if !response.Found {
-		return nil
+		return response, nil
 	}
-	if !authKeySet && reflect.DeepEqual(requested, authoritativeRunNetworkSettings(response.Info.Network)) {
+	if err := rejectExistingRunNetworkSettings(requested, authKeySet, response.Info.Network); err != nil {
+		return catchrpc.ServiceInfoResponse{}, err
+	}
+	if err := rejectExistingRunSandboxChange(entry.Name, flags.Sandbox, response.Info.Sandbox); err != nil {
+		return catchrpc.ServiceInfoResponse{}, err
+	}
+	return response, nil
+}
+
+func parseProtectedRunSettings(runArgs []string) (cli.RunFlags, catchrpc.ServiceNetworkSettings, bool, error) {
+	flags, _, err := cli.ParseRun(runArgs)
+	if err != nil {
+		return cli.RunFlags{}, catchrpc.ServiceNetworkSettings{}, false, err
+	}
+	requested, authKeySet, err := requestedRunNetworkSettingsFromFlags(flags, runArgs)
+	return flags, requested, authKeySet, err
+}
+
+func rejectExistingRunNetworkSettings(requested catchrpc.ServiceNetworkSettings, authKeySet bool, current catchrpc.ServiceNetwork) error {
+	if !authKeySet && reflect.DeepEqual(requested, authoritativeRunNetworkSettings(current)) {
 		return nil
 	}
 	detail := ""
@@ -670,11 +764,37 @@ func rejectExistingRunNetworkChange(ctx context.Context, entry ServiceEntry, run
 	return fmt.Errorf("network changes for existing services require `yeet service set <service> ...`%s", detail)
 }
 
+func rejectExistingRunNetworkChange(ctx context.Context, entry ServiceEntry, runArgs []string) error {
+	return rejectExistingRunProtectedChanges(ctx, entry, runArgs)
+}
+
+func rejectExistingRunSandboxChange(service string, requested cli.SandboxOptions, currentInfo *catchrpc.ServiceSandbox) error {
+	if !requested.HasChange() {
+		return nil
+	}
+	current, err := sandboxPolicyFromServiceInfo(currentInfo)
+	if err != nil {
+		return err
+	}
+	target, err := applyRunSandboxOptions(current, requested)
+	if err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current, target) {
+		return nil
+	}
+	return fmt.Errorf("sandbox changes for existing services require `%s`", serviceSetCommandForSandboxPolicy(service, current, target))
+}
+
 func requestedRunNetworkSettings(runArgs []string) (catchrpc.ServiceNetworkSettings, bool, error) {
 	flags, _, err := cli.ParseRun(runArgs)
 	if err != nil {
 		return catchrpc.ServiceNetworkSettings{}, false, err
 	}
+	return requestedRunNetworkSettingsFromFlags(flags, runArgs)
+}
+
+func requestedRunNetworkSettingsFromFlags(flags cli.RunFlags, runArgs []string) (catchrpc.ServiceNetworkSettings, bool, error) {
 	modes, err := normalizeRunNetworkModes(flags.Net)
 	if err != nil {
 		return catchrpc.ServiceNetworkSettings{}, false, err
@@ -683,6 +803,325 @@ func requestedRunNetworkSettings(runArgs []string) (catchrpc.ServiceNetworkSetti
 		Modes: modes, TSVersion: flags.TsVer, TSExitNode: flags.TsExit, TSTags: flags.TsTags,
 		MacvlanParent: flags.MacvlanParent, MacvlanVLAN: flags.MacvlanVlan, MacvlanMAC: flags.MacvlanMac,
 	}), runArgsHaveFlag(runArgs, "--ts-auth-key"), nil
+}
+
+type clientSandboxPolicy struct {
+	State    string
+	ReadOnly []string
+	Writable []string
+}
+
+func sandboxEntryFromServiceInfo(info *catchrpc.ServiceSandbox) (state string, ro, rw []string, err error) {
+	policy, err := sandboxPolicyFromServiceInfo(info)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return policy.State, cloneSandboxStringSlice(policy.ReadOnly), cloneSandboxStringSlice(policy.Writable), nil
+}
+
+func cloneSandboxStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
+func sandboxPolicyFromServiceInfo(info *catchrpc.ServiceSandbox) (clientSandboxPolicy, error) {
+	if info == nil {
+		return clientSandboxPolicy{}, fmt.Errorf("catch did not return sandbox state for native service")
+	}
+	state := strings.ToLower(strings.TrimSpace(info.State))
+	if state != "on" && state != "off" && state != "legacy" {
+		return clientSandboxPolicy{}, fmt.Errorf("catch returned invalid sandbox state %q", info.State)
+	}
+	destinations := map[string]string{}
+	ro, err := canonicalRPCSandboxExposures("read-only", info.ReadOnly, destinations)
+	if err != nil {
+		return clientSandboxPolicy{}, err
+	}
+	rw, err := canonicalRPCSandboxExposures("writable", info.Writable, destinations)
+	if err != nil {
+		return clientSandboxPolicy{}, err
+	}
+	return clientSandboxPolicy{State: state, ReadOnly: ro, Writable: rw}, nil
+}
+
+func canonicalRPCSandboxExposures(class string, exposures []catchrpc.ServiceSandboxExposure, destinations map[string]string) ([]string, error) {
+	if exposures == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(exposures))
+	for _, exposure := range exposures {
+		parsed, err := canonicalRPCSandboxExposure(class, exposure)
+		if err != nil {
+			return nil, err
+		}
+		if err := claimRPCSandboxDestination(parsed.Destination, class, destinations); err != nil {
+			return nil, err
+		}
+		out = append(out, cli.FormatSandboxExposure(parsed))
+	}
+	return canonicalSandboxConfigValues(out), nil
+}
+
+func canonicalRPCSandboxExposure(class string, exposure catchrpc.ServiceSandboxExposure) (cli.SandboxExposure, error) {
+	source := exposure.Source
+	destination := exposure.Destination
+	if err := validateRPCSandboxPath(source, "source", false); err != nil {
+		return cli.SandboxExposure{}, fmt.Errorf("catch returned invalid %s sandbox exposure %q:%q: %w", class, exposure.Source, exposure.Destination, err)
+	}
+	if err := validateRPCSandboxPath(destination, "destination", true); err != nil {
+		return cli.SandboxExposure{}, fmt.Errorf("catch returned invalid %s sandbox exposure %q:%q: %w", class, exposure.Source, exposure.Destination, err)
+	}
+	parsed, reset, err := cli.ParseSandboxExposure(cli.FormatSandboxExposure(cli.SandboxExposure{Source: source, Destination: destination}), false)
+	if err == nil && (reset || parsed.Source != source || parsed.Destination != destination) {
+		err = fmt.Errorf("exposure is not canonical")
+	}
+	if err != nil {
+		return cli.SandboxExposure{}, fmt.Errorf("catch returned invalid %s sandbox exposure %q:%q: %w", class, exposure.Source, exposure.Destination, err)
+	}
+	return parsed, nil
+}
+
+func validateRPCSandboxPath(path, field string, rejectRoot bool) error {
+	if strings.ContainsRune(path, '\x00') {
+		return fmt.Errorf("%s contains NUL", field)
+	}
+	if strings.Contains(path, ":") {
+		return fmt.Errorf("%s %q contains an unsupported colon", field, path)
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s %q must be absolute", field, path)
+	}
+	if filepath.Clean(path) != path {
+		return fmt.Errorf("%s %q must be a clean absolute path", field, path)
+	}
+	if rejectRoot && path == "/" {
+		return fmt.Errorf("%s must not be root", field)
+	}
+	return nil
+}
+
+func claimRPCSandboxDestination(destination, class string, destinations map[string]string) error {
+	for previousDestination, previousClass := range destinations {
+		if rpcSandboxDestinationsOverlap(destination, previousDestination) {
+			return fmt.Errorf(
+				"catch returned conflicting sandbox destination %q in %s with %q in %s",
+				destination,
+				class,
+				previousDestination,
+				previousClass,
+			)
+		}
+	}
+	destinations[destination] = class
+	return nil
+}
+
+func rpcSandboxDestinationsOverlap(left, right string) bool {
+	if left == right || left == "/" || right == "/" {
+		return true
+	}
+	return strings.HasPrefix(left, right+"/") || strings.HasPrefix(right, left+"/")
+}
+
+func applyRunSandboxOptions(current clientSandboxPolicy, requested cli.SandboxOptions) (clientSandboxPolicy, error) {
+	target := clientSandboxPolicy{
+		State: current.State, ReadOnly: cloneSandboxStringSlice(current.ReadOnly), Writable: cloneSandboxStringSlice(current.Writable),
+	}
+	if requested.StateSet {
+		target.State = requested.State
+	}
+	if (requested.ReadOnlySet || requested.WritableSet) && !requested.StateSet {
+		switch current.State {
+		case "legacy":
+			return clientSandboxPolicy{}, fmt.Errorf("legacy sandbox exposure changes require an explicit --sandbox=on or --sandbox=off with `yeet service set`")
+		case "off":
+			target.State = "on"
+		}
+	}
+	if requested.ReadOnlySet {
+		target.ReadOnly = canonicalCLISandboxExposures(requested.ReadOnly)
+	}
+	if requested.WritableSet {
+		target.Writable = canonicalCLISandboxExposures(requested.Writable)
+	}
+	return target, nil
+}
+
+func canonicalCLISandboxExposures(exposures []cli.SandboxExposure) []string {
+	out := make([]string, 0, len(exposures))
+	for _, exposure := range exposures {
+		out = append(out, cli.FormatSandboxExposure(exposure))
+	}
+	return canonicalSandboxConfigValues(out)
+}
+
+func serviceSetCommandForSandboxPolicy(service string, current, target clientSandboxPolicy) string {
+	parts := []string{"yeet", "service", "set", service, "--sandbox=" + target.State}
+	parts = appendSandboxServiceSetList(parts, "--sandbox-ro", current.ReadOnly, target.ReadOnly)
+	parts = appendSandboxServiceSetList(parts, "--sandbox-rw", current.Writable, target.Writable)
+	return shellJoin(parts)
+}
+
+func appendSandboxServiceSetList(parts []string, name string, current, target []string) []string {
+	if reflect.DeepEqual(current, target) {
+		return parts
+	}
+	targetSet := make(map[string]struct{}, len(target))
+	for _, exposure := range target {
+		targetSet[exposure] = struct{}{}
+	}
+	for _, exposure := range current {
+		if _, retained := targetSet[exposure]; !retained {
+			parts = append(parts, name+"=reset")
+			for _, targetExposure := range target {
+				parts = append(parts, name+"="+targetExposure)
+			}
+			return parts
+		}
+	}
+	currentSet := make(map[string]struct{}, len(current))
+	for _, exposure := range current {
+		currentSet[exposure] = struct{}{}
+	}
+	for _, exposure := range target {
+		if _, alreadyPresent := currentSet[exposure]; !alreadyPresent {
+			parts = append(parts, name+"="+exposure)
+		}
+	}
+	return parts
+}
+
+func runSandboxCaptureEligible(entry ServiceEntry) bool {
+	return strings.TrimSpace(entry.Name) != "" && strings.TrimSpace(entry.Host) != "" && !serviceEntryIsVM(entry)
+}
+
+func runSandboxPostSuccessCaptureEligible(payload string, entry ServiceEntry) bool {
+	if !runSandboxCaptureEligible(entry) || entry.Name == catchServiceName || entry.Name == systemServiceName {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(entry.Type)) {
+	case "docker", "docker-compose", serviceTypeVM:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(entry.PayloadKind)) {
+	case "binary", "script":
+		return true
+	case "file", "":
+		payloadType, err := detectPayloadFileType(payload)
+		return err == nil && (payloadType == ftdetect.Binary || payloadType == ftdetect.Script)
+	default:
+		return false
+	}
+}
+
+func runSandboxPostSuccessRefreshRequired(payload string, entry ServiceEntry, response catchrpc.ServiceInfoResponse, runApplied bool) bool {
+	if !runApplied {
+		return false
+	}
+	if !response.Found {
+		return runSandboxPostSuccessCaptureEligible(payload, entry)
+	}
+	return strings.TrimSpace(response.Info.ServiceType) == "systemd" && runSandboxRequestedBackendIsNonNative(payload, entry)
+}
+
+func runSandboxRequestedBackendIsNonNative(payload string, entry ServiceEntry) bool {
+	if isVMPayload(payload) {
+		return false
+	}
+	if (looksLikeImageRef(payload) || looksLikeRunDraftLocalImageName(payload)) && !payloadNamesExistingFile(payload) {
+		return true
+	}
+	if filepath.Base(payload) == "Dockerfile" {
+		return true
+	}
+	payloadType, err := detectPayloadFileType(payload)
+	if err == nil {
+		switch payloadType {
+		case ftdetect.DockerCompose, ftdetect.TypeScript, ftdetect.Python:
+			return true
+		case ftdetect.Binary, ftdetect.Script:
+			return false
+		}
+	}
+	return runSandboxPayloadKindIsNonNative(entry.PayloadKind)
+}
+
+func runSandboxPayloadKindIsNonNative(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "compose", "docker", "docker-compose", "dockerfile", "local-image", "remote-image", "python", "typescript", "ts", "py":
+		return true
+	default:
+		return false
+	}
+}
+
+func runSandboxRequestedBackendExcludesSandbox(payload string, entry ServiceEntry) bool {
+	if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Host) == "" || entry.Name == catchServiceName || entry.Name == systemServiceName {
+		return false
+	}
+	if serviceEntryIsVM(entry) || isVMPayload(payload) {
+		return true
+	}
+	return runSandboxRequestedBackendIsNonNative(payload, entry)
+}
+
+func payloadNamesExistingFile(payload string) bool {
+	info, err := os.Stat(payload)
+	return err == nil && !info.IsDir()
+}
+
+func runSandboxCaptureFromResponse(entry ServiceEntry, response catchrpc.ServiceInfoResponse) (clientSandboxPolicy, bool, error) {
+	if !runSandboxCaptureEligible(entry) || !response.Found {
+		return clientSandboxPolicy{}, false, nil
+	}
+	if strings.TrimSpace(response.Info.ServiceType) != "systemd" {
+		if response.Info.Sandbox != nil {
+			return clientSandboxPolicy{}, false, fmt.Errorf("catch returned sandbox state for non-native service type %q", response.Info.ServiceType)
+		}
+		return clientSandboxPolicy{}, true, nil
+	}
+	state, ro, rw, err := sandboxEntryFromServiceInfo(response.Info.Sandbox)
+	if err != nil {
+		return clientSandboxPolicy{}, false, err
+	}
+	return clientSandboxPolicy{State: state, ReadOnly: ro, Writable: rw}, true, nil
+}
+
+func cloneClientSandboxPolicy(policy *clientSandboxPolicy) *clientSandboxPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &clientSandboxPolicy{
+		State: policy.State, ReadOnly: cloneSandboxStringSlice(policy.ReadOnly), Writable: cloneSandboxStringSlice(policy.Writable),
+	}
+}
+
+type runSandboxConfigSyncError struct {
+	cause      error
+	host       string
+	service    string
+	configPath string
+}
+
+func (e *runSandboxConfigSyncError) Error() string {
+	command := serviceSetSyncCommand(e.service, e.host, e.configPath)
+	return fmt.Sprintf("catch service changed, but its sandbox state could not be saved: %v; recover with `%s`", e.cause, command)
+}
+
+func (e *runSandboxConfigSyncError) Unwrap() error {
+	return e.cause
+}
+
+func newRunSandboxConfigSyncError(host, service, configPath string, err error) error {
+	return &runSandboxConfigSyncError{
+		cause: err, host: strings.TrimSpace(host), service: strings.TrimSpace(service), configPath: strings.TrimSpace(configPath),
+	}
+}
+
+func runSandboxCaptureError(entry ServiceEntry, err error) error {
+	return newRunSandboxConfigSyncError(entry.Host, entry.Name, "", err)
 }
 
 func authoritativeRunNetworkSettings(network catchrpc.ServiceNetwork) catchrpc.ServiceNetworkSettings {

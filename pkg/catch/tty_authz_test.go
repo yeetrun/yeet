@@ -59,6 +59,7 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 		{name: "service set", args: []string{"service", "set", "--copy"}, want: permissionManage},
 		{name: "service set cron", args: []string{"service", "set", "--cron=30 2 * * *"}, want: permissionManage},
 		{name: "service set run as", args: []string{"service", "set", "--run-as=app"}, want: permissionManage},
+		{name: "service set sandbox", args: []string{"service", "set", "--sandbox=on"}, want: permissionManage},
 		{name: "tailscale status", args: []string{"tailscale", "status"}, want: permissionRead},
 		{name: "tailscale update", args: []string{"tailscale", "update"}, want: permissionManage},
 		{name: "vm images ls", args: []string{"vm", "images", "ls"}, want: permissionRead},

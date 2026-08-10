@@ -567,6 +567,149 @@ func TestServiceScheduleClonePreservesCompleteActiveGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceScheduleClonePromotesActiveSandboxPolicy(t *testing.T) {
+	const activeUnit = "/store/reports-4.service"
+	previous := &db.Service{
+		Name: "reports", Generation: 4, LatestGeneration: 6,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+				db.Gen(4): "/store/reports-4.timer", db.Gen(6): "/store/reports-6.timer", "latest": "/store/reports-6.timer", "staged": "/store/stale.timer",
+			}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
+				db.Gen(4): activeUnit, db.Gen(6): "/store/reports-6.service", "latest": "/store/reports-6.service", "staged": "/store/stale.service",
+			}},
+		},
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(4): {State: "on", Writable: []db.ServiceSandboxExposure{{Source: "/srv/reports", Destination: "/var/lib/reports"}}},
+			db.Gen(6): {State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/wrong-latest", Destination: "/wrong-latest"}}},
+			"latest":  {State: "off"},
+			"staged":  {State: "off"},
+		}},
+	}
+	original := previous.Clone()
+
+	target, err := cloneActiveServiceGeneration(previous, "/store/reports-7.timer")
+	if err != nil {
+		t.Fatalf("cloneActiveServiceGeneration: %v", err)
+	}
+	policy, ok := target.SandboxPolicy(7)
+	if !ok || policy.State != "on" || !reflect.DeepEqual(policy.Writable, []db.ServiceSandboxExposure{{Source: "/srv/reports", Destination: "/var/lib/reports"}}) {
+		t.Fatalf("gen-7 sandbox policy = %#v, %t; want active gen-4 policy", policy, ok)
+	}
+	if unit, ok := target.Artifacts.Gen(db.ArtifactSystemdUnit, 7); !ok || unit != activeUnit {
+		t.Fatalf("gen-7 payload unit = %q, %t; want unchanged active unit %q", unit, ok, activeUnit)
+	}
+	active, staged := target.Sandbox.Refs[db.Gen(4)], target.Sandbox.Refs["staged"]
+	latest, generated := target.Sandbox.Refs["latest"], target.Sandbox.Refs[db.Gen(7)]
+	if active == staged || active == latest || active == generated || staged == latest || staged == generated || latest == generated {
+		t.Fatalf("schedule sandbox policies alias: active=%p staged=%p latest=%p generated=%p", active, staged, latest, generated)
+	}
+	staged.Writable[0].Destination = "/staged-only"
+	latest.Writable[0].Destination = "/latest-only"
+	generated.Writable[0].Destination = "/generated-only"
+	if active.Writable[0].Destination != "/var/lib/reports" || staged.Writable[0].Destination == latest.Writable[0].Destination || latest.Writable[0].Destination == generated.Writable[0].Destination {
+		t.Fatalf("schedule sandbox exposure slices alias: active=%#v staged=%#v latest=%#v generated=%#v", active, staged, latest, generated)
+	}
+	request := serviceScheduleMigrationRequest(&serviceScheduleMutationPlan{previous: previous, target: target})
+	if request.GenerationDiagnostic != (serviceIdentityGenerationDiagnostic{}) {
+		t.Fatalf("schedule request inherited sandbox diagnostic metadata: %#v", request.GenerationDiagnostic)
+	}
+	if !reflect.DeepEqual(previous, original) {
+		t.Fatalf("source service was mutated:\n got %#v\nwant %#v", previous, original)
+	}
+}
+
+func TestServiceScheduleCloneLeavesMissingSandboxPolicyLegacy(t *testing.T) {
+	previous := &db.Service{
+		Name: "reports", Generation: 4, LatestGeneration: 4,
+		Artifacts: db.ArtifactStore{db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+			db.Gen(4): "/store/reports-4.timer",
+		}}},
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(3): {State: "off"},
+			"staged":  {State: "on"},
+		}},
+	}
+
+	target, err := cloneActiveServiceGeneration(previous, "/store/reports-5.timer")
+	if err != nil {
+		t.Fatalf("cloneActiveServiceGeneration: %v", err)
+	}
+	if policy, ok := target.SandboxPolicy(5); ok || policy != nil {
+		t.Fatalf("gen-5 sandbox policy = %#v, %t; want missing legacy policy", policy, ok)
+	}
+	if _, ok := target.Sandbox.Refs["staged"]; ok {
+		t.Fatalf("stale staged sandbox policy was retained: %#v", target.Sandbox.Refs)
+	}
+	if policy := target.Sandbox.Refs[db.Gen(3)]; policy == nil || policy.State != "off" {
+		t.Fatalf("historical sandbox policy = %#v, want preserved", policy)
+	}
+}
+
+func TestServiceScheduleLegacyCloneWithHistoricalPolicyRemainsActivatable(t *testing.T) {
+	server := newTestServer(t)
+	artifacts, staticVerifications := canonicalLegacyRollbackArtifacts(t, server, "reports", 4)
+	timer := filepath.Join(server.defaultServiceRootDir("reports"), "run", "reports-4.timer")
+	if err := os.WriteFile(timer, []byte("[Timer]\nOnCalendar=*-*-* 02:30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts[db.ArtifactSystemdTimerFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{db.Gen(4): timer}}
+	previous := &db.Service{
+		Name: "reports", ServiceType: db.ServiceTypeSystemd, ServiceRoot: server.defaultServiceRootDir("reports"),
+		Generation: 4, LatestGeneration: 4, Artifacts: artifacts,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(3): {State: "off"},
+			"latest":  {State: "off"},
+		}},
+	}
+	target, err := cloneActiveServiceGeneration(previous, filepath.Join(filepath.Dir(timer), "reports-5.timer"))
+	if err != nil {
+		t.Fatalf("clone legacy schedule generation: %v", err)
+	}
+	if policy, ok := target.SandboxPolicy(5); ok || policy != nil {
+		t.Fatalf("cloned legacy schedule policy = %#v, %t; want absent", policy, ok)
+	}
+	oldEnsure, oldProbe := ensureBubblewrapForServiceSandboxMutation, probeServiceSandboxForMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		probeServiceSandboxForMutation = oldProbe
+	})
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		t.Fatal("legacy schedule activation ensured Bubblewrap")
+		return nil
+	}
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+		t.Fatal("legacy schedule activation probed Bubblewrap")
+		return nil
+	}
+
+	if err := server.preflightSandboxGenerationActivation(context.Background(), target, 5); err != nil {
+		t.Fatalf("preflight cloned legacy schedule generation: %v", err)
+	}
+	if *staticVerifications != 1 {
+		t.Fatalf("legacy schedule static verifications = %d, want 1", *staticVerifications)
+	}
+}
+
+func TestServiceScheduleCloneRejectsNilActiveSandboxPolicy(t *testing.T) {
+	previous := &db.Service{
+		Name: "reports", Generation: 4, LatestGeneration: 6,
+		Artifacts: db.ArtifactStore{db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+			db.Gen(4): "/store/reports-4.timer",
+		}}},
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(4): nil,
+			db.Gen(6): {State: "off"},
+			"latest":  {State: "off"},
+			"staged":  {State: "on"},
+		}},
+	}
+
+	if _, err := cloneActiveServiceGeneration(previous, "/store/reports-7.timer"); err == nil || !strings.Contains(err.Error(), "nil exact sandbox policy") {
+		t.Fatalf("cloneActiveServiceGeneration error = %v, want nil exact sandbox policy rejection", err)
+	}
+}
+
 func TestServiceScheduleNoOpHasZeroMutations(t *testing.T) {
 	server := newTestServer(t)
 	artifactDir := t.TempDir()

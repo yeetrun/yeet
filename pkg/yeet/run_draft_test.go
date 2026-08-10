@@ -773,6 +773,7 @@ func TestExecuteRunDraftCleansStagedOnlyServiceAfterFailedNewDeploy(t *testing.T
 
 func TestExecuteRunDraftScheduledUsesStandardRunOutputAndSavesConfig(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldArch, oldExec, oldHashes := remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn
 	t.Cleanup(func() {
 		remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn = oldArch, oldExec, oldHashes
@@ -831,6 +832,7 @@ func TestExecuteRunDraftScheduledUsesStandardRunOutputAndSavesConfig(t *testing.
 
 func TestExecuteRunDraftScheduledRunAsReportsConfigPartialSuccess(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldArch, oldExec, oldCreate, oldHashes := remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn
 	t.Cleanup(func() {
 		remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn = oldArch, oldExec, oldCreate, oldHashes
@@ -849,7 +851,15 @@ func TestExecuteRunDraftScheduledRunAsReportsConfigPartialSuccess(t *testing.T) 
 		t.Fatal(err)
 	}
 	tmp := t.TempDir()
-	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"host-before"},
+		},
+	}
+	wantConfig := &ProjectConfig{Version: projectConfigVersion, Hosts: []string{"host-before"}}
 	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
 	err := executeRunDraftWithOptions(context.Background(), RunDraft{
 		Service:     "api",
@@ -860,12 +870,120 @@ func TestExecuteRunDraftScheduledRunAsReportsConfigPartialSuccess(t *testing.T) 
 		RunAsSet:    true,
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 	}, loc, runDraftExecuteOptions{Stdout: io.Discard})
-	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
-	if err == nil || err.Error() != want {
-		t.Fatalf("error = %v, want %q", err, want)
+	wantIdentity := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
+	wantRecovery := "recover with `yeet --host host.example.com service sync api --config " + shellQuote(loc.Path) + "`"
+	if err == nil || !strings.Contains(err.Error(), wantIdentity) || !strings.Contains(err.Error(), "catch service changed") || !strings.Contains(err.Error(), wantRecovery) {
+		t.Fatalf("error = %v, want identity detail plus Catch-changed recovery %q", err, wantRecovery)
 	}
 	if remoteCalls != 1 {
 		t.Fatalf("remote calls = %d, want 1", remoteCalls)
+	}
+	if !reflect.DeepEqual(loc.Config, wantConfig) {
+		t.Fatalf("fresh config rollback was not exact:\n got %#v\nwant %#v", loc.Config, wantConfig)
+	}
+	if loc.Config.Services != nil {
+		t.Fatalf("fresh config services = %#v, want nil", loc.Config.Services)
+	}
+}
+
+func TestFreshSandboxSaveFailureNamesExactRecoveryAndRestoresConfig(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
+	oldArch, oldExec, oldCreate, oldHashes := remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn = oldArch, oldExec, oldCreate, oldHashes
+	})
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	execRemoteToFn = func(context.Context, string, []string, io.Reader, bool, io.Writer) error { return nil }
+	payload := filepath.Join(t.TempDir(), "api.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(t.TempDir(), "config with spaces")
+	required := true
+	loc := &projectConfigLocation{
+		Path: filepath.Join(configDir, projectConfigName), Dir: configDir,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"host-z", "host-a", "host-before"},
+			Services: []ServiceEntry{
+				{Name: "zeta", Host: "host-z", Type: serviceTypeRun, Payload: "zeta.sh", Args: []string{"--zeta"}, SnapshotRequired: &required},
+				{Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "old.sh", Sandbox: "legacy", Args: []string{"--net=host"}},
+				{Name: "before", Host: "host-before", Type: serviceTypeRun, Payload: "before.sh", Ports: []string{"127.0.0.1:8080:80"}},
+			},
+		},
+	}
+	wantRequired := true
+	wantConfig := &ProjectConfig{
+		Version: projectConfigVersion,
+		Hosts:   []string{"host-z", "host-a", "host-before"},
+		Services: []ServiceEntry{
+			{Name: "zeta", Host: "host-z", Type: serviceTypeRun, Payload: "zeta.sh", Args: []string{"--zeta"}, SnapshotRequired: &wantRequired},
+			{Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "old.sh", Sandbox: "legacy", Args: []string{"--net=host"}},
+			{Name: "before", Host: "host-before", Type: serviceTypeRun, Payload: "before.sh", Ports: []string{"127.0.0.1:8080:80"}},
+		},
+	}
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service: "api", Host: "host-a", Payload: payload, PayloadKind: "file",
+	}, loc, runDraftExecuteOptions{Stdout: io.Discard})
+	wantRecovery := "recover with `yeet --host host-a service sync api --config " + shellQuote(loc.Path) + "`"
+	if err == nil || !strings.Contains(err.Error(), "catch service changed") || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), wantRecovery) {
+		t.Fatalf("error = %v, want Catch-changed exact recovery %q", err, wantRecovery)
+	}
+	if !reflect.DeepEqual(loc.Config, wantConfig) {
+		t.Fatalf("existing config rollback was not exact:\n got %#v\nwant %#v", loc.Config, wantConfig)
+	}
+	loc.Config.Services[0].Args[0] = "--mutated-after-rollback"
+	if wantConfig.Services[0].Args[0] != "--zeta" {
+		t.Fatalf("rolled-back nested slices alias expected snapshot: %#v", wantConfig.Services[0].Args)
+	}
+}
+
+func TestFreshSandboxRefreshFailureUsesSelectedConfigRecovery(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldInfo, oldArch, oldExec, oldHashes := fetchRunChangeServiceInfoFn, remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn, remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn = oldInfo, oldArch, oldExec, oldHashes
+	})
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if fetches == 1 {
+			return catchrpc.ServiceInfoResponse{Found: false}, nil
+		}
+		return catchrpc.ServiceInfoResponse{}, errors.New("post-success info failed")
+	}
+	execRemoteToFn = func(context.Context, string, []string, io.Reader, bool, io.Writer) error { return nil }
+	payload := filepath.Join(t.TempDir(), "api.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(t.TempDir(), "selected config")
+	loc := &projectConfigLocation{
+		Path: filepath.Join(configDir, "custom config.toml"), Dir: configDir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service: "api", Host: "host-a", Payload: payload, PayloadKind: "file",
+	}, loc, runDraftExecuteOptions{Stdout: io.Discard})
+	wantRecovery := "recover with `yeet --host host-a service sync api --config " + shellQuote(loc.Path) + "`"
+	if err == nil || !strings.Contains(err.Error(), "catch service changed") || !strings.Contains(err.Error(), "post-success info failed") || !strings.Contains(err.Error(), wantRecovery) {
+		t.Fatalf("error = %v, want selected-config recovery %q", err, wantRecovery)
+	}
+	if fetches != 2 {
+		t.Fatalf("ServiceInfo fetches = %d, want initial plus post-success", fetches)
+	}
+	if _, ok := loc.Config.ServiceEntry("api", "host-a"); ok {
+		t.Fatal("config mutated after post-success refresh failure")
 	}
 }
 
@@ -1172,6 +1290,7 @@ func TestRunFromProjectConfigPreservesStoredRemoteImageRef(t *testing.T) {
 
 func TestExecuteRunDraftClearsStaleLocalImageKindForAutoFile(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldHashes := fetchRemoteArtifactHashesFn
 	oldArch := remoteCatchOSAndArchFn
@@ -1275,6 +1394,7 @@ func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
 
 func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldHashes := fetchRemoteArtifactHashesFn
 	oldArch := remoteCatchOSAndArchFn
@@ -1347,6 +1467,7 @@ func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
 
 func TestExecuteRunDraftPassesTSAuthKeyButDoesNotSaveIt(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldHashes := fetchRemoteArtifactHashesFn
 	oldArch := remoteCatchOSAndArchFn
@@ -1412,6 +1533,7 @@ func TestExecuteRunDraftPassesTSAuthKeyButDoesNotSaveIt(t *testing.T) {
 
 func TestExecuteRunDraftPassesContextToRemoteRunWork(t *testing.T) {
 	preserveRunDraftGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldHashes := fetchRemoteArtifactHashesFn
 	oldArch := remoteCatchOSAndArchFn
@@ -1540,6 +1662,7 @@ func TestExecuteRunDraftForcesDeployFromCallDraftOrSnapshot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			preserveRunDraftGlobals(t)
+			stubExistingNativeSandboxInfo(t)
 			oldExec := execRemoteFn
 			oldHashes := fetchRemoteArtifactHashesFn
 			oldArch := remoteCatchOSAndArchFn
@@ -1620,6 +1743,7 @@ func TestExecuteRunDraftSavesEnvFileOnlyWhenExplicitlySet(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			preserveRunDraftGlobals(t)
+			stubExistingNativeSandboxInfo(t)
 			oldExec := execRemoteFn
 			oldHashes := fetchRemoteArtifactHashesFn
 			oldArch := remoteCatchOSAndArchFn

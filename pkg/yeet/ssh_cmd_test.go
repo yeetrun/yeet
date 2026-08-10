@@ -1435,6 +1435,38 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 	}
 }
 
+func TestShellQuoteUsesSafeAllowlist(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: "''"},
+		{name: "safe punctuation", value: "AZaz09_@%+=:,./-", want: "AZaz09_@%+=:,./-"},
+		{name: "backtick", value: "/srv/`id`", want: "'/srv/`id`'"},
+		{name: "newline", value: "/srv/line\nbreak", want: "'/srv/line\nbreak'"},
+		{name: "single quote", value: "/srv/it's", want: "'/srv/it'\"'\"'s'"},
+		{name: "dollar substitution", value: "$(touch /tmp/pwn)", want: "'$(touch /tmp/pwn)'"},
+		{name: "spaces", value: "/srv/path with spaces", want: "'/srv/path with spaces'"},
+		{name: "semicolon", value: "/srv/path;false", want: "'/srv/path;false'"},
+		{name: "literal tilde", value: "~/literal", want: "'~/literal'"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellQuote(tt.value); got != tt.want {
+				t.Fatalf("shellQuote(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShellJoinQuotesEachArgument(t *testing.T) {
+	args := []string{"yeet", "safe:@%+=,./-", "/srv/`id`", "line\nbreak", "it's", "$(id)", "two words"}
+	want := "yeet safe:@%+=,./- '/srv/`id`' 'line\nbreak' 'it'\"'\"'s' '$(id)' 'two words'"
+	if got := shellJoin(args); got != want {
+		t.Fatalf("shellJoin = %q, want %q", got, want)
+	}
+}
+
 func TestBuildSSHArgs(t *testing.T) {
 	tests := []struct {
 		name    string

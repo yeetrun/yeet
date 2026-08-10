@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -40,6 +41,9 @@ func (e *ttyExecer) startCmdFunc() error {
 					return fmt.Errorf("failed to start %s: %w", target, err)
 				}
 				return nil
+			}
+			if err := e.preflightActiveSandboxGeneration(); err != nil {
+				return fmt.Errorf("failed to start %s: %w", target, err)
 			}
 			return e.withTailscaleResolverReadyForActivation(func() error {
 				if handled, err := e.installISOServiceIfAllocated(); handled {
@@ -157,28 +161,37 @@ func (e *ttyExecer) rollbackCmdFunc(serviceName string) error {
 
 	return e.withLockedServiceMutation(func() error {
 		ui.StartStep("Select generation")
-		gen, err := e.rollbackGeneration(serviceName)
+		service, gen, err := e.rollbackGeneration(serviceName)
 		if err != nil {
 			ui.FailStep(err.Error())
 			return fmt.Errorf("failed to rollback service: %w", err)
 		}
 		ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 
-		return e.installRollbackGeneration(ui, serviceName, gen)
+		if err := e.preflightSandboxGenerationActivation(service, gen); err != nil {
+			return fmt.Errorf("failed to preflight rollback generation %d: %w", gen, err)
+		}
+		if err := serviceSandboxMutationContext(e.ctx); err != nil {
+			return err
+		}
+		return e.installRollbackGeneration(ui, serviceName, service.Generation, gen)
 	})
 }
 
-func (e *ttyExecer) rollbackGeneration(serviceName string) (int, error) {
-	_, service, err := e.s.cfg.DB.MutateService(serviceName, func(_ *db.Data, s *db.Service) error {
-		if s.ServiceType == db.ServiceTypeVM {
-			return errors.New(vmGenerationRollbackUnsupportedMessage)
-		}
-		return selectPreviousGeneration(s)
-	})
+func (e *ttyExecer) rollbackGeneration(serviceName string) (*db.Service, int, error) {
+	serviceView, err := e.s.serviceView(serviceName)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	return service.Generation, nil
+	service := serviceView.AsStruct()
+	if service.ServiceType == db.ServiceTypeVM {
+		return nil, 0, errors.New(vmGenerationRollbackUnsupportedMessage)
+	}
+	target := service.Clone()
+	if err := selectPreviousGeneration(target); err != nil {
+		return nil, 0, err
+	}
+	return service, target.Generation, nil
 }
 
 func selectPreviousGeneration(s *db.Service) error {
@@ -202,11 +215,217 @@ func selectPreviousGeneration(s *db.Service) error {
 	return nil
 }
 
-func (e *ttyExecer) installRollbackGeneration(ui *runUI, serviceName string, gen int) error {
+func (e *ttyExecer) preflightActiveSandboxGeneration() error {
+	if e.s == nil {
+		return nil
+	}
+	serviceView, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return err
+	}
+	service := serviceView.AsStruct()
+	if service.ServiceType != db.ServiceTypeSystemd {
+		return nil
+	}
+	return e.preflightSandboxGenerationActivation(service, service.Generation)
+}
+
+func (e *ttyExecer) preflightSandboxGenerationActivation(service *db.Service, generation int) error {
+	if e.preflightSandboxGenerationActivationFunc != nil {
+		return e.preflightSandboxGenerationActivationFunc(e.ctx, service, generation)
+	}
+	return e.s.preflightSandboxGenerationActivation(e.ctx, service, generation)
+}
+
+func (s *Server) preflightSandboxGenerationActivation(ctx context.Context, service *db.Service, generation int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	eligible, err := validateSandboxGenerationActivationRequest(ctx, service, generation)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return nil
+	}
+	target, err := s.loadSandboxGenerationActivationTarget(service, generation)
+	if err != nil {
+		return err
+	}
+	if target.policy.State == "legacy" {
+		return preflightLegacySandboxGenerationActivation(ctx, service, generation, target)
+	}
+	return s.preflightCanonicalSandboxGenerationActivation(ctx, service, generation, target)
+}
+
+func preflightLegacySandboxGenerationActivation(
+	ctx context.Context,
+	service *db.Service,
+	generation int,
+	target sandboxGenerationActivationTarget,
+) error {
+	if err := verifyStagedServiceSandboxMutation(ctx, service.Name, target.unitPath, nil, target.identity, false); err != nil {
+		return fmt.Errorf("verify service %q generation %d sandbox activation: %w", service.Name, generation, err)
+	}
+	return serviceSandboxMutationContext(ctx)
+}
+
+func (s *Server) preflightCanonicalSandboxGenerationActivation(
+	ctx context.Context,
+	service *db.Service,
+	generation int,
+	target sandboxGenerationActivationTarget,
+) error {
+	validatedPolicy, plan, err := prepareSandboxGenerationActivationPolicy(ctx, service, generation, target)
+	if err != nil {
+		return err
+	}
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return err
+	}
+	rendered, renderedPlan, err := renderNativeSandboxUnitWithPlan(string(target.raw), nativeSandboxUnitRequest{
+		CurrentPolicy: target.policy, TargetPolicy: validatedPolicy, Identity: target.identity.Persisted,
+		Payload: target.payload, DataDir: target.request.DataDir, Resolver: target.resolver, Hostname: service.Name,
+	}, plan)
+	if err != nil {
+		return fmt.Errorf("rebuild service %q generation %d sandbox unit: %w", service.Name, generation, err)
+	}
+	if rendered != string(target.raw) {
+		return fmt.Errorf("service %q generation %d sandbox unit does not match its exact policy and artifacts", service.Name, generation)
+	}
+	if err := verifyStagedServiceSandboxMutation(ctx, service.Name, target.unitPath, renderedPlan, target.identity, target.policy.State == "on"); err != nil {
+		return fmt.Errorf("verify service %q generation %d sandbox activation: %w", service.Name, generation, err)
+	}
+	return serviceSandboxMutationContext(ctx)
+}
+
+func validateSandboxGenerationActivationRequest(ctx context.Context, service *db.Service, generation int) (bool, error) {
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return false, err
+	}
+	if service == nil {
+		return false, errors.New("sandbox generation activation requires a service")
+	}
+	if service.ServiceType != db.ServiceTypeSystemd {
+		return false, nil
+	}
+	if generation <= 0 {
+		return false, fmt.Errorf("service %q sandbox activation generation %d is invalid", service.Name, generation)
+	}
+	return true, nil
+}
+
+type sandboxGenerationActivationTarget struct {
+	policy   serviceSandboxPolicy
+	unitPath string
+	payload  string
+	resolver string
+	raw      []byte
+	identity resolvedServiceIdentity
+	request  serviceSandboxPlanRequest
+}
+
+type sandboxGenerationActivationArtifact struct {
+	name string
+	path string
+}
+
+func (s *Server) loadSandboxGenerationActivationTarget(service *db.Service, generation int) (sandboxGenerationActivationTarget, error) {
+	policy, err := serviceSandboxPolicyForExactGeneration(service, generation)
+	if err != nil {
+		return sandboxGenerationActivationTarget{}, fmt.Errorf("load service %q generation %d sandbox policy: %w", service.Name, generation, err)
+	}
+	unitPath, err := exactServiceSandboxActivationArtifact(service, db.ArtifactSystemdUnit, generation)
+	if err != nil {
+		return sandboxGenerationActivationTarget{}, err
+	}
+	payload, err := exactServiceSandboxActivationArtifact(service, db.ArtifactBinary, generation)
+	if err != nil {
+		return sandboxGenerationActivationTarget{}, err
+	}
+	resolver := "/etc/resolv.conf"
+	if policy.State != "legacy" {
+		resolver, err = exactServiceSandboxResolver(service, generation)
+		if err != nil {
+			return sandboxGenerationActivationTarget{}, err
+		}
+	}
+	paths := []sandboxGenerationActivationArtifact{
+		{name: "systemd unit", path: unitPath},
+		{name: "payload", path: payload},
+	}
+	if policy.State != "legacy" {
+		if _, exists := service.Artifacts[db.ArtifactNetNSResolv]; exists {
+			paths = append(paths, sandboxGenerationActivationArtifact{name: "resolver", path: resolver})
+		}
+	}
+	if err := validateSandboxGenerationActivationArtifacts(service, generation, paths); err != nil {
+		return sandboxGenerationActivationTarget{}, err
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		return sandboxGenerationActivationTarget{}, fmt.Errorf("read service %q generation %d systemd unit: %w", service.Name, generation, err)
+	}
+	identity := effectiveServiceIdentity(service.View())
+	request := serviceSandboxPlanRequest{
+		Service: service.Name, Policy: policy, Payload: payload,
+		DataDir: serviceDataDirForRoot(serviceRootFromConfig(s.cfg, *service)), ResolverSource: resolver,
+		UID: identity.Persisted.UID, GID: identity.Persisted.GID, Hostname: service.Name,
+	}
+	return sandboxGenerationActivationTarget{
+		policy: policy, unitPath: unitPath, payload: payload, resolver: resolver,
+		raw: raw, identity: identity, request: request,
+	}, nil
+}
+
+func validateSandboxGenerationActivationArtifacts(
+	service *db.Service,
+	generation int,
+	artifacts []sandboxGenerationActivationArtifact,
+) error {
+	for _, artifact := range artifacts {
+		if err := validateReadableServiceSandboxArtifact(artifact.path); err != nil {
+			return fmt.Errorf("validate service %q generation %d %s artifact: %w", service.Name, generation, artifact.name, err)
+		}
+	}
+	return nil
+}
+
+func prepareSandboxGenerationActivationPolicy(
+	ctx context.Context,
+	service *db.Service,
+	generation int,
+	target sandboxGenerationActivationTarget,
+) (serviceSandboxPolicy, *serviceSandboxPlan, error) {
+	if target.policy.State == "legacy" {
+		return target.policy, nil, nil
+	}
+	validatedPolicy, plan, err := prepareServiceSandboxMutationTarget(
+		ctx, service.Name, target.request, target.policy.State == "on",
+	)
+	if err != nil {
+		return serviceSandboxPolicy{}, nil, fmt.Errorf("preflight service %q generation %d sandbox: %w", service.Name, generation, err)
+	}
+	return validatedPolicy, plan, nil
+}
+
+func exactServiceSandboxActivationArtifact(service *db.Service, name db.ArtifactName, generation int) (string, error) {
+	artifact, exists := service.Artifacts[name]
+	if !exists || artifact == nil || artifact.Refs == nil {
+		return "", fmt.Errorf("service %q generation %d has an invalid exact %s artifact record", service.Name, generation, name)
+	}
+	path, ok := artifact.Refs[db.Gen(generation)]
+	if !ok || strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("service %q generation %d has no exact %s artifact", service.Name, generation, name)
+	}
+	return path, nil
+}
+
+func (e *ttyExecer) installRollbackGeneration(ui *runUI, serviceName string, expected, gen int) error {
 	ui.StartStep("Install generation")
 	cfg := e.installerCfg()
 	cfg.ServiceName = serviceName
-	if err := e.installServiceGeneration(cfg, gen); err != nil {
+	if err := e.installServiceGenerationIfCurrent(cfg, expected, gen); err != nil {
 		ui.FailStep(err.Error())
 		return err
 	}
@@ -286,6 +505,27 @@ func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
 	return i.InstallGen(gen)
 }
 
+func (e *ttyExecer) installServiceGenerationIfCurrent(cfg InstallerCfg, expected, gen int) error {
+	if e.serviceInstallGenFunc != nil {
+		if _, _, err := e.s.cfg.DB.MutateService(cfg.ServiceName, func(_ *db.Data, service *db.Service) error {
+			if service.Generation != expected {
+				return fmt.Errorf("service generation changed from expected %d to %d", expected, service.Generation)
+			}
+			service.Generation = gen
+			return nil
+		}); err != nil {
+			return err
+		}
+		return e.serviceInstallGenFunc(cfg, gen)
+	}
+	i, err := e.s.NewInstaller(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create installer: %w", err)
+	}
+	i.NewCmd = e.newCmd
+	return i.InstallGenIfCurrent(expected, gen)
+}
+
 func (e *ttyExecer) restartCmdFunc() error {
 	target := e.managedTargetLabel()
 	return e.withLockedServiceActivationMutation(func() error {
@@ -297,6 +537,9 @@ func (e *ttyExecer) restartCmdFunc() error {
 					return fmt.Errorf("failed to restart %s: %w", target, err)
 				}
 				return nil
+			}
+			if err := e.preflightActiveSandboxGeneration(); err != nil {
+				return fmt.Errorf("failed to restart %s: %w", target, err)
 			}
 			return e.withTailscaleResolverReadyForActivation(func() error {
 				if handled, err := e.installISOServiceIfAllocated(); handled {

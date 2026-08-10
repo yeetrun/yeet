@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -87,6 +88,53 @@ func TestHandleServiceSetRunAsReportsConfigPartialSuccess(t *testing.T) {
 	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestHandleSvcCmdRoutesSandboxSetThroughParserRPCAndCanonicalPersistence(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "host-a"
+	serviceOverride = "api"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "api",
+		Sandbox: "legacy", SandboxRO: []string{"/old"},
+	})
+	wantRemote := []string{
+		"service", "set", "--sandbox=on", "--sandbox-ro=reset", "--sandbox-ro=/requested:/inside",
+	}
+	execRemoteFn = func(_ context.Context, service string, args []string, _ io.Reader, tty bool) error {
+		if service != "api" || !reflect.DeepEqual(args, wantRemote) {
+			t.Fatalf("remote service/args = %q %#v, want api %#v", service, args, wantRemote)
+		}
+		if tty {
+			t.Fatal("sandbox service set unexpectedly requested a TTY")
+		}
+		return nil
+	}
+	fetchServiceInfoForSyncFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "host-a" || service != "api" {
+			t.Fatalf("ServiceInfo target = %s/%s, want host-a/api", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Sandbox: &catchrpc.ServiceSandbox{
+				State: "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{
+					{Source: "/z", Destination: "/z"},
+					{Source: "/requested", Destination: "/inside"},
+				},
+			},
+		}}, nil
+	}
+
+	if err := HandleSvcCmd(wantRemote); err != nil {
+		t.Fatalf("HandleSvcCmd sandbox set: %v", err)
+	}
+	loaded := mustLoadProjectConfig(t)
+	entry, ok := loaded.Config.ServiceEntry("api", "host-a")
+	if !ok || entry.Sandbox != "on" || !reflect.DeepEqual(entry.SandboxRO, []string{"/requested:/inside", "/z"}) || len(entry.SandboxRW) != 0 {
+		t.Fatalf("persisted sandbox = %#v, want canonical Catch result", entry)
 	}
 }
 

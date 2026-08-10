@@ -338,6 +338,126 @@ func TestProjectConfigRunAsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProjectConfigSandboxRoundTripUsesStableCanonicalFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{name: "on", state: "on"},
+		{name: "off", state: "off"},
+		{name: "legacy", state: "legacy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			loc := &projectConfigLocation{
+				Path: filepath.Join(dir, projectConfigName), Dir: dir,
+				Config: &ProjectConfig{Version: projectConfigVersion},
+			}
+			loc.Config.SetServiceEntry(ServiceEntry{
+				Name: "api", Host: "host-a", Sandbox: tt.state,
+				SandboxRO: []string{"/srv/z:/z", "/etc/ssl"},
+				SandboxRW: []string{"/srv/work:/work", "/srv/cache"},
+			})
+			if err := saveProjectConfig(loc); err != nil {
+				t.Fatalf("saveProjectConfig: %v", err)
+			}
+
+			raw, err := os.ReadFile(loc.Path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			text := string(raw)
+			stateAt := strings.Index(text, "sandbox = ")
+			roAt := strings.Index(text, "sandbox_ro = ")
+			rwAt := strings.Index(text, "sandbox_rw = ")
+			if stateAt < 0 || roAt <= stateAt || rwAt <= roAt {
+				t.Fatalf("sandbox TOML fields are absent or unstable:\n%s", text)
+			}
+			if !strings.Contains(text, `sandbox_ro = ["/etc/ssl", "/srv/z:/z"]`) ||
+				!strings.Contains(text, `sandbox_rw = ["/srv/cache", "/srv/work:/work"]`) {
+				t.Fatalf("sandbox TOML lists are not canonical:\n%s", text)
+			}
+
+			loaded, err := loadProjectConfigFromFile(loc.Path)
+			if err != nil {
+				t.Fatalf("loadProjectConfigFromFile: %v", err)
+			}
+			entry, ok := loaded.Config.ServiceEntry("api", "host-a")
+			if !ok {
+				t.Fatal("sandbox entry missing after round trip")
+			}
+			if entry.Sandbox != tt.state ||
+				!reflect.DeepEqual(entry.SandboxRO, []string{"/etc/ssl", "/srv/z:/z"}) ||
+				!reflect.DeepEqual(entry.SandboxRW, []string{"/srv/cache", "/srv/work:/work"}) {
+				t.Fatalf("sandbox entry = %#v", entry)
+			}
+		})
+	}
+}
+
+func TestProjectConfigSandboxAbsenceRemainsCompatible(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, projectConfigName)
+	if err := os.WriteFile(path, []byte("version = 1\n\n[[services]]\nname = \"api\"\nhost = \"host-a\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	loc, err := loadProjectConfigFromFile(path)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("api", "host-a")
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	if entry.Sandbox != "" || entry.SandboxRO != nil || entry.SandboxRW != nil {
+		t.Fatalf("absent sandbox fields = %#v, want zero values", entry)
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "sandbox") {
+		t.Fatalf("absent sandbox fields were emitted:\n%s", raw)
+	}
+}
+
+func TestProjectConfigSandboxSlicesAreDeepCloned(t *testing.T) {
+	cfg := &ProjectConfig{}
+	input := ServiceEntry{
+		Name: "api", Host: "host-a", Sandbox: "on",
+		SandboxRO: []string{"/etc/ssl"}, SandboxRW: []string{"/srv/cache"},
+	}
+	cfg.SetServiceEntry(input)
+	input.SandboxRO[0] = "/mutated-input"
+	input.SandboxRW[0] = "/mutated-input"
+
+	first, ok := cfg.ServiceEntry("api", "host-a")
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	first.SandboxRO[0] = "/mutated-result"
+	first.SandboxRW[0] = "/mutated-result"
+	second, _ := cfg.ServiceEntry("api", "host-a")
+	if !reflect.DeepEqual(second.SandboxRO, []string{"/etc/ssl"}) || !reflect.DeepEqual(second.SandboxRW, []string{"/srv/cache"}) {
+		t.Fatalf("stored sandbox lists aliased caller/result: %#v", second)
+	}
+
+	cfg.ReplaceServiceEntry(ServiceEntry{
+		Name: "api", Host: "host-a", Sandbox: "off",
+		SandboxRO: []string{"/srv/read"}, SandboxRW: []string{"/srv/write"},
+	})
+	replaced, _ := cfg.ServiceEntry("api", "host-a")
+	replaced.SandboxRO[0] = "/mutated-replacement"
+	replacedAgain, _ := cfg.ServiceEntry("api", "host-a")
+	if !reflect.DeepEqual(replacedAgain.SandboxRO, []string{"/srv/read"}) {
+		t.Fatalf("replacement sandbox list aliased result: %#v", replacedAgain.SandboxRO)
+	}
+}
+
 func TestProjectConfigRunAsPayloadArgumentIsNotControlFlag(t *testing.T) {
 	oldService := serviceOverride
 	t.Cleanup(func() { serviceOverride = oldService })
@@ -871,6 +991,7 @@ func TestSaveRunConfigPublishResetClearsPorts(t *testing.T) {
 
 func TestRunFromProjectConfigRehydratesPorts(t *testing.T) {
 	preserveSvcCommandGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"

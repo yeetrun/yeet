@@ -333,6 +333,9 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 }
 
 func (e *ttyExecer) runVMPayload(flags cli.RunFlags, args []string) error {
+	if flags.Sandbox.HasChange() {
+		return errors.New(sandboxNativePayloadOnlyMessage)
+	}
 	if flags.CronSet {
 		return errors.New(scheduledNativeOnlyMessage)
 	}
@@ -370,6 +373,7 @@ func (e *ttyExecer) runFileInstallerCfg(flags cli.RunFlags, argsIn []string) (Fi
 	cfg.Pull = flags.Pull
 	cfg.RunAs = flags.RunAs
 	cfg.RunAsSet = flags.RunAsSet
+	cfg.Sandbox = flags.Sandbox
 	cfg.snapshotPolicyFlags = snapshotFlags
 	if flags.CronSet {
 		onCalendar, err := cronutil.CronToCalender(flags.Cron)

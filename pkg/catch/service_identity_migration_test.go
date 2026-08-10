@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1499,6 +1500,136 @@ func TestCombinedRootIdentityFailureRetryCommandPreservesRootPlan(t *testing.T) 
 	}
 }
 
+func TestServiceIdentityGenerationOnlyFailureWordingDoesNotClaimIdentityChange(t *testing.T) {
+	server := newTestServer(t)
+	identity := db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}
+	previous := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 1, Identity: &identity}
+	target := previous.Clone()
+	target.Generation = 2
+	target.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+		db.Gen(2): {State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/source", Destination: "/operator"}}},
+	}}
+	diagnostic, err := serviceSandboxGenerationDiagnostic("api", target)
+	if err != nil {
+		t.Fatalf("serviceSandboxGenerationDiagnostic: %v", err)
+	}
+	migration := &serviceIdentityMigration{
+		server: server,
+		req: serviceIdentityMigrationRequest{
+			Service: "api", Requested: "root:root", Target: resolvedServiceIdentity{Persisted: identity},
+			TargetService: target, PreserveTargetServiceIdentity: true,
+			GenerationDiagnostic: diagnostic,
+		},
+		previous: previous, target: target,
+		result: serviceIdentityMigrationResult{Previous: resolvedServiceIdentity{Persisted: identity}},
+	}
+	err = migration.migrationError(errors.New("injected generation failure"), nil)
+	if strings.Contains(err.Error(), "identity migration") || strings.Contains(err.Error(), "--run-as") {
+		t.Fatalf("generation-only error claims identity change: %v", err)
+	}
+	for _, want := range []string{"sandbox service generation mutation", "--sandbox=off", "--sandbox-ro=reset", "--sandbox-ro=/source:/operator"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("generation-only error missing %q: %v", want, err)
+		}
+	}
+	migration.req.PreserveTargetServiceIdentity = false
+	identityErr := migration.migrationError(errors.New("injected identity failure"), nil)
+	for _, want := range []string{"service identity migration for native systemd service", "--run-as=root:root", "database identity"} {
+		if !strings.Contains(identityErr.Error(), want) {
+			t.Fatalf("identity error lost existing wording %q: %v", want, identityErr)
+		}
+	}
+}
+
+func TestServiceIdentityScheduleGenerationFailureKeepsGenericGuidanceForSandboxedService(t *testing.T) {
+	server := newTestServer(t)
+	identity := db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}
+	policy := &db.ServiceSandboxPolicy{State: "on"}
+	previous := &db.Service{
+		Name: "reports", ServiceType: db.ServiceTypeSystemd, Generation: 1, LatestGeneration: 1, Identity: &identity,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(1): policy.Clone(), "latest": policy.Clone(),
+		}},
+	}
+	target := previous.Clone()
+	target.Generation, target.LatestGeneration = 2, 2
+	target.Sandbox.Refs[db.Gen(2)] = policy.Clone()
+	target.Sandbox.Refs["latest"] = policy.Clone()
+	migration := &serviceIdentityMigration{
+		server: server,
+		req: serviceIdentityMigrationRequest{
+			Service: "reports", Requested: "root:root", Target: resolvedServiceIdentity{Persisted: identity},
+			TargetService: target, PreserveTargetServiceIdentity: true,
+			Schedule: &serviceScheduleJournalState{TimerPath: "/etc/systemd/system/reports.timer", TimerUnit: "reports.timer"},
+		},
+		previous: previous, target: target,
+		result: serviceIdentityMigrationResult{Previous: resolvedServiceIdentity{Persisted: identity}},
+	}
+	err := migration.migrationError(errors.New("injected schedule generation failure"), nil)
+	for _, forbidden := range []string{"sandbox service generation mutation", "--sandbox="} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("schedule generation error contains sandbox diagnostic %q: %v", forbidden, err)
+		}
+	}
+	for _, want := range []string{"service generation mutation", "retry the original generation-changing service command"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("schedule generation error missing %q: %v", want, err)
+		}
+	}
+}
+
+func TestServiceSandboxMutationTimerLifecycleNeverStartsPayload(t *testing.T) {
+	server := newTestServer(t)
+	service := &db.Service{
+		Name: "reports", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit:      {Refs: map[db.ArtifactRef]string{db.Gen(1): "/unit"}},
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/timer"}},
+		},
+	}
+	migration := &serviceIdentityMigration{server: server, previous: service.Clone(), target: service.Clone()}
+	active := map[string]bool{"reports.timer": true, "reports.service": false}
+	counter := filepath.Join(t.TempDir(), "payload-counter")
+	oldSystemctl, oldActive := catchSystemctl, catchSystemdUnitActive
+	catchSystemdUnitActive = func(unit string) bool { return active[unit] }
+	catchSystemctl = func(args ...string) error {
+		if len(args) != 2 {
+			return nil
+		}
+		switch args[0] {
+		case "stop":
+			active[args[1]] = false
+		case "start":
+			active[args[1]] = true
+			if args[1] == "reports.service" {
+				return os.WriteFile(counter, []byte("executed"), 0o600)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { catchSystemctl, catchSystemdUnitActive = oldSystemctl, oldActive })
+	ops := migration.defaultOps()
+	desired, err := ops.captureRuntime(context.Background(), "reports")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ops.stop(context.Background(), "reports"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ops.start(context.Background(), "reports"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ops.restoreRuntime(context.Background(), "reports", desired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(counter); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("far-future timer executed payload: %v", err)
+	}
+	if !active["reports.timer"] || active["reports.service"] {
+		t.Fatalf("restored timer runtime = %#v", active)
+	}
+}
+
 func TestCombinedRootIdentitySnapshotsSourceBeforeAndTargetAfterMaterialization(t *testing.T) {
 	server := newTestServer(t)
 	oldRoot := filepath.Join(t.TempDir(), "old")
@@ -2733,4 +2864,490 @@ func TestRewriteServiceIdentityUnitAcceptsGeneratedInstallSection(t *testing.T) 
 	if !strings.Contains(rewritten, "[Install]\n") {
 		t.Fatalf("rewritten unit dropped generated [Install] section:\n%s", rewritten)
 	}
+}
+
+func TestRewriteServiceIdentityUnitPreservesSandboxHomeAndWorkingDirectory(t *testing.T) {
+	root := "/srv/api"
+	dataDir := root + "/data"
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1001, GID: 1002}
+	for _, tt := range []struct {
+		name             string
+		execStart        string
+		workingDirectory string
+	}{
+		{name: "sandbox on", execStart: bubblewrapPath + " -- " + root + "/bin/api", workingDirectory: "/"},
+		{name: "sandbox off", execStart: root + "/bin/api", workingDirectory: dataDir},
+		{name: "legacy", execStart: root + "/bin/api", workingDirectory: dataDir},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "[Service]\nExecStart=" + tt.execStart + "\nUser=root\nGroup=root\n" +
+				"WorkingDirectory=" + tt.workingDirectory + "\n" +
+				"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n"
+			rewritten, err := rewriteServiceIdentityUnit(raw, identity, root)
+			if err != nil {
+				t.Fatalf("rewrite service identity: %v", err)
+			}
+			for _, want := range []string{
+				"WorkingDirectory=" + tt.workingDirectory + "\n",
+				"Environment=HOME=" + dataDir + " USER=app LOGNAME=app SHELL=/bin/sh\n",
+			} {
+				if !strings.Contains(rewritten, want) {
+					t.Fatalf("rewritten identity missing %q:\n%s", want, rewritten)
+				}
+			}
+		})
+	}
+}
+
+func TestRewriteServiceIdentityUnitRecognizesSandboxLayoutIndependentOfDirectiveOrder(t *testing.T) {
+	root := "/srv/api"
+	dataDir := root + "/data"
+	raw := "[Service]\n" +
+		"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n" +
+		"WorkingDirectory=/\n" +
+		"ExecStart=" + bubblewrapPath + " -- " + root + "/bin/api\n"
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1001, GID: 1002}
+	rewritten, err := rewriteServiceIdentityUnit(raw, identity, root)
+	if err != nil {
+		t.Fatalf("rewrite service identity: %v", err)
+	}
+	for _, want := range []string{
+		"WorkingDirectory=/\n",
+		"Environment=HOME=" + dataDir + " USER=app LOGNAME=app SHELL=/bin/sh\n",
+	} {
+		if !strings.Contains(rewritten, want) {
+			t.Fatalf("order-independent identity rewrite missing %q:\n%s", want, rewritten)
+		}
+	}
+}
+
+func TestRewriteServiceIdentityUnitPreservesEnvironmentWithExtraAssignment(t *testing.T) {
+	root := "/srv/api"
+	dataDir := root + "/data"
+	extra := "Environment=HOME=/operator USER=operator LOGNAME=operator EXTRA=preserve SHELL=/bin/sh"
+	raw := "[Service]\nWorkingDirectory=/\n" + extra + "\n" +
+		"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n" +
+		"ExecStart=" + bubblewrapPath + " -- " + root + "/bin/api\n"
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1001, GID: 1002}
+	rewritten, err := rewriteServiceIdentityUnit(raw, identity, root)
+	if err != nil {
+		t.Fatalf("rewrite service identity: %v", err)
+	}
+	if !strings.Contains(rewritten, extra+"\n") {
+		t.Fatalf("identity rewrite discarded operator environment assignment:\n%s", rewritten)
+	}
+	if !strings.Contains(rewritten, "Environment=HOME="+dataDir+" USER=app LOGNAME=app SHELL=/bin/sh\n") {
+		t.Fatalf("identity rewrite lost canonical managed environment:\n%s", rewritten)
+	}
+}
+
+func TestPrepareServiceSetIdentityMigrationRebuildsAndProbesSandboxForTargetIdentity(t *testing.T) {
+	server, service := newServiceSandboxMutationFixture(t, serviceSandboxPolicy{State: "on"})
+	targetUID := uint32(os.Geteuid())
+	targetGID := uint32(os.Getegid())
+	targetUser := strconv.FormatUint(uint64(targetUID), 10)
+	targetGroup := strconv.FormatUint(uint64(targetGID), 10)
+	payload, _ := service.Artifacts.Gen(db.ArtifactBinary, service.Generation)
+	unitPath, _ := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+	dataDir := server.serviceDataDir(service.Name)
+	oldArgv := bubblewrapPath + " --uid 0 --gid 0 -- " + payload + " --serve"
+	unit := "[Service]\nExecStart=" + oldArgv + "\nUser=root\nGroup=root\nWorkingDirectory=/\n" +
+		"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n"
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEnsure := ensureBubblewrapForServiceSandboxMutation
+	oldValidate := validateServiceSandboxPolicyForMutation
+	oldProbe := probeServiceSandboxForMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+	})
+	var order []string
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		order = append(order, "ensure")
+		return nil
+	}
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+		order = append(order, fmt.Sprintf("validate:%t:%d:%d", active, req.UID, req.GID))
+		return req.Policy, nil
+	}
+	probeServiceSandboxForMutation = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+		order = append(order, fmt.Sprintf("probe:%d:%d", uid, gid))
+		if !slicesContainAdjacent(plan.Arguments, "--uid", targetUser) || !slicesContainAdjacent(plan.Arguments, "--gid", targetGroup) {
+			t.Fatalf("probe plan retained stale identity: %#v", plan.Arguments)
+		}
+		return nil
+	}
+
+	target := resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+		RequestedUser: targetUser, RequestedGroup: targetGroup, UID: targetUID, GID: targetGID,
+	}}
+	previous := service.Clone()
+	targetService := service.Clone()
+	targetIdentity := target.Persisted
+	targetService.Identity = &targetIdentity
+	migration := &serviceIdentityMigration{
+		server:   server,
+		previous: previous,
+		target:   targetService,
+		result:   serviceIdentityMigrationResult{Root: server.serviceRootFromView(targetService.View())},
+		req: serviceIdentityMigrationRequest{
+			Service: service.Name, Target: target, ReplacementUnit: unit,
+		},
+	}
+	if err := migration.prepareServiceIdentitySandboxReplacement(context.Background()); err != nil {
+		t.Fatalf("prepare identity sandbox replacement: %v", err)
+	}
+	wantOrder := []string{
+		"ensure",
+		fmt.Sprintf("validate:true:%d:%d", targetUID, targetGID),
+		fmt.Sprintf("probe:%d:%d", targetUID, targetGID),
+	}
+	if diff := cmp.Diff(wantOrder, order); diff != "" {
+		t.Fatalf("sandbox identity preflight order mismatch (-want +got):\n%s", diff)
+	}
+	argv := serviceIdentityExecStartArgv(t, migration.req.ReplacementUnit)
+	if !slicesContainAdjacent(argv, "--uid", targetUser) || !slicesContainAdjacent(argv, "--gid", targetGroup) {
+		t.Fatalf("replacement ExecStart retained stale identity: %#v", argv)
+	}
+	separator := 0
+	for _, arg := range argv {
+		if arg == "--" {
+			separator++
+		}
+	}
+	if separator != 1 || len(argv) < 2 || argv[len(argv)-2] != payload || argv[len(argv)-1] != "--serve" {
+		t.Fatalf("replacement payload argv = %#v, want one separator and exact payload argv", argv)
+	}
+}
+
+func TestPrepareServiceIdentitySandboxReplacementLegacyAndOffSkipArtifactPreflight(t *testing.T) {
+	for _, state := range []string{"legacy", "off"} {
+		t.Run(state, func(t *testing.T) {
+			server := newTestServer(t)
+			service := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd}
+			if state == "off" {
+				service.Generation = 1
+				service.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+					db.Gen(1): {State: "off"},
+				}}
+			}
+			identity := effectiveServiceIdentity(service.View())
+			replacement := "[Service]\nExecStart=/missing-by-design\n"
+			migration := &serviceIdentityMigration{
+				server: server, previous: service.Clone(), target: service.Clone(),
+				result: serviceIdentityMigrationResult{Root: server.serviceRootFromView(service.View())},
+				req: serviceIdentityMigrationRequest{
+					Service: service.Name, Target: identity, ReplacementUnit: replacement,
+				},
+			}
+
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			t.Cleanup(func() {
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+			})
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				t.Fatal("legacy/off identity replacement ensured Bubblewrap")
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(serviceSandboxPlanRequest, bool) (serviceSandboxPolicy, error) {
+				t.Fatal("legacy/off identity replacement validated sandbox artifacts")
+				return serviceSandboxPolicy{}, nil
+			}
+			probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+				t.Fatal("legacy/off identity replacement probed Bubblewrap")
+				return nil
+			}
+
+			if err := migration.prepareServiceIdentitySandboxReplacement(context.Background()); err != nil {
+				t.Fatalf("prepare %s identity replacement: %v", state, err)
+			}
+			if migration.req.ReplacementUnit != replacement {
+				t.Fatalf("%s replacement changed = %q, want %q", state, migration.req.ReplacementUnit, replacement)
+			}
+		})
+	}
+}
+
+func TestPrepareServiceIdentityReplacementDefersSandboxToGenerationTransaction(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		request func(*db.Service) serviceIdentityMigrationRequest
+	}{
+		{
+			name: "stage generation",
+			request: func(_ *db.Service) serviceIdentityMigrationRequest {
+				return serviceIdentityMigrationRequest{StageGeneration: func(context.Context) error { return nil }}
+			},
+		},
+		{
+			name: "target service",
+			request: func(target *db.Service) serviceIdentityMigrationRequest {
+				return serviceIdentityMigrationRequest{TargetService: target}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, previous := newServiceSandboxMutationFixture(t, serviceSandboxPolicy{State: "on"})
+			target := previous.Clone()
+			delete(target.Artifacts, db.ArtifactBinary)
+			identity := effectiveServiceIdentity(target.View())
+			request := tt.request(target)
+			request.Service = target.Name
+			request.Target = identity
+			request.ReplacementUnit = "[Service]\nExecStart=/generation-owned\n"
+			migration := &serviceIdentityMigration{
+				server: server, previous: previous, target: target,
+				result: serviceIdentityMigrationResult{Root: server.serviceRootFromView(target.View())}, req: request,
+			}
+			if err := migration.prepareReplacementServiceIdentityUnit(context.Background()); err != nil {
+				t.Fatalf("generation-owned replacement triggered duplicate sandbox preflight: %v", err)
+			}
+			if migration.req.ReplacementUnit != request.ReplacementUnit {
+				t.Fatalf("generation-owned replacement changed: %q", migration.req.ReplacementUnit)
+			}
+		})
+	}
+}
+
+func TestServiceIdentityRootMigrationPreflightsCurrentSandboxBeforeStopping(t *testing.T) {
+	for _, failure := range []string{"dependency", "path", "probe", "static"} {
+		t.Run(failure, func(t *testing.T) {
+			fixture := newRootSandboxActivationMigrationFixture(t)
+			injected := errors.New("injected source " + failure + " failure")
+			if failure == "path" {
+				fixture.service.Artifacts[db.ArtifactBinary].Refs[db.Gen(fixture.service.Generation)] = filepath.Join(fixture.oldRoot, "run", "missing-payload")
+				if err := fixture.server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": fixture.service.Clone()}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			oldEnsure, oldValidate := ensureBubblewrapForServiceSandboxMutation, validateServiceSandboxPolicyForMutation
+			oldProbe, oldVerify := probeServiceSandboxForMutation, verifyGeneratedSystemdUnitForSandboxMutation
+			t.Cleanup(func() {
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+			})
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				if failure == "dependency" {
+					return injected
+				}
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+				return req.Policy, nil
+			}
+			probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+				if failure == "probe" {
+					return injected
+				}
+				return nil
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(context.Context, string) error {
+				if failure == "static" {
+					return injected
+				}
+				return nil
+			}
+
+			counters := &rootSandboxActivationMigrationCounters{}
+			request := fixture.request(counters)
+			request.ops.stop = func(context.Context, string) error {
+				counters.stop++
+				return errors.New("stop reached before source sandbox preflight")
+			}
+			_, err := fixture.server.migrateServiceIdentity(context.Background(), request, io.Discard)
+			if err == nil {
+				t.Fatal("root migration succeeded despite source sandbox preflight failure")
+			}
+			if failure != "path" && !strings.Contains(err.Error(), injected.Error()) {
+				t.Fatalf("root migration error = %v, want %q", err, injected)
+			}
+			if failure == "path" && !strings.Contains(err.Error(), "missing-payload") {
+				t.Fatalf("root migration error = %v, want exact source artifact failure", err)
+			}
+			if counters.stop != 0 || counters.materialize != 0 || counters.restoreRuntime != 0 {
+				t.Fatalf("source preflight failure mutated runtime/root: stop=%d materialize=%d restore=%d", counters.stop, counters.materialize, counters.restoreRuntime)
+			}
+			fixture.assertSourceAndDatabaseUnchanged(t)
+		})
+	}
+}
+
+func TestServiceIdentityRootMigrationPreflightsExactTargetSandboxBeforeActivation(t *testing.T) {
+	fixture := newRootSandboxActivationMigrationFixture(t)
+	injected := errors.New("injected exact target static verification failure")
+	oldEnsure, oldValidate := ensureBubblewrapForServiceSandboxMutation, validateServiceSandboxPolicyForMutation
+	oldProbe, oldVerify := probeServiceSandboxForMutation, verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+		verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+	})
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error { return nil }
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+		return req.Policy, nil
+	}
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error { return nil }
+	var verified []string
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		verified = append(verified, path)
+		if strings.HasPrefix(filepath.Clean(path), filepath.Clean(fixture.targetRoot)+string(filepath.Separator)) {
+			return injected
+		}
+		return nil
+	}
+
+	counters := &rootSandboxActivationMigrationCounters{}
+	_, err := fixture.server.migrateServiceIdentity(context.Background(), fixture.request(counters), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("root migration error = %v, want %q", err, injected)
+	}
+	if len(verified) != 2 || !strings.HasPrefix(filepath.Clean(verified[1]), filepath.Clean(fixture.targetRoot)+string(filepath.Separator)) {
+		t.Fatalf("static verification paths = %#v, want source then exact target", verified)
+	}
+	if counters.stop != 1 || counters.materialize != 1 || counters.restoreRuntime != 1 {
+		t.Fatalf("target preflight rollback lifecycle: stop=%d materialize=%d restore=%d, want 1 each", counters.stop, counters.materialize, counters.restoreRuntime)
+	}
+	if counters.stage != 0 || counters.apply != 0 || counters.writeUnit != 0 || counters.install != 0 || counters.start != 0 || counters.commit != 0 {
+		t.Fatalf("target preflight failure activated transaction: %#v", counters)
+	}
+	if _, statErr := os.Lstat(fixture.targetRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("materialized target remained after rollback: %v", statErr)
+	}
+	fixture.assertSourceAndDatabaseUnchanged(t)
+}
+
+type rootSandboxActivationMigrationCounters struct {
+	stop, start, restoreRuntime, materialize int
+	stage, apply, writeUnit, install, commit int
+}
+
+type rootSandboxActivationMigrationFixture struct {
+	server     *Server
+	service    *db.Service
+	oldRoot    string
+	targetRoot string
+	unitPath   string
+	unitRaw    []byte
+}
+
+func newRootSandboxActivationMigrationFixture(t *testing.T) rootSandboxActivationMigrationFixture {
+	t.Helper()
+	server, service, _ := serviceActivationSandboxFixture(t, "on", false)
+	unitPath, ok := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
+	if !ok {
+		t.Fatal("activation fixture has no exact unit")
+	}
+	unitRaw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rootSandboxActivationMigrationFixture{
+		server: server, service: service, oldRoot: service.ServiceRoot,
+		targetRoot: filepath.Join(filepath.Dir(service.ServiceRoot), "api-relocated"),
+		unitPath:   unitPath, unitRaw: unitRaw,
+	}
+}
+
+func (fixture rootSandboxActivationMigrationFixture) request(counters *rootSandboxActivationMigrationCounters) serviceIdentityMigrationRequest {
+	identity := effectiveServiceIdentity(fixture.service.View())
+	ops := &serviceIdentityMigrationOps{
+		unitPath: func(string) string { return fixture.unitPath },
+		captureRuntime: func(context.Context, string) ([]serviceIdentityRuntimeUnitState, error) {
+			return []serviceIdentityRuntimeUnitState{{Unit: "api.service", Active: true}}, nil
+		},
+		restoreRuntime: func(context.Context, string, []serviceIdentityRuntimeUnitState) error {
+			counters.restoreRuntime++
+			return nil
+		},
+		stop:  func(context.Context, string) error { counters.stop++; return nil },
+		start: func(context.Context, string) error { counters.start++; return nil },
+		materialize: func(ctx context.Context, plan serviceRootMigrationPlan, writer io.Writer) (bool, error) {
+			counters.materialize++
+			return false, materializeServiceRootMigration(ctx, plan, writer)
+		},
+		discardRoot: func(_ context.Context, plan serviceRootMigrationPlan, _ bool) error {
+			return os.RemoveAll(plan.NewRoot)
+		},
+		inspect: func(context.Context, serviceIdentityInspectionRequest) (serviceIdentityInspection, error) {
+			return serviceIdentityInspection{}, nil
+		},
+		inspectSource: func(context.Context, serviceIdentityInspectionRequest) (serviceIdentityInspection, error) {
+			return serviceIdentityInspection{}, nil
+		},
+		apply:   func(serviceIdentityInspection, *serviceIdentityJournal) error { counters.apply++; return nil },
+		restore: func(string) error { return nil },
+		reload:  func(context.Context) error { return nil },
+		writeUnit: func(string, []byte, os.FileMode, serviceIdentityPathProof, uint32, uint32) error {
+			counters.writeUnit++
+			return nil
+		},
+		verify:    func(context.Context, serviceIdentityMigrationVerification) error { return nil },
+		commit:    func(*db.Service, *db.Service) error { counters.commit++; return nil },
+		remove:    func(path string) error { return os.Remove(path) },
+		isEnabled: func(context.Context, string) (bool, error) { return false, nil },
+		enable:    func(context.Context, string) error { return nil },
+		disable:   func(context.Context, string) error { return nil },
+	}
+	return serviceIdentityMigrationRequest{
+		Service: fixture.service.Name, Requested: identity.Persisted.RequestedUser, Target: identity,
+		TargetService: fixture.service.Clone(),
+		RootPlan: &serviceRootMigrationPlan{
+			ServiceName: fixture.service.Name, OldRoot: fixture.oldRoot, NewRoot: fixture.targetRoot,
+			Mode: serviceRootMigrationCopy,
+		},
+		StageGeneration:   func(context.Context) error { counters.stage++; return nil },
+		InstallGeneration: func(context.Context) error { counters.install++; return nil },
+		ops:               ops,
+	}
+}
+
+func (fixture rootSandboxActivationMigrationFixture) assertSourceAndDatabaseUnchanged(t *testing.T) {
+	t.Helper()
+	raw, err := os.ReadFile(fixture.unitPath)
+	if err != nil || !bytes.Equal(raw, fixture.unitRaw) {
+		t.Fatalf("source unit changed: %v\n%s", err, raw)
+	}
+	current, err := fixture.server.serviceView(fixture.service.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(fixture.service, current.AsStruct()); diff != "" {
+		t.Fatalf("database changed (-want +got):\n%s", diff)
+	}
+}
+
+func serviceIdentityExecStartArgv(t *testing.T, raw string) []string {
+	t.Helper()
+	for _, line := range strings.Split(raw, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); ok {
+			argv, err := svc.ParseSystemdExecStart(value)
+			if err != nil {
+				t.Fatalf("parse replacement ExecStart: %v", err)
+			}
+			return argv
+		}
+	}
+	t.Fatal("replacement unit has no ExecStart")
+	return nil
+}
+
+func slicesContainAdjacent(values []string, first, second string) bool {
+	for index := 0; index+1 < len(values); index++ {
+		if values[index] == first && values[index+1] == second {
+			return true
+		}
+	}
+	return false
 }

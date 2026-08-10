@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -148,6 +149,73 @@ func TestRenderInfoPlainIncludesNativeIdentityAndWarning(t *testing.T) {
 	text := out.String()
 	assertPlainRow(t, text, "Run as", "app:app (UID 1002, GID 1003; operator)")
 	assertPlainRow(t, text, "Identity warning", server.Info.Identity.Mismatch)
+}
+
+func TestRenderInfoPlainIncludesActiveSandboxAndLegacyMigration(t *testing.T) {
+	on := catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+		ServiceType: "systemd",
+		Sandbox: &catchrpc.ServiceSandbox{
+			State: "on",
+			ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/z", Destination: "/inside/z"},
+				{Source: "/a", Destination: "/a"},
+			},
+			Writable: []catchrpc.ServiceSandboxExposure{{Source: "/work", Destination: "/data"}},
+		},
+	}}
+	var plain bytes.Buffer
+	if err := renderInfoPlain(&plain, "api", "host", nil, serverInfo{}, clientInfo{}, on); err != nil {
+		t.Fatalf("renderInfoPlain on: %v", err)
+	}
+	assertPlainRow(t, plain.String(), "Sandbox", "on")
+	assertPlainRow(t, plain.String(), "Sandbox read-only", "/a, /z:/inside/z")
+	assertPlainRow(t, plain.String(), "Sandbox writable", "/work:/data")
+	if strings.Contains(plain.String(), "Sandbox migration") {
+		t.Fatalf("on sandbox rendered migration guidance:\n%s", plain.String())
+	}
+
+	legacy := catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+		ServiceType: "systemd",
+		Sandbox:     &catchrpc.ServiceSandbox{State: "legacy"},
+	}}
+	plain.Reset()
+	if err := renderInfoPlain(&plain, "api", "host", nil, serverInfo{}, clientInfo{}, legacy); err != nil {
+		t.Fatalf("renderInfoPlain legacy: %v", err)
+	}
+	assertPlainRow(t, plain.String(), "Sandbox", "legacy")
+	assertPlainRow(t, plain.String(), "Sandbox migration", "yeet service set api --sandbox=on (or --sandbox=off)")
+	if !strings.Contains(plain.String(), "yeet service set api --sandbox=on  (or --sandbox=off)") {
+		t.Fatalf("legacy migration output lost concise two-option formatting:\n%s", plain.String())
+	}
+}
+
+func TestInfoJSONPreservesTypedSandboxObject(t *testing.T) {
+	want := &catchrpc.ServiceSandbox{
+		State:    "off",
+		ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/input", Destination: "/input"}},
+		Writable: []catchrpc.ServiceSandboxExposure{{Source: "/cache", Destination: "/var/cache/app"}},
+	}
+	out := infoOutput{
+		Service: "api",
+		Host:    "host-a",
+		Server:  catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{Sandbox: want}},
+	}
+	var encoded bytes.Buffer
+	if err := encodeInfoOutput(&encoded, "json", out); err != nil {
+		t.Fatalf("encodeInfoOutput: %v", err)
+	}
+	var decoded infoOutput
+	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode info JSON: %v", err)
+	}
+	if !reflect.DeepEqual(decoded.Server.Info.Sandbox, want) {
+		t.Fatalf("decoded sandbox = %#v, want typed object %#v", decoded.Server.Info.Sandbox, want)
+	}
+	for _, fragment := range []string{`"sandbox":{"state":"off"`, `"source":"/input"`, `"destination":"/var/cache/app"`} {
+		if !strings.Contains(encoded.String(), fragment) {
+			t.Fatalf("JSON = %s, want %s", encoded.String(), fragment)
+		}
+	}
 }
 
 func TestFormatManagedServiceIdentityInfo(t *testing.T) {

@@ -969,10 +969,13 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return wrapServiceSetRemoteError(err, flags)
 	}
-	return saveServiceSetResult(req, flags)
+	return saveServiceSetResult(ctx, req, flags)
 }
 
-func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) error {
+func saveServiceSetResult(ctx context.Context, req svcCommandRequest, flags cli.ServiceSetFlags) error {
+	if flags.Sandbox.HasChange() {
+		return saveSandboxServiceSetResult(ctx, req)
+	}
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
 		if flags.CronSet {
@@ -992,12 +995,52 @@ func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) erro
 	return nil
 }
 
+func saveSandboxServiceSetResult(ctx context.Context, req svcCommandRequest) error {
+	entry, ok := serviceEntryForConfig(req.Config, req.HostOverride)
+	if !ok {
+		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
+	}
+	host := serviceSetConfigHost(req)
+	response, err := fetchServiceInfoForSyncFn(ctx, host, req.Service)
+	if err != nil {
+		return serviceSandboxConfigWriteError(req, err)
+	}
+	if !response.Found {
+		return serviceSandboxConfigWriteError(req, fmt.Errorf("service info reports service not found"))
+	}
+	if strings.TrimSpace(response.Info.ServiceType) != "systemd" {
+		return serviceSandboxConfigWriteError(req, fmt.Errorf("catch returned sandbox state for non-native service type %q", response.Info.ServiceType))
+	}
+	state, ro, rw, err := sandboxEntryFromServiceInfo(response.Info.Sandbox)
+	if err != nil {
+		return serviceSandboxConfigWriteError(req, err)
+	}
+	previous := entry
+	entry.Sandbox = state
+	entry.SandboxRO = ro
+	entry.SandboxRW = rw
+	req.Config.Config.SetServiceEntry(entry)
+	if err := saveProjectConfig(req.Config); err != nil {
+		req.Config.Config.SetServiceEntry(previous)
+		return serviceSandboxConfigWriteError(req, err)
+	}
+	return nil
+}
+
 func serviceNetworkConfigWriteError(req svcCommandRequest, err error) error {
 	configPath := ""
 	if req.Config != nil {
 		configPath = strings.TrimSpace(req.Config.Path)
 	}
 	return fmt.Errorf("remote network changed, but failed to update %s: %w; recover with `%s`", projectConfigName, err, serviceSetSyncCommand(req.Service, serviceSetSyncHintHost(req), configPath))
+}
+
+func serviceSandboxConfigWriteError(req svcCommandRequest, err error) error {
+	configPath := ""
+	if req.Config != nil {
+		configPath = strings.TrimSpace(req.Config.Path)
+	}
+	return fmt.Errorf("catch sandbox changed, but failed to update %s: %w; recover with `%s`", projectConfigName, err, serviceSetSyncCommand(req.Service, serviceSetSyncHintHost(req), configPath))
 }
 
 func serviceScheduleConfigWriteError(req svcCommandRequest, err error) error {
@@ -1020,7 +1063,7 @@ func serviceSetSyncCommand(service, host, configPath string) string {
 		cmd += shellQuote(service)
 	}
 	if configPath = strings.TrimSpace(configPath); configPath == "" {
-		configPath = "~/yeet-services/yeet.toml"
+		return cmd + " --config ~/yeet-services/yeet.toml"
 	}
 	return cmd + " --config " + shellQuote(configPath)
 }
@@ -2441,6 +2484,10 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 }
 
 func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride string, payload string, payloadKind string, runArgs []string, serviceRoot string, serviceRootZFS bool) error {
+	return saveRunConfigWithPayloadKindResult(cfgLoc, hostOverride, payload, payloadKind, runArgs, serviceRoot, serviceRootZFS, runChangeResult{})
+}
+
+func saveRunConfigWithPayloadKindResult(cfgLoc *projectConfigLocation, hostOverride string, payload string, payloadKind string, runArgs []string, serviceRoot string, serviceRootZFS bool, result runChangeResult) error {
 	if serviceOverride == "" {
 		return nil
 	}
@@ -2451,27 +2498,83 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	if loc == nil {
 		return nil
 	}
+	candidate := *loc
+	candidate.Config = cloneRunProjectConfig(loc.Config)
 	host := runConfigHost(hostOverride)
-	serviceRoot, serviceRootZFS, filteredArgs, err := runConfigServiceRoot(runArgs, serviceRoot, serviceRootZFS)
+	entry, _, _, sandboxCaptured, err := prepareRunConfigEntry(&candidate, host, payload, payloadKind, runArgs, serviceRoot, serviceRootZFS, result)
 	if err != nil {
 		return err
+	}
+	candidate.Config.SetServiceEntry(entry)
+	if err := saveProjectConfig(&candidate); err != nil {
+		if sandboxCaptured && result.catchChanged {
+			return newRunSandboxConfigSyncError(host, serviceOverride, loc.Path, err)
+		}
+		return err
+	}
+	*loc.Config = *candidate.Config
+	return nil
+}
+
+func cloneRunProjectConfig(cfg *ProjectConfig) *ProjectConfig {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.Hosts = cloneRunProjectConfigStringSlice(cfg.Hosts)
+	if cfg.Services == nil {
+		cloned.Services = nil
+		return &cloned
+	}
+	cloned.Services = make([]ServiceEntry, len(cfg.Services))
+	for i, entry := range cfg.Services {
+		cloned.Services[i] = cloneRunProjectConfigEntry(entry)
+	}
+	return &cloned
+}
+
+func cloneRunProjectConfigEntry(entry ServiceEntry) ServiceEntry {
+	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
+	entry.SnapshotEvents = cloneRunProjectConfigStringSlice(entry.SnapshotEvents)
+	entry.Ports = cloneRunProjectConfigStringSlice(entry.Ports)
+	entry.SandboxRO = cloneRunProjectConfigStringSlice(entry.SandboxRO)
+	entry.SandboxRW = cloneRunProjectConfigStringSlice(entry.SandboxRW)
+	entry.Args = cloneRunProjectConfigStringSlice(entry.Args)
+	return entry
+}
+
+func cloneRunProjectConfigStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+func prepareRunConfigEntry(loc *projectConfigLocation, host, payload, payloadKind string, runArgs []string, serviceRoot string, serviceRootZFS bool, result runChangeResult) (ServiceEntry, ServiceEntry, bool, bool, error) {
+	serviceRoot, serviceRootZFS, filteredArgs, err := runConfigServiceRoot(runArgs, serviceRoot, serviceRootZFS)
+	if err != nil {
+		return ServiceEntry{}, ServiceEntry{}, false, false, err
 	}
 	publish, filteredArgs, err := extractPublishOptions(filteredArgs)
 	if err != nil {
-		return err
+		return ServiceEntry{}, ServiceEntry{}, false, false, err
 	}
 	existing, hasExisting := runConfigExistingEntry(loc, host)
+	sandbox := cloneClientSandboxPolicy(result.sandbox)
+	sandboxCaptured := sandbox != nil
 	ports := publish.Ports
 	if !publish.Changed && hasExisting {
 		ports = effectiveServiceEntryPorts(existing)
 	}
 	snapOpts, filteredArgs, snapshotChange, err := extractSnapshotOptions(filteredArgs)
 	if err != nil {
-		return err
+		return ServiceEntry{}, ServiceEntry{}, false, false, err
 	}
 	runFlags, schedule, filteredArgs, err := runConfigScheduleAndArgs(filteredArgs, existing, hasExisting)
 	if err != nil {
-		return err
+		return ServiceEntry{}, ServiceEntry{}, false, false, err
 	}
 	entryType, payloadKind := runConfigEntryType(payload, payloadKind)
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
@@ -2488,9 +2591,9 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 		Schedule:       strings.TrimSpace(schedule),
 		Args:           normalizeArgs(filteredArgs),
 	}
+	applyRunConfigSandboxFields(&entry, existing, hasExisting, sandbox, sandboxCaptured)
 	applyRunConfigSnapshotFields(&entry, existing, hasExisting, snapOpts, snapshotChange)
-	loc.Config.SetServiceEntry(entry)
-	return saveProjectConfig(loc)
+	return entry, existing, hasExisting, sandboxCaptured, nil
 }
 
 func runConfigScheduleAndArgs(args []string, existing ServiceEntry, hasExisting bool) (cli.RunFlags, string, []string, error) {
@@ -2504,7 +2607,23 @@ func runConfigScheduleAndArgs(args []string, existing ServiceEntry, hasExisting 
 	}
 	args = removeRunCronControlFlag(args)
 	args = removeRunAsControlFlag(args)
+	args = removeRunSandboxControlFlags(args)
 	return flags, schedule, args, nil
+}
+
+func applyRunConfigSandboxFields(entry *ServiceEntry, existing ServiceEntry, hasExisting bool, sandbox *clientSandboxPolicy, captured bool) {
+	if captured {
+		entry.Sandbox = sandbox.State
+		entry.SandboxRO = cloneSandboxStringSlice(sandbox.ReadOnly)
+		entry.SandboxRW = cloneSandboxStringSlice(sandbox.Writable)
+		return
+	}
+	if !hasExisting {
+		return
+	}
+	entry.Sandbox = existing.Sandbox
+	entry.SandboxRO = cloneSandboxStringSlice(existing.SandboxRO)
+	entry.SandboxRW = cloneSandboxStringSlice(existing.SandboxRW)
 }
 
 func runConfigEntryType(payload string, payloadKind string) (string, string) {
@@ -2920,6 +3039,17 @@ func runArgsWithConfiguredIdentity(args []string, runAs string) []string {
 func removeRunAsControlFlag(args []string) []string {
 	flagArgs, payloadArgs := splitRunArgsForParsing(args)
 	flagArgs = removeRunFlags(flagArgs, map[string]bool{"--run-as": true})
+	if len(payloadArgs) == 0 {
+		return flagArgs
+	}
+	return append(append(flagArgs, "--"), payloadArgs...)
+}
+
+func removeRunSandboxControlFlags(args []string) []string {
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	flagArgs = removeRunFlags(flagArgs, map[string]bool{
+		"--sandbox": true, "--sandbox-ro": true, "--sandbox-rw": true,
+	})
 	if len(payloadArgs) == 0 {
 		return flagArgs
 	}

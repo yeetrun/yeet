@@ -400,6 +400,17 @@ type SnapshotDefaultsResponse struct {
 	Effective EffectiveSnapshotPolicy `json:"effective,omitempty"`
 }
 
+type ServiceSandboxExposure struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+type ServiceSandbox struct {
+	State    string                   `json:"state"`
+	ReadOnly []ServiceSandboxExposure `json:"readOnly,omitempty"`
+	Writable []ServiceSandboxExposure `json:"writable,omitempty"`
+}
+
 type ServiceInfo struct {
 	Name             string            `json:"name"`
 	ServiceType      string            `json:"serviceType,omitempty"`
@@ -414,6 +425,7 @@ type ServiceInfo struct {
 	VM               *ServiceVM        `json:"vm,omitempty"`
 	Snapshots        *ServiceSnapshots `json:"snapshots,omitempty"`
 	Identity         *ServiceIdentity  `json:"identity,omitempty"`
+	Sandbox          *ServiceSandbox   `json:"sandbox,omitempty"`
 }
 
 type ServiceIdentity struct {

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 type errorWriter struct {
@@ -310,6 +311,1119 @@ func TestRunPreservesStoredNetworkFlagsForUnrelatedOverrides(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("effective run args = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunArgsWithSandboxOptionsRehydratesCanonicalPolicyBeforePayload(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry ServiceEntry
+		args  []string
+		want  []string
+	}{
+		{
+			name:  "on with binds and payload boundary",
+			entry: ServiceEntry{Sandbox: "on", SandboxRO: []string{"/srv/z:/z", "/etc/ssl"}, SandboxRW: []string{"/srv/cache"}},
+			args:  []string{"--pull", "--", "--payload-flag"},
+			want: []string{
+				"--sandbox=on", "--sandbox-ro=/etc/ssl", "--sandbox-ro=/srv/z:/z", "--sandbox-rw=/srv/cache",
+				"--pull", "--", "--payload-flag",
+			},
+		},
+		{name: "off retains dormant binds", entry: ServiceEntry{Sandbox: "off", SandboxRO: []string{"/srv/read"}}, args: []string{"--pull"}, want: []string{"--sandbox=off", "--sandbox-ro=/srv/read", "--pull"}},
+		{name: "legacy emits no run flag", entry: ServiceEntry{Sandbox: "legacy", SandboxRO: []string{"/ignored"}}, args: []string{"--pull"}, want: []string{"--pull"}},
+		{name: "absent remains absent", entry: ServiceEntry{}, args: []string{"--pull"}, want: []string{"--pull"}},
+		{name: "explicit caller policy wins", entry: ServiceEntry{Sandbox: "on", SandboxRO: []string{"/stored"}}, args: []string{"--sandbox=off", "--pull"}, want: []string{"--sandbox=off", "--pull"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runArgsWithSandboxOptions(tt.args, tt.entry)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("runArgsWithSandboxOptions = %#v, want %#v", got, tt.want)
+			}
+			if _, _, err := cli.ParseRun(got); err != nil {
+				t.Fatalf("rehydrated args do not parse: %v", err)
+			}
+		})
+	}
+}
+
+func TestEffectiveRunArgsRehydratesStoredSandboxThroughRealParser(t *testing.T) {
+	entry := ServiceEntry{
+		Sandbox: "on", SandboxRO: []string{"/srv/read:/read"}, SandboxRW: []string{"/srv/write"},
+		Args: []string{"--net=host", "--", "--stored-payload"},
+	}
+	for _, tt := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "empty run args",
+			want: []string{"--sandbox=on", "--sandbox-ro=/srv/read:/read", "--sandbox-rw=/srv/write", "--net=host", "--", "--stored-payload"},
+		},
+		{
+			name: "unrelated override",
+			args: []string{"--pull", "--", "--new-payload"},
+			want: []string{"--sandbox=on", "--sandbox-ro=/srv/read:/read", "--sandbox-rw=/srv/write", "--net=host", "--pull", "--", "--new-payload"},
+		},
+		{
+			name: "explicit sandbox",
+			args: []string{"--sandbox=off", "--pull"},
+			want: []string{"--net=host", "--sandbox=off", "--pull"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := effectiveRunArgsForExistingEntry(entry, tt.args)
+			if err != nil {
+				t.Fatalf("effectiveRunArgsForExistingEntry: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("effective args = %#v, want %#v", got, tt.want)
+			}
+			if _, _, err := cli.ParseRun(got); err != nil {
+				t.Fatalf("effective args do not parse: %v", err)
+			}
+		})
+	}
+}
+
+func TestSandboxEntryFromServiceInfoCanonicalizesAndRejectsInvalidData(t *testing.T) {
+	state, ro, rw, err := sandboxEntryFromServiceInfo(&catchrpc.ServiceSandbox{
+		State: "on",
+		ReadOnly: []catchrpc.ServiceSandboxExposure{
+			{Source: "/srv/z", Destination: "/z"},
+			{Source: "/etc/ssl", Destination: "/etc/ssl"},
+		},
+		Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/cache", Destination: "/srv/cache"}},
+	})
+	if err != nil {
+		t.Fatalf("sandboxEntryFromServiceInfo: %v", err)
+	}
+	if state != "on" || !reflect.DeepEqual(ro, []string{"/etc/ssl", "/srv/z:/z"}) || !reflect.DeepEqual(rw, []string{"/srv/cache"}) {
+		t.Fatalf("canonical sandbox entry = %q %#v %#v", state, ro, rw)
+	}
+	ro[0] = "/mutated"
+	if state2, ro2, _, err := sandboxEntryFromServiceInfo(&catchrpc.ServiceSandbox{State: "legacy"}); err != nil || state2 != "legacy" || ro2 != nil {
+		t.Fatalf("legacy sandbox entry = %q %#v, err %v", state2, ro2, err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		info *catchrpc.ServiceSandbox
+	}{
+		{name: "nil", info: nil},
+		{name: "invalid state", info: &catchrpc.ServiceSandbox{State: "broken"}},
+		{name: "relative source", info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "relative", Destination: "/dest"}}}},
+		{name: "reset is not an exposure", info: &catchrpc.ServiceSandbox{State: "off", Writable: []catchrpc.ServiceSandboxExposure{{Source: "reset", Destination: "reset"}}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, _, err := sandboxEntryFromServiceInfo(tt.info); err == nil {
+				t.Fatal("sandboxEntryFromServiceInfo error = nil")
+			}
+		})
+	}
+}
+
+func TestSandboxEntryFromServiceInfoRejectsUnsafeDestinationSets(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		info *catchrpc.ServiceSandbox
+	}{
+		{
+			name: "root destination",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/"}}},
+		},
+		{
+			name: "source contains nul",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read\x00escape", Destination: "/read"}}},
+		},
+		{
+			name: "destination contains nul",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/read\x00escape"}}},
+		},
+		{
+			name: "same class equal destinations",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/srv/one", Destination: "/data"},
+				{Source: "/srv/two", Destination: "/data"},
+			}},
+		},
+		{
+			name: "same class ancestor destination",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/srv/one", Destination: "/data"},
+				{Source: "/srv/two", Destination: "/data/child"},
+			}},
+		},
+		{
+			name: "same class descendant destination",
+			info: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/srv/one", Destination: "/data/child"},
+				{Source: "/srv/two", Destination: "/data"},
+			}},
+		},
+		{
+			name: "cross class equal destinations",
+			info: &catchrpc.ServiceSandbox{
+				State:    "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/data"}},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/write", Destination: "/data"}},
+			},
+		},
+		{
+			name: "read only ancestor of writable",
+			info: &catchrpc.ServiceSandbox{
+				State:    "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/data"}},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/write", Destination: "/data/child"}},
+			},
+		},
+		{
+			name: "writable ancestor of read only",
+			info: &catchrpc.ServiceSandbox{
+				State:    "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/data/child"}},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/write", Destination: "/data"}},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, _, err := sandboxEntryFromServiceInfo(tt.info); err == nil {
+				t.Fatal("sandboxEntryFromServiceInfo error = nil")
+			}
+		})
+	}
+
+	state, ro, rw, err := sandboxEntryFromServiceInfo(&catchrpc.ServiceSandbox{
+		State:    "on",
+		ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/data"}},
+		Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/write", Destination: "/database"}},
+	})
+	if err != nil {
+		t.Fatalf("disjoint destination prefixes rejected: %v", err)
+	}
+	if state != "on" || !reflect.DeepEqual(ro, []string{"/srv/read:/data"}) || !reflect.DeepEqual(rw, []string{"/srv/write:/database"}) {
+		t.Fatalf("disjoint sandbox entry = %q %#v %#v", state, ro, rw)
+	}
+}
+
+func TestRejectExistingRunProtectedChangesUsesOneFetchForNetworkAndSandbox(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldInfo })
+	fetches := 0
+	desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+	fetchRunChangeServiceInfoFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if host != "catch.example" || service != "api" {
+			t.Fatalf("fetch target = %s/%s", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Network:     catchrpc.ServiceNetwork{Desired: &desired},
+			Sandbox: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/etc/ssl", Destination: "/etc/ssl"},
+			}},
+		}}, nil
+	}
+
+	err := rejectExistingRunProtectedChanges(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{
+		"--net=host", "--sandbox=on", "--sandbox-ro=/etc/ssl", "--", "--payload-flag",
+	})
+	if err != nil {
+		t.Fatalf("rejectExistingRunProtectedChanges: %v", err)
+	}
+	if fetches != 1 {
+		t.Fatalf("ServiceInfo fetches = %d, want 1", fetches)
+	}
+}
+
+func TestRejectExistingRunProtectedChangesNamesExactSandboxMigration(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldInfo })
+	desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+			Sandbox: &catchrpc.ServiceSandbox{
+				State:    "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/srv/read"}},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/srv/write", Destination: "/work"}},
+			},
+		}}, nil
+	}
+
+	err := rejectExistingRunProtectedChanges(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{
+		"--sandbox=off", "--sandbox-ro=/srv/new:/new", "--sandbox-rw=/srv/write:/work",
+	})
+	if err == nil {
+		t.Fatal("sandbox change error = nil")
+	}
+	want := "yeet service set api --sandbox=off --sandbox-ro=reset --sandbox-ro=/srv/new:/new"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("sandbox change error = %v, want command containing %q", err, want)
+	}
+	if strings.Contains(err.Error(), "--sandbox-rw=reset") {
+		t.Fatalf("unchanged writable list was unnecessarily reset: %v", err)
+	}
+}
+
+func TestSandboxGuidanceQuotesBackticks(t *testing.T) {
+	current := clientSandboxPolicy{State: "on", ReadOnly: []string{"/old"}}
+	target := clientSandboxPolicy{State: "on", ReadOnly: []string{"/srv/`id`"}}
+	got := serviceSetCommandForSandboxPolicy("api", current, target)
+	want := "yeet service set api --sandbox=on --sandbox-ro=reset '--sandbox-ro=/srv/`id`'"
+	if got != want {
+		t.Fatalf("sandbox guidance = %q, want shell-safe %q", got, want)
+	}
+}
+
+func TestSandboxGuidanceResetsOnlyWhenExistingEntriesAreRemoved(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		current clientSandboxPolicy
+		target  clientSandboxPolicy
+		want    string
+	}{
+		{
+			name:    "read only addition",
+			current: clientSandboxPolicy{State: "on", ReadOnly: []string{"/old"}},
+			target:  clientSandboxPolicy{State: "on", ReadOnly: []string{"/new", "/old"}},
+			want:    "yeet service set api --sandbox=on --sandbox-ro=/new",
+		},
+		{
+			name:    "writable addition",
+			current: clientSandboxPolicy{State: "on", Writable: []string{"/old"}},
+			target:  clientSandboxPolicy{State: "on", Writable: []string{"/new", "/old"}},
+			want:    "yeet service set api --sandbox=on --sandbox-rw=/new",
+		},
+		{
+			name:    "read only replacement",
+			current: clientSandboxPolicy{State: "on", ReadOnly: []string{"/old", "/removed"}},
+			target:  clientSandboxPolicy{State: "on", ReadOnly: []string{"/new", "/old"}},
+			want:    "yeet service set api --sandbox=on --sandbox-ro=reset --sandbox-ro=/new --sandbox-ro=/old",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceSetCommandForSandboxPolicy("api", tt.current, tt.target); got != tt.want {
+				t.Fatalf("sandbox guidance = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSuccessfulFreshNativeRunPersistsCatchSandboxInsteadOfRequestFlags(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+	})
+	payload := filepath.Join(t.TempDir(), "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile payload: %v", err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if fetches%2 == 1 {
+			return catchrpc.ServiceInfoResponse{Found: false}, nil
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Sandbox: &catchrpc.ServiceSandbox{
+				State: "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{
+					{Source: "/canonical/z", Destination: "/z"},
+					{Source: "/canonical/read", Destination: "/canonical/read"},
+				},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/canonical/write", Destination: "/work"}},
+			},
+		}}, nil
+	}
+	runArgs := []string{"--sandbox=off", "--sandbox-ro=/requested", "--", "--payload"}
+	runs := 0
+	result, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, payload, runArgs, "", ServiceEntry{Name: "api", Host: "host-a"}, false,
+		func(context.Context, string, []string) error { runs++; return nil }, false,
+	)
+	if err != nil {
+		t.Fatalf("runWithChangesToWithContextRunner: %v", err)
+	}
+	if runs != 1 || fetches != 2 {
+		t.Fatalf("runs/fetches = %d/%d, want 1/2", runs, fetches)
+	}
+
+	serviceOverride = "api"
+	dir := t.TempDir()
+	loc := &projectConfigLocation{
+		Path: filepath.Join(dir, projectConfigName), Dir: dir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	if err := saveRunConfigWithPayloadKindResult(loc, "host-a", payload, "", runArgs, "", false, result); err != nil {
+		t.Fatalf("saveRunConfig: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("api", "host-a")
+	if !ok {
+		t.Fatal("saved entry missing")
+	}
+	if entry.Sandbox != "on" ||
+		!reflect.DeepEqual(entry.SandboxRO, []string{"/canonical/read", "/canonical/z:/z"}) ||
+		!reflect.DeepEqual(entry.SandboxRW, []string{"/canonical/write:/work"}) {
+		t.Fatalf("saved sandbox = %q %#v %#v", entry.Sandbox, entry.SandboxRO, entry.SandboxRW)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--", "--payload"}) {
+		t.Fatalf("saved args = %#v, want payload args without sandbox controls", entry.Args)
+	}
+}
+
+func TestSuccessfulRunConfigSavePublishesExactIndependentCandidate(t *testing.T) {
+	oldService := serviceOverride
+	t.Cleanup(func() { serviceOverride = oldService })
+	serviceOverride = "api"
+
+	hosts := []string{"z-host"}
+	emptySnapshotEvents := make([]string, 0)
+	emptyPorts := make([]string, 0)
+	emptySandboxRO := make([]string, 0)
+	emptySandboxRW := make([]string, 0)
+	emptyArgs := make([]string, 0)
+	dataSnapshotEvents := []string{"start"}
+	dataPorts := []string{"127.0.0.1:8080:80"}
+	dataSandboxRO := []string{"/srv/read"}
+	dataSandboxRW := []string{"/srv/write"}
+	dataArgs := []string{"--old"}
+	required := true
+	config := &ProjectConfig{
+		Version: projectConfigVersion,
+		Hosts:   hosts,
+		Services: []ServiceEntry{
+			{
+				Name: "old-empty", Host: "z-host", Type: serviceTypeRun, Payload: "empty.sh",
+				SnapshotEvents: emptySnapshotEvents, Ports: emptyPorts,
+				SandboxRO: emptySandboxRO, SandboxRW: emptySandboxRW, Args: emptyArgs,
+			},
+			{Name: "old-nil", Host: "z-host", Type: serviceTypeRun, Payload: "nil.sh"},
+			{
+				Name: "old-data", Host: "z-host", Type: serviceTypeRun, Payload: "data.sh",
+				SnapshotRequired: &required, SnapshotEvents: dataSnapshotEvents, Ports: dataPorts,
+				SandboxRO: dataSandboxRO, SandboxRW: dataSandboxRW, Args: dataArgs,
+			},
+		},
+	}
+	originalConfigPointer := config
+	dir := t.TempDir()
+	payload := filepath.Join(dir, "api.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: config}
+	capturedRO := []string{"/captured/read"}
+	capturedRW := []string{"/captured/write:/work"}
+	result := runChangeResult{
+		sandbox:      &clientSandboxPolicy{State: "on", ReadOnly: capturedRO, Writable: capturedRW},
+		catchChanged: true,
+	}
+	if err := saveRunConfigWithPayloadKindResult(loc, "a-host", payload, "file", []string{"--", "--target"}, "", false, result); err != nil {
+		t.Fatalf("saveRunConfigWithPayloadKindResult: %v", err)
+	}
+	if loc.Config != originalConfigPointer {
+		t.Fatal("successful config publication replaced the outer ProjectConfig pointer")
+	}
+	if _, err := os.Stat(loc.Path); err != nil {
+		t.Fatalf("successful config save did not persist %s: %v", loc.Path, err)
+	}
+	if !reflect.DeepEqual(loc.Config.Hosts, []string{"a-host", "z-host"}) {
+		t.Fatalf("published hosts = %#v, want target plus existing host", loc.Config.Hosts)
+	}
+
+	findEntry := func(name, host string) *ServiceEntry {
+		for i := range loc.Config.Services {
+			entry := &loc.Config.Services[i]
+			if entry.Name == name && entry.Host == host {
+				return entry
+			}
+		}
+		return nil
+	}
+	target := findEntry("api", "a-host")
+	if target == nil {
+		t.Fatal("published config missing api@a-host")
+	}
+	if target.Payload != "api.sh" || target.PayloadKind != "file" || target.Sandbox != "on" ||
+		!reflect.DeepEqual(target.SandboxRO, []string{"/captured/read"}) ||
+		!reflect.DeepEqual(target.SandboxRW, []string{"/captured/write:/work"}) ||
+		!reflect.DeepEqual(target.Args, []string{"--", "--target"}) {
+		t.Fatalf("published target entry = %#v", *target)
+	}
+
+	emptyEntry := findEntry("old-empty", "z-host")
+	if emptyEntry == nil {
+		t.Fatal("published config missing old-empty@z-host")
+	}
+	for name, values := range map[string][]string{
+		"snapshot events": emptyEntry.SnapshotEvents,
+		"ports":           emptyEntry.Ports,
+		"sandbox ro":      emptyEntry.SandboxRO,
+		"sandbox rw":      emptyEntry.SandboxRW,
+		"args":            emptyEntry.Args,
+	} {
+		if values == nil || len(values) != 0 {
+			t.Fatalf("unrelated allocated-empty %s = %#v, want non-nil empty", name, values)
+		}
+	}
+	nilEntry := findEntry("old-nil", "z-host")
+	if nilEntry == nil {
+		t.Fatal("published config missing old-nil@z-host")
+	}
+	for name, values := range map[string][]string{
+		"snapshot events": nilEntry.SnapshotEvents,
+		"ports":           nilEntry.Ports,
+		"sandbox ro":      nilEntry.SandboxRO,
+		"sandbox rw":      nilEntry.SandboxRW,
+		"args":            nilEntry.Args,
+	} {
+		if values != nil {
+			t.Fatalf("unrelated nil %s = %#v, want nil", name, values)
+		}
+	}
+
+	hosts[0] = "mutated-input-host"
+	dataSnapshotEvents[0] = "mutated-input-event"
+	dataPorts[0] = "mutated-input-port"
+	dataSandboxRO[0] = "mutated-input-ro"
+	dataSandboxRW[0] = "mutated-input-rw"
+	dataArgs[0] = "mutated-input-arg"
+	capturedRO[0] = "mutated-captured-ro"
+	capturedRW[0] = "mutated-captured-rw"
+	dataEntry := findEntry("old-data", "z-host")
+	if dataEntry == nil || !reflect.DeepEqual(dataEntry.SnapshotEvents, []string{"start"}) ||
+		!reflect.DeepEqual(dataEntry.Ports, []string{"127.0.0.1:8080:80"}) ||
+		!reflect.DeepEqual(dataEntry.SandboxRO, []string{"/srv/read"}) ||
+		!reflect.DeepEqual(dataEntry.SandboxRW, []string{"/srv/write"}) ||
+		!reflect.DeepEqual(dataEntry.Args, []string{"--old"}) {
+		t.Fatalf("published unrelated entry aliases pre-save input: %#v", dataEntry)
+	}
+	if !reflect.DeepEqual(loc.Config.Hosts, []string{"a-host", "z-host"}) ||
+		!reflect.DeepEqual(target.SandboxRO, []string{"/captured/read"}) ||
+		!reflect.DeepEqual(target.SandboxRW, []string{"/captured/write:/work"}) {
+		t.Fatalf("published target or hosts alias pre-save input: hosts=%#v target=%#v", loc.Config.Hosts, *target)
+	}
+
+	expectedTargetArgs := []string{"--", "--target"}
+	expectedTargetArgs[0] = "mutated-expected-arg"
+	if !reflect.DeepEqual(target.Args, []string{"--", "--target"}) {
+		t.Fatalf("published target aliases expected snapshot: %#v", target.Args)
+	}
+
+	emptyHosts := make([]string, 0)
+	emptyHostsClone := cloneRunProjectConfig(&ProjectConfig{Hosts: emptyHosts})
+	if emptyHostsClone.Hosts == nil || len(emptyHostsClone.Hosts) != 0 {
+		t.Fatalf("allocated-empty hosts clone = %#v, want non-nil empty", emptyHostsClone.Hosts)
+	}
+}
+
+func TestExistingNativeRunTransitionRefreshesNonNativeSandboxBeforeConfigSave(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	oldArch := remoteCatchOSAndArchFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+		remoteCatchOSAndArchFn = oldArch
+	})
+	serviceOverride = "api"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+
+	for _, tt := range []struct {
+		name        string
+		payloadKind string
+		payload     func(string) string
+	}{
+		{
+			name: "generated compose", payloadKind: "compose",
+			payload: func(dir string) string {
+				path := filepath.Join(dir, "compose.yml")
+				if err := os.WriteFile(path, []byte("services:\n  app:\n    image: alpine\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "remote image", payloadKind: "remote-image",
+			payload: func(string) string { return "ghcr.io/example/app:latest" },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			payload := tt.payload(dir)
+			loc := &projectConfigLocation{
+				Path: filepath.Join(dir, projectConfigName), Dir: dir,
+				Config: &ProjectConfig{Version: projectConfigVersion},
+			}
+			loc.Config.SetServiceEntry(ServiceEntry{
+				Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "old-script", PayloadKind: "file",
+				Args: []string{"--net=host"}, Sandbox: "on", SandboxRO: []string{"/old/read"},
+			})
+			if err := saveProjectConfig(loc); err != nil {
+				t.Fatal(err)
+			}
+			entry, _ := loc.Config.ServiceEntry("api", "host-a")
+			fetches := 0
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				fetches++
+				if fetches == 1 {
+					desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+					return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+						ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+						Sandbox: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+							{Source: "/old/read", Destination: "/old/read"},
+						}},
+					}}, nil
+				}
+				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose"}}, nil
+			}
+			runs := 0
+			runArgs := []string{"--net=host", "--sandbox=on", "--sandbox-ro=/old/read"}
+			result, err := runWithChangesToWithContextRunnerResult(
+				context.Background(), io.Discard, payload, runArgs, "", entry, false,
+				func(context.Context, string, []string) error { runs++; return nil }, false,
+			)
+			if err != nil {
+				t.Fatalf("runWithChangesToWithContextRunner: %v", err)
+			}
+			if err := saveRunConfigWithPayloadKindResult(loc, "host-a", payload, tt.payloadKind, runArgs, "", false, result); err != nil {
+				t.Fatalf("saveRunConfigWithPayloadKind: %v", err)
+			}
+			if runs != 1 || fetches != 2 {
+				t.Fatalf("runs/fetches = %d/%d, want 1/2", runs, fetches)
+			}
+			saved, _ := loc.Config.ServiceEntry("api", "host-a")
+			if saved.Sandbox != "" || len(saved.SandboxRO) != 0 || len(saved.SandboxRW) != 0 {
+				t.Fatalf("stale native sandbox survived %s transition: %#v", tt.payloadKind, saved)
+			}
+			for _, arg := range saved.Args {
+				if strings.HasPrefix(arg, "--sandbox") {
+					t.Fatalf("sandbox control flag persisted in args: %#v", saved.Args)
+				}
+			}
+			raw, err := os.ReadFile(loc.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "sandbox") {
+				t.Fatalf("sandbox state persisted in non-native TOML:\n%s", raw)
+			}
+		})
+	}
+}
+
+func TestExistingNativeRunTransitionRefreshFailureFailsClosed(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+	})
+	dir := t.TempDir()
+	payload := filepath.Join(dir, "compose.yml")
+	if err := os.WriteFile(payload, []byte("services:\n  app:\n    image: alpine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if fetches == 1 {
+			desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+			return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+				ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+				Sandbox: &catchrpc.ServiceSandbox{State: "on"},
+			}}, nil
+		}
+		return catchrpc.ServiceInfoResponse{}, errors.New("post-transition info unavailable")
+	}
+	runs := 0
+	err := runWithChangesToWithContextRunner(
+		context.Background(), io.Discard, payload, []string{"--net=host", "--sandbox=on"}, "",
+		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file", Args: []string{"--net=host"}, Sandbox: "on"}, false,
+		func(context.Context, string, []string) error { runs++; return nil }, false,
+	)
+	wantRecovery := "recover with `yeet --host host-a service sync api --config ~/yeet-services/yeet.toml`"
+	if err == nil || !strings.Contains(err.Error(), "catch service changed") || !strings.Contains(err.Error(), wantRecovery) {
+		t.Fatalf("error = %v, want Catch-changed recovery %q", err, wantRecovery)
+	}
+	if runs != 1 || fetches != 2 {
+		t.Fatalf("runs/fetches = %d/%d, want 1/2", runs, fetches)
+	}
+}
+
+func TestExistingNativeRunKeepsSingleProtectedInfoFetch(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+	})
+	payload := filepath.Join(t.TempDir(), "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+			Sandbox: &catchrpc.ServiceSandbox{State: "on"},
+		}}, nil
+	}
+	runs := 0
+	err := runWithChangesToWithContextRunner(
+		context.Background(), io.Discard, payload, []string{"--net=host", "--sandbox=on"}, "",
+		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file", Args: []string{"--net=host"}, Sandbox: "on"}, false,
+		func(context.Context, string, []string) error { runs++; return nil }, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || fetches != 1 {
+		t.Fatalf("runs/fetches = %d/%d, want 1/1", runs, fetches)
+	}
+}
+
+func TestRunSandboxResultStaysMatchedAcrossInterleavedSameServiceRuns(t *testing.T) {
+	oldInfo, oldHashes, oldService := fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn, serviceOverride
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn, serviceOverride = oldInfo, oldHashes, oldService
+	})
+	serviceOverride = "api"
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+			Sandbox: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/native/read", Destination: "/read"},
+			}},
+		}}, nil
+	}
+	nativePayload := filepath.Join(t.TempDir(), "api.sh")
+	if err := os.WriteFile(nativePayload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nativeResult, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, nativePayload, []string{"--net=host", "--sandbox=on", "--sandbox-ro=/native/read:/read"}, "",
+		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file", Args: []string{"--net=host"}, Sandbox: "on", SandboxRO: []string{"/native/read:/read"}}, false,
+		func(context.Context, string, []string) error { return nil }, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Desired: &desired},
+		}}, nil
+	}
+	containerPayload := "ghcr.io/example/api:latest"
+	containerResult, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, containerPayload, []string{"--net=host"}, "",
+		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "remote-image", Args: []string{"--net=host"}}, false,
+		func(context.Context, string, []string) error { return nil }, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nativeLoc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: &ProjectConfig{Version: projectConfigVersion}}
+	containerLoc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: &ProjectConfig{Version: projectConfigVersion}}
+	nativeLoc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Sandbox: "legacy"})
+	containerLoc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Sandbox: "on", SandboxRO: []string{"/stale"}})
+	if err := saveRunConfigWithPayloadKindResult(containerLoc, "host-a", containerPayload, "remote-image", []string{"--net=host"}, "", false, containerResult); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRunConfigWithPayloadKindResult(nativeLoc, "host-a", nativePayload, "file", []string{"--net=host"}, "", false, nativeResult); err != nil {
+		t.Fatal(err)
+	}
+	native, _ := nativeLoc.Config.ServiceEntry("api", "host-a")
+	container, _ := containerLoc.Config.ServiceEntry("api", "host-a")
+	if native.Sandbox != "on" || !reflect.DeepEqual(native.SandboxRO, []string{"/native/read:/read"}) {
+		t.Fatalf("native operation lost its capture: %#v", native)
+	}
+	if container.Sandbox != "" || len(container.SandboxRO) != 0 || len(container.SandboxRW) != 0 {
+		t.Fatalf("container operation stole native capture: %#v", container)
+	}
+}
+
+func TestRunSandboxResultDoesNotSurviveFailedRunOrRetry(t *testing.T) {
+	oldInfo, oldHashes, oldService := fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn, serviceOverride
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn, serviceOverride = oldInfo, oldHashes, oldService
+	})
+	serviceOverride = "api"
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	nativePayload := filepath.Join(t.TempDir(), "api.sh")
+	if err := os.WriteFile(nativePayload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failedResult, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, nativePayload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
+		func(context.Context, string, []string) error { return errors.New("remote run failed") }, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "remote run failed") {
+		t.Fatalf("failed run error = %v", err)
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Sandbox: "legacy"})
+	if err := saveRunConfigWithPayloadKindResult(loc, "host-a", nativePayload, "file", nil, "", false, failedResult); err != nil {
+		t.Fatal(err)
+	}
+	afterFailure, _ := loc.Config.ServiceEntry("api", "host-a")
+	if afterFailure.Sandbox != "legacy" {
+		t.Fatalf("failed run produced a sandbox capture: %#v", afterFailure)
+	}
+
+	containerPayload := "ghcr.io/example/api:retry"
+	retryResult, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, containerPayload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "remote-image"}, false,
+		func(context.Context, string, []string) error { return nil }, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRunConfigWithPayloadKindResult(loc, "host-a", containerPayload, "remote-image", nil, "", false, retryResult); err != nil {
+		t.Fatal(err)
+	}
+	afterRetry, _ := loc.Config.ServiceEntry("api", "host-a")
+	if afterRetry.Sandbox != "" || len(afterRetry.SandboxRO) != 0 || len(afterRetry.SandboxRW) != 0 {
+		t.Fatalf("retry preserved stale native sandbox: %#v", afterRetry)
+	}
+}
+
+func TestRunSandboxResultDiscardedByNoConfigCannotLeakIntoBackendRun(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	oldInfo, oldHashes, oldPrompt, oldWarn, oldTerminal := fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn, activePrompter, warnProjectConfigNotSavedFn, isTerminalFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn, fetchRemoteArtifactHashesFn = oldInfo, oldHashes
+		activePrompter, warnProjectConfigNotSavedFn, isTerminalFn = oldPrompt, oldWarn, oldTerminal
+	})
+	serviceOverride = "api"
+	loadedPrefs.DefaultHost = "host-a"
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if fetches == 1 {
+			return catchrpc.ServiceInfoResponse{Found: false}, nil
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Sandbox: &catchrpc.ServiceSandbox{State: "on", ReadOnly: []catchrpc.ServiceSandboxExposure{
+				{Source: "/native/read", Destination: "/read"},
+			}},
+		}}, nil
+	}
+	payload := filepath.Join(t.TempDir(), "api.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, payload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
+		func(context.Context, string, []string) error { return nil }, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := useTempSvcCwd(t)
+	activePrompter = fakePrompter{selection: workspaceSelection{Choice: workspacePromptRunOnce}}
+	warnProjectConfigNotSavedFn = func(string) {}
+	isTerminalFn = func(int) bool { return true }
+	if err := saveRunConfigWithPayloadKindResult(nil, "host-a", payload, "file", nil, "", false, result); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := loadProjectConfigFromDir(cwd); err != nil || loaded != nil {
+		t.Fatalf("run-once config = %#v, err %v, want none", loaded, err)
+	}
+
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Sandbox: "legacy"})
+	vmResult, err := runWithChangesToWithContextRunnerResult(
+		context.Background(), io.Discard, "vm://ubuntu/26.04", nil, "",
+		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: serviceTypeVM}, false,
+		func(context.Context, string, []string) error { return nil }, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRunConfigWithPayloadKindResult(loc, "host-a", "vm://ubuntu/26.04", serviceTypeVM, nil, "", false, vmResult); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := loc.Config.ServiceEntry("api", "host-a")
+	if entry.Sandbox != "" || len(entry.SandboxRO) != 0 || len(entry.SandboxRW) != 0 {
+		t.Fatalf("discarded native capture leaked into VM/backend save: %#v", entry)
+	}
+}
+
+func TestUnchangedSandboxRunDoesNotRedeploy(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+	})
+	payload := filepath.Join(t.TempDir(), "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{
+			Found: true, Payload: &catchrpc.ArtifactHash{Kind: "script", SHA256: payloadHash},
+		}, true, nil
+	}
+	fetches := 0
+	desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Network: catchrpc.ServiceNetwork{Desired: &desired},
+			Sandbox: &catchrpc.ServiceSandbox{
+				State:    "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/srv/read", Destination: "/read"}},
+			},
+		}}, nil
+	}
+	entry := ServiceEntry{
+		Name: "api", Host: "host-a", PayloadKind: "file", Args: []string{"--net=host", "--", "app-arg"},
+		Sandbox: "on", SandboxRO: []string{"/srv/read:/read"},
+	}
+	runArgs, err := effectiveRunArgsForExistingEntry(entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	var stdout bytes.Buffer
+	if err := runWithChangesToWithContextRunner(
+		context.Background(), &stdout, payload, runArgs, "", entry, false,
+		func(context.Context, string, []string) error { runs++; return nil }, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 {
+		t.Fatalf("runner calls = %d, want 0 for unchanged payload, args, network, and sandbox", runs)
+	}
+	if fetches != 1 {
+		t.Fatalf("ServiceInfo fetches = %d, want one shared protected-setting fetch", fetches)
+	}
+	if got := stdout.String(); got != "No changes detected\n" {
+		t.Fatalf("stdout = %q, want unchanged message", got)
+	}
+}
+
+func stubSuccessfulFreshNativeSandboxInfo(t *testing.T) {
+	t.Helper()
+	oldInfo := fetchRunChangeServiceInfoFn
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if fetches%2 == 1 {
+			return catchrpc.ServiceInfoResponse{Found: false}, nil
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Sandbox:     &catchrpc.ServiceSandbox{State: "on"},
+		}}, nil
+	}
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		if fetches == 0 || fetches%2 != 0 {
+			t.Errorf("ServiceInfo fetches = %d, want initial/post-success pairs", fetches)
+		}
+	})
+}
+
+func stubExistingNativeSandboxInfo(t *testing.T) {
+	t.Helper()
+	oldInfo := fetchRunChangeServiceInfoFn
+	fetches := 0
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Sandbox:     &catchrpc.ServiceSandbox{State: "on"},
+		}}, nil
+	}
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		if fetches == 0 {
+			t.Error("ServiceInfo fetches = 0, want authoritative existing-service fetch")
+		}
+	})
+}
+
+func TestFreshRunPostSuccessSandboxFetchUsesNativePayloadSemantics(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+	})
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile script: %v", err)
+	}
+	compose := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(compose, []byte("services:\n  app:\n    image: alpine\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile compose: %v", err)
+	}
+	unknown := filepath.Join(tmp, "payload.unknown")
+	if err := os.WriteFile(unknown, []byte("not a native executable\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile unknown: %v", err)
+	}
+	python := filepath.Join(tmp, "job.py")
+	if err := os.WriteFile(python, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile Python: %v", err)
+	}
+	typescript := filepath.Join(tmp, "job.ts")
+	if err := os.WriteFile(typescript, []byte("console.log('ok')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile TypeScript: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		payload     string
+		entry       ServiceEntry
+		runArgs     []string
+		always      bool
+		wantFetches int
+	}{
+		{name: "autodetected script", payload: script, entry: ServiceEntry{Name: "api", Host: "host-a"}, wantFetches: 2},
+		{name: "declared native file", payload: script, entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, wantFetches: 2},
+		{name: "timer", payload: script, entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, runArgs: []string{"--cron=0 3 * * *"}, wantFetches: 2},
+		{name: "compose", payload: compose, entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "compose"}, wantFetches: 1},
+		{name: "explicit file Python", payload: python, entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, wantFetches: 1},
+		{name: "stored file TypeScript", payload: typescript, entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, wantFetches: 1},
+		{name: "remote image", payload: "ghcr.io/example/app:latest", entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "remote-image"}, wantFetches: 1},
+		{name: "vm", payload: "vm://ubuntu/26.04", entry: ServiceEntry{Name: "api", Host: "host-a", PayloadKind: serviceTypeVM}, always: true, wantFetches: 0},
+		{name: "catch helper", payload: script, entry: ServiceEntry{Name: catchServiceName, Host: "host-a", PayloadKind: "file"}, wantFetches: 1},
+		{name: "system helper", payload: script, entry: ServiceEntry{Name: systemServiceName, Host: "host-a", PayloadKind: "file"}, wantFetches: 1},
+		{name: "unknown payload", payload: unknown, entry: ServiceEntry{Name: "api", Host: "host-a"}, wantFetches: 1},
+		{name: "draft without service identity", payload: script, entry: ServiceEntry{}, wantFetches: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetches := 0
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				fetches++
+				if fetches == 1 {
+					return catchrpc.ServiceInfoResponse{Found: false}, nil
+				}
+				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+					ServiceType: "systemd", Sandbox: &catchrpc.ServiceSandbox{State: "on"},
+				}}, nil
+			}
+			runs := 0
+			err := runWithChangesToWithContextRunner(
+				context.Background(), io.Discard, tt.payload, tt.runArgs, "", tt.entry, false,
+				func(context.Context, string, []string) error { runs++; return nil }, tt.always,
+			)
+			if err != nil {
+				t.Fatalf("runWithChangesToWithContextRunner: %v", err)
+			}
+			if runs != 1 || fetches != tt.wantFetches {
+				t.Fatalf("runs/fetches = %d/%d, want 1/%d", runs, fetches, tt.wantFetches)
+			}
+		})
+	}
+}
+
+func TestFreshFilePythonAndTypeScriptSkipNativePostSuccessFetch(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+	})
+	serviceOverride = "api"
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	for _, tt := range []struct {
+		name    string
+		path    string
+		content string
+	}{
+		{name: "Python", path: "job.py", content: "print('ok')\n"},
+		{name: "TypeScript", path: "job.ts", content: "console.log('ok')\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := filepath.Join(t.TempDir(), tt.path)
+			if err := os.WriteFile(payload, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fetches := 0
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				fetches++
+				if fetches == 1 {
+					return catchrpc.ServiceInfoResponse{Found: false}, nil
+				}
+				return catchrpc.ServiceInfoResponse{}, errors.New("native-only post-success fetch sentinel")
+			}
+			runs := 0
+			result, err := runWithChangesToWithContextRunnerResult(
+				context.Background(), io.Discard, payload, nil, "",
+				ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
+				func(context.Context, string, []string) error { runs++; return nil }, false,
+			)
+			if err != nil {
+				t.Fatalf("run returned unnecessary post-success fetch error: %v", err)
+			}
+			if runs != 1 || fetches != 1 {
+				t.Fatalf("runs/fetches = %d/%d, want 1/1", runs, fetches)
+			}
+			loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: &ProjectConfig{Version: projectConfigVersion}}
+			loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Sandbox: "legacy"})
+			if err := saveRunConfigWithPayloadKindResult(loc, "host-a", payload, "file", nil, "", false, result); err != nil {
+				t.Fatal(err)
+			}
+			entry, _ := loc.Config.ServiceEntry("api", "host-a")
+			if entry.Sandbox != "" || len(entry.SandboxRO) != 0 || len(entry.SandboxRW) != 0 {
+				t.Fatalf("generated non-native file kept stale sandbox: %#v", entry)
+			}
+		})
 	}
 }
 

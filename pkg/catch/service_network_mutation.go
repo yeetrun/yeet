@@ -311,6 +311,7 @@ type serviceNetworkMutationPlan struct {
 	previousRuntime    []serviceIdentityRuntimeUnitState
 	previousEnablement []serviceIdentityUnitEnablement
 	artifactTxn        *regularNetworkArtifactTransaction
+	deferSandbox       bool
 }
 
 type regularNetworkArtifactTransaction struct {
@@ -600,16 +601,17 @@ var verifyRegularNetworkComposeProjectAbsentForMutation = func(ctx context.Conte
 }
 
 type isoServiceNetworkMutation struct {
-	server          *Server
-	plan            *serviceNetworkMutationPlan
-	direction       serviceNetworkISOTransition
-	target          *db.Service
-	staged          *db.Service
-	spec            isoRuntimeNetworkSpec
-	committed       bool
-	boundaryFailure error
-	regular         *regularServiceNetworkMutation
-	compose         *svc.DockerComposeService
+	server             *Server
+	plan               *serviceNetworkMutationPlan
+	direction          serviceNetworkISOTransition
+	target             *db.Service
+	staged             *db.Service
+	reservationPending bool
+	spec               isoRuntimeNetworkSpec
+	committed          bool
+	boundaryFailure    error
+	regular            *regularServiceNetworkMutation
+	compose            *svc.DockerComposeService
 }
 
 func (m *isoServiceNetworkMutation) ResolverCanonicalTarget() *db.Service { return m.target }
@@ -633,7 +635,7 @@ func (m *isoServiceNetworkMutation) artifactTransaction() *regularNetworkArtifac
 }
 
 func (m *isoServiceNetworkMutation) shouldRollbackStagedISO() bool {
-	return m.staged != nil && !m.committed && m.direction != serviceNetworkISOToRegular
+	return m.staged != nil && !m.reservationPending && !m.committed && m.direction != serviceNetworkISOToRegular
 }
 
 func (m *isoServiceNetworkMutation) CleanupCommittedArtifacts(context.Context) error {
@@ -682,6 +684,76 @@ func (m *isoServiceNetworkMutation) stageDesiredISO(ctx context.Context) error {
 		return errors.Join(err, m.rollbackStagedISO())
 	}
 	return nil
+}
+
+func (m *isoServiceNetworkMutation) stagePlannedDesiredISO(ctx context.Context) error {
+	target, staged, plannedData, err := m.server.planNativeISOServiceNetworkReplacement(ctx, m.plan)
+	if err != nil {
+		return err
+	}
+	m.target, m.staged = target, staged
+	m.reservationPending = true
+	m.regular = &regularServiceNetworkMutation{server: m.server, plan: m.plan, target: target}
+	m.spec, err = m.server.isoRuntimeSpec(plannedData.View(), m.plan.name)
+	return err
+}
+
+func (m *isoServiceNetworkMutation) publishPlannedISOReservation(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !m.reservationPending || m.staged == nil || m.staged.ISO == nil {
+		return fmt.Errorf("service %q has no pending preflighted ISO reservation", m.plan.name)
+	}
+	request := isoReservationRequest{Kind: iso.PayloadNative, Modes: slices.Clone(m.plan.desired.Modes)}
+	_, err := m.server.cfg.DB.MutateData(func(data *db.Data) error {
+		return m.publishPlannedISOReservationInData(data, request)
+	})
+	if err != nil {
+		if dbMutationCommitted(err) {
+			m.reservationPending = false
+			return errors.Join(err, m.rollbackStagedISO())
+		}
+		return err
+	}
+	m.reservationPending = false
+	return nil
+}
+
+func (m *isoServiceNetworkMutation) publishPlannedISOReservationInData(data *db.Data, request isoReservationRequest) error {
+	current := data.Services[m.plan.name]
+	if !serviceNetworkRecordsEqual(current, m.plan.previous) {
+		return fmt.Errorf("service %q changed before publishing preflighted ISO reservation", m.plan.name)
+	}
+	if isoAllocationClaimedByPeer(data.Services, m.plan.name, m.staged.ISO) {
+		return fmt.Errorf("service %q ISO allocation was claimed after sandbox preflight", m.plan.name)
+	}
+	candidate := current.Clone()
+	allocation, err := reserveISOAllocationInData(m.plan.name, request, data, candidate)
+	if err != nil {
+		return err
+	}
+	if !serviceNetworkRecordsEqual(candidate, m.staged) || !reflect.DeepEqual(allocation, m.staged.ISO) {
+		return fmt.Errorf("service %q ISO allocation changed after sandbox preflight", m.plan.name)
+	}
+	data.Services[m.plan.name] = m.staged.Clone()
+	return nil
+}
+
+func isoAllocationClaimedByPeer(services map[string]*db.Service, name string, allocation *db.ISOAllocation) bool {
+	if allocation == nil || !allocation.Link.IsValid() {
+		return false
+	}
+	link := allocation.Link.Masked()
+	for peerName, service := range services {
+		if peerName == name || service == nil || service.ISO == nil || !service.ISO.Link.IsValid() {
+			continue
+		}
+		if service.ISO.Link.Masked() == link {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *isoServiceNetworkMutation) rollbackStagedISO() error {
@@ -1647,10 +1719,66 @@ func (s *Server) stageRegularServiceNetworkReplacement(ctx context.Context, plan
 	if stageErr != nil {
 		return nil, stageErr
 	}
-	if err := stageRegularNetworkPayloadDefinition(fi, plan, runtimeConfig); err != nil {
+	target = regularNetworkReplacement(plan.previous, plan.desired, svcNet, macvlan, tsNet, fi.artifacts)
+	if err := stageRegularNetworkSystemdReplacement(ctx, plan, target, root, runtimeConfig, artifactTxn); err != nil {
 		return nil, err
 	}
-	return regularNetworkReplacement(plan.previous, plan.desired, svcNet, macvlan, tsNet, fi.artifacts), nil
+	return target, nil
+}
+
+func stageRegularNetworkSystemdReplacement(
+	ctx context.Context,
+	plan *serviceNetworkMutationPlan,
+	target *db.Service,
+	root string,
+	runtimeConfig *networkConfig,
+	artifactTxn *regularNetworkArtifactTransaction,
+) error {
+	if plan.previous.ServiceType != db.ServiceTypeSystemd {
+		return nil
+	}
+	runtimeConfig, err := regularNetworkTargetRuntimeConfig(target, runtimeConfig)
+	if err != nil {
+		return err
+	}
+	unit, err := stageOwnedRegularNetworkSystemdUnit(
+		ctx, plan.previous, target, root, runtimeConfig, artifactTxn, !plan.deferSandbox,
+	)
+	if err != nil {
+		return err
+	}
+	setRegularNetworkTargetArtifact(target, db.ArtifactSystemdUnit, unit)
+	return nil
+}
+
+func regularNetworkTargetRuntimeConfig(target *db.Service, network *networkConfig) (*networkConfig, error) {
+	runtime := &networkConfig{}
+	if network != nil {
+		*runtime = *network
+		runtime.Deps = slices.Clone(network.Deps)
+	}
+	resolver, err := exactServiceSandboxResolver(target, target.Generation)
+	if err != nil {
+		return nil, err
+	}
+	runtime.ResolvConf = resolver
+	return runtime, nil
+}
+
+func setRegularNetworkTargetArtifact(target *db.Service, name db.ArtifactName, path string) {
+	if target.Artifacts == nil {
+		target.Artifacts = db.ArtifactStore{}
+	}
+	artifact := target.Artifacts[name]
+	if artifact == nil {
+		artifact = &db.Artifact{Refs: map[db.ArtifactRef]string{}}
+		target.Artifacts[name] = artifact
+	}
+	if artifact.Refs == nil {
+		artifact.Refs = map[db.ArtifactRef]string{}
+	}
+	artifact.Refs[db.Gen(target.Generation)] = path
+	artifact.Refs[db.ArtifactRef("latest")] = path
 }
 
 func (s *Server) stageISOServiceNetworkReplacement(ctx context.Context, plan *serviceNetworkMutationPlan) (target, staged *db.Service, retErr error) {
@@ -1682,8 +1810,28 @@ func (s *Server) stageNativeISOServiceNetworkReplacement(ctx context.Context, pl
 	return stage.target(), stage.staged, nil
 }
 
+func (s *Server) planNativeISOServiceNetworkReplacement(
+	ctx context.Context,
+	plan *serviceNetworkMutationPlan,
+) (target, staged *db.Service, plannedData *db.Data, retErr error) {
+	stage, err := newISONativeNetworkStage(ctx, s, plan)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer stage.rollbackOnError(&retErr)
+	plannedData, err = stage.planReservation(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := stage.renderArtifacts(); err != nil {
+		return nil, nil, nil, err
+	}
+	return stage.target(), stage.staged, plannedData, nil
+}
+
 type isoNativeNetworkStage struct {
 	server     *Server
+	ctx        context.Context
 	plan       *serviceNetworkMutationPlan
 	root       string
 	txn        *regularNetworkArtifactTransaction
@@ -1706,7 +1854,7 @@ func newISONativeNetworkStage(ctx context.Context, server *Server, plan *service
 		return nil, fmt.Errorf("begin ISO service network artifact transaction: %w", err)
 	}
 	plan.artifactTxn = txn
-	return &isoNativeNetworkStage{server: server, plan: plan, root: root, txn: txn}, nil
+	return &isoNativeNetworkStage{server: server, ctx: ctx, plan: plan, root: root, txn: txn}, nil
 }
 
 func (s *isoNativeNetworkStage) rollbackOnError(retErr *error) {
@@ -1737,6 +1885,35 @@ func (s *isoNativeNetworkStage) reserve(ctx context.Context) error {
 	return nil
 }
 
+func (s *isoNativeNetworkStage) planReservation(ctx context.Context) (*db.Data, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.server.ensureISOPool(ctx); err != nil {
+		return nil, err
+	}
+	dv, err := s.server.cfg.DB.Get()
+	if err != nil {
+		return nil, err
+	}
+	data := dv.AsStruct()
+	current := data.Services[s.plan.name]
+	if !serviceNetworkRecordsEqual(current, s.plan.previous) {
+		return nil, fmt.Errorf("service %q changed while planning ISO allocation", s.plan.name)
+	}
+	staged := current.Clone()
+	allocation, err := reserveISOAllocationInData(s.plan.name, isoReservationRequest{
+		Kind: iso.PayloadNative, Modes: slices.Clone(s.plan.desired.Modes),
+	}, data, staged)
+	if err != nil {
+		return nil, err
+	}
+	s.allocation = allocation
+	s.staged = staged
+	data.Services[s.plan.name] = staged.Clone()
+	return data, nil
+}
+
 func (s *isoNativeNetworkStage) renderArtifacts() error {
 	s.artifacts = map[db.ArtifactName]string{}
 	resolver, err := writeOwnedRegularNetworkArtifact(s.txn, db.ArtifactNetNSResolv, s.root, "bin", "iso-resolv-", ".conf", []byte("nameserver "+s.allocation.HostIP.String()+"\n"), 0o644)
@@ -1749,9 +1926,14 @@ func (s *isoNativeNetworkStage) renderArtifacts() error {
 		return err
 	}
 	s.artifacts[db.ArtifactNetNSService] = gate
-	unit, err := stageOwnedRegularNetworkSystemdUnit(s.plan.previous, s.root, &networkConfig{
+	target := s.target()
+	runtimeConfig, err := regularNetworkTargetRuntimeConfig(target, &networkConfig{
 		NetNS: s.allocation.NetNS, Deps: []string{"yeet-" + s.plan.name + "-ns.service"}, ResolvConf: resolver,
-	}, s.txn)
+	})
+	if err != nil {
+		return err
+	}
+	unit, err := stageOwnedRegularNetworkSystemdUnit(s.ctx, s.plan.previous, target, s.root, runtimeConfig, s.txn, !s.plan.deferSandbox)
 	if err != nil {
 		return err
 	}
@@ -2224,19 +2406,6 @@ func checkRegularServiceSubnet(network *db.SvcNetwork) error {
 	return checkSvcSubnetAvailableFn()
 }
 
-func stageRegularNetworkPayloadDefinition(fi *FileInstaller, plan *serviceNetworkMutationPlan, runtimeConfig *networkConfig) error {
-	delete(fi.artifacts, db.ArtifactDockerComposeFile)
-	if plan.previous.ServiceType != db.ServiceTypeSystemd {
-		return nil
-	}
-	unit, err := stageOwnedRegularNetworkSystemdUnit(plan.previous, fi.effectiveServiceRoot(), runtimeConfig, fi.networkArtifactTxn)
-	if err != nil {
-		return err
-	}
-	fi.artifacts[db.ArtifactSystemdUnit] = unit
-	return nil
-}
-
 func stageRegularDockerComposeNetwork(installer *FileInstaller, env netns.Service) error {
 	services, err := installer.composeDNSOverlayServices(env)
 	if err != nil {
@@ -2317,9 +2486,9 @@ func writeOwnedRegularNetworkArtifact(txn *regularNetworkArtifactTransaction, ar
 	return path, nil
 }
 
-func stageOwnedRegularNetworkSystemdUnit(previous *db.Service, root string, network *networkConfig, txn *regularNetworkArtifactTransaction) (string, error) {
-	if previous == nil {
-		return "", errors.New("stage regular network unit without previous service")
+func stageOwnedRegularNetworkSystemdUnit(ctx context.Context, previous, target *db.Service, root string, network *networkConfig, txn *regularNetworkArtifactTransaction, preflight bool) (string, error) {
+	if previous == nil || target == nil {
+		return "", errors.New("stage regular network unit without previous and target services")
 	}
 	source, ok := previous.Artifacts.Gen(db.ArtifactSystemdUnit, previous.Generation)
 	if !ok {
@@ -2329,7 +2498,7 @@ func stageOwnedRegularNetworkSystemdUnit(previous *db.Service, root string, netw
 	if err != nil {
 		return "", fmt.Errorf("read current systemd unit: %w", err)
 	}
-	content, err := renderRegularNetworkSystemdUnit(string(raw), previous.Name, network, previous.Artifacts)
+	content, plan, err := renderRegularNetworkSystemdUnit(ctx, string(raw), previous, target, root, network, preflight)
 	if err != nil {
 		return "", err
 	}
@@ -2337,33 +2506,147 @@ func stageOwnedRegularNetworkSystemdUnit(previous *db.Service, root string, netw
 	if err != nil {
 		return "", fmt.Errorf("write replacement systemd unit: %w", err)
 	}
+	if err := verifyOwnedRegularNetworkSystemdUnit(ctx, target, path, plan, preflight); err != nil {
+		return "", err
+	}
 	return path, nil
 }
 
-func renderRegularNetworkSystemdUnit(raw, service string, network *networkConfig, previousArtifacts db.ArtifactStore) (string, error) {
+func verifyOwnedRegularNetworkSystemdUnit(
+	ctx context.Context,
+	target *db.Service,
+	path string,
+	plan *serviceSandboxPlan,
+	preflight bool,
+) error {
+	if !preflight {
+		return nil
+	}
+	if plan != nil {
+		identity := effectiveServiceIdentity(target.View()).Persisted
+		if err := probeServiceSandboxForMutation(ctx, *plan, identity.UID, identity.GID); err != nil {
+			return fmt.Errorf("probe service %q network sandbox: %w", target.Name, err)
+		}
+	}
+	if err := verifyGeneratedSystemdUnitForSandboxMutation(ctx, path); err != nil {
+		return fmt.Errorf("verify service %q network unit: %w", target.Name, err)
+	}
+	return nil
+}
+
+func renderRegularNetworkSystemdUnit(ctx context.Context, raw string, previous, target *db.Service, root string, network *networkConfig, preflight bool) (string, *serviceSandboxPlan, error) {
 	if strings.TrimSpace(raw) == "" {
-		return "", errors.New("current systemd unit is empty")
+		return "", nil, errors.New("current systemd unit is empty")
+	}
+	if previous == nil || target == nil {
+		return "", nil, errors.New("render regular network unit without previous and target services")
+	}
+	targetPolicy, err := serviceSandboxPolicyForExactGeneration(target, target.Generation)
+	if err != nil {
+		return "", nil, fmt.Errorf("load target network sandbox policy: %w", err)
 	}
 	renderer := regularNetworkUnitRenderer{
 		network: network,
 		networkUnits: map[string]bool{
-			"yeet-" + service + "-ns.service": true,
-			"yeet-" + service + "-ts.service": true,
+			"yeet-" + previous.Name + "-ns.service": true,
+			"yeet-" + previous.Name + "-ts.service": true,
 		},
-		removePrivateMounts: regularNetworkUnitHadResolver(previousArtifacts),
+		removePrivateMounts: regularNetworkUnitHadResolver(previous.Artifacts),
+		targetSandboxOn:     targetPolicy.State == "on",
 	}
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	for scanner.Scan() {
 		renderer.appendLine(scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	renderer.flushSection()
 	if !renderer.seenUnit || !renderer.seenService {
-		return "", errors.New("current systemd unit must contain [Unit] and [Service] sections")
+		return "", nil, errors.New("current systemd unit must contain [Unit] and [Service] sections")
 	}
-	return strings.Join(renderer.out, "\n") + "\n", nil
+	content := strings.Join(renderer.out, "\n") + "\n"
+	return renderRegularNetworkSandboxTarget(ctx, content, previous, target, root, preflight)
+}
+
+func renderRegularNetworkSandboxTarget(ctx context.Context, content string, previous, target *db.Service, root string, preflight bool) (string, *serviceSandboxPlan, error) {
+	targetPolicy, err := serviceSandboxPolicyForExactGeneration(target, target.Generation)
+	if err != nil {
+		return "", nil, fmt.Errorf("load target network sandbox policy: %w", err)
+	}
+	if targetPolicy.State == "legacy" || !preflight {
+		return content, nil, nil
+	}
+	if err := serviceSandboxMutationContext(ctx); err != nil {
+		return "", nil, err
+	}
+	currentPolicy, err := serviceSandboxPolicyForExactGeneration(previous, previous.Generation)
+	if err != nil {
+		return "", nil, fmt.Errorf("load current network sandbox policy: %w", err)
+	}
+	payload, resolver, err := exactReadableNetworkSandboxArtifacts(target)
+	if err != nil {
+		return "", nil, err
+	}
+	identity := effectiveServiceIdentity(target.View()).Persisted
+	request := serviceSandboxPlanRequest{
+		Service: target.Name, Policy: targetPolicy, Payload: payload, DataDir: serviceDataDirForRoot(root),
+		ResolverSource: resolver, UID: identity.UID, GID: identity.GID, Hostname: target.Name,
+	}
+	validatedPolicy, plan, err := prepareServiceSandboxMutationTarget(ctx, target.Name, request, targetPolicy.State == "on")
+	if err != nil {
+		return "", nil, fmt.Errorf("preflight service %q network sandbox: %w", target.Name, err)
+	}
+	rendered, renderedPlan, err := renderNativeSandboxUnitWithPlan(content, nativeSandboxUnitRequest{
+		CurrentPolicy: currentPolicy, TargetPolicy: validatedPolicy, Identity: identity,
+		Payload: payload, DataDir: request.DataDir, Resolver: resolver, Hostname: target.Name,
+	}, plan)
+	if err != nil {
+		return "", nil, fmt.Errorf("render service %q network sandbox: %w", target.Name, err)
+	}
+	return rendered, renderedPlan, nil
+}
+
+func exactReadableNetworkSandboxArtifacts(target *db.Service) (string, string, error) {
+	payload, ok := target.Artifacts.Gen(db.ArtifactBinary, target.Generation)
+	if !ok || strings.TrimSpace(payload) == "" {
+		return "", "", fmt.Errorf("target native service %q generation %d has no binary artifact", target.Name, target.Generation)
+	}
+	resolver, err := exactServiceSandboxResolver(target, target.Generation)
+	if err != nil {
+		return "", "", err
+	}
+	artifacts := []struct {
+		name string
+		path string
+	}{
+		{name: "payload", path: payload},
+		{name: "resolver", path: resolver},
+	}
+	for _, artifact := range artifacts {
+		if err := validateReadableServiceSandboxArtifact(artifact.path); err != nil {
+			return "", "", fmt.Errorf("validate target network sandbox %s %s: %w", artifact.name, artifact.path, err)
+		}
+	}
+	return payload, resolver, nil
+}
+
+func exactServiceSandboxResolver(service *db.Service, generation int) (string, error) {
+	if service == nil {
+		return "", errors.New("sandbox resolver requires a service")
+	}
+	artifact, exists := service.Artifacts[db.ArtifactNetNSResolv]
+	if !exists {
+		return "/etc/resolv.conf", nil
+	}
+	if artifact == nil || artifact.Refs == nil {
+		return "", fmt.Errorf("service %q has an invalid resolver artifact record", service.Name)
+	}
+	resolver, ok := artifact.Refs[db.Gen(generation)]
+	if !ok || strings.TrimSpace(resolver) == "" {
+		return "", fmt.Errorf("service %q generation %d has no exact resolver artifact", service.Name, generation)
+	}
+	return resolver, nil
 }
 
 type regularNetworkUnitRenderer struct {
@@ -2374,6 +2657,7 @@ type regularNetworkUnitRenderer struct {
 	network             *networkConfig
 	networkUnits        map[string]bool
 	removePrivateMounts bool
+	targetSandboxOn     bool
 }
 
 func regularNetworkUnitHadResolver(artifacts db.ArtifactStore) bool {
@@ -2416,7 +2700,7 @@ func (r *regularNetworkUnitRenderer) appendSection(line, section string) {
 }
 
 func (r *regularNetworkUnitRenderer) flushSection() {
-	r.out = appendRegularNetworkSection(r.out, r.section, r.network)
+	r.out = appendRegularNetworkSection(r.out, r.section, r.network, r.targetSandboxOn)
 }
 
 func (r *regularNetworkUnitRenderer) rewriteUnitDependency(line string) (string, bool) {
@@ -2448,7 +2732,7 @@ func (r *regularNetworkUnitRenderer) skipServiceDirective(line string) bool {
 	return r.removePrivateMounts && line == "PrivateMounts=yes"
 }
 
-func appendRegularNetworkSection(out []string, section string, network *networkConfig) []string {
+func appendRegularNetworkSection(out []string, section string, network *networkConfig, targetSandboxOn bool) []string {
 	if network == nil {
 		return out
 	}
@@ -2456,7 +2740,7 @@ func appendRegularNetworkSection(out []string, section string, network *networkC
 	case "[Unit]":
 		return appendRegularNetworkUnitDependencies(out, network.Deps)
 	case "[Service]":
-		return appendRegularNetworkServiceRuntime(out, network)
+		return appendRegularNetworkServiceRuntime(out, network, targetSandboxOn)
 	}
 	return out
 }
@@ -2469,11 +2753,11 @@ func appendRegularNetworkUnitDependencies(out, dependencies []string) []string {
 	return append(out, "Requires="+deps, "After="+deps)
 }
 
-func appendRegularNetworkServiceRuntime(out []string, network *networkConfig) []string {
+func appendRegularNetworkServiceRuntime(out []string, network *networkConfig, targetSandboxOn bool) []string {
 	if strings.TrimSpace(network.NetNS) != "" {
 		out = append(out, "NetworkNamespacePath=/var/run/netns/"+network.NetNS)
 	}
-	if strings.TrimSpace(network.ResolvConf) != "" {
+	if !targetSandboxOn && strings.TrimSpace(network.ResolvConf) != "" {
 		out = append(out, "BindReadOnlyPaths="+network.ResolvConf+":/etc/resolv.conf", "PrivateMounts=yes")
 	}
 	return out
@@ -3125,6 +3409,7 @@ func runServiceNetworkIdentityMigration(ctx context.Context, s *Server, request 
 }
 
 func (s *Server) prepareServiceNetworkIdentityReplacement(ctx context.Context, plan *serviceNetworkMutationPlan, flags cli.ServiceSetFlags, out io.Writer) (*db.Service, resolvedServiceIdentity, string, *svc.SystemdService, error) {
+	plan.deferSandbox = true
 	target, err := s.stageRegularServiceNetworkReplacement(ctx, plan)
 	if err != nil {
 		return nil, resolvedServiceIdentity{}, "", nil, fmt.Errorf("stage service network replacement: %w", err)
@@ -3133,7 +3418,7 @@ func (s *Server) prepareServiceNetworkIdentityReplacement(ctx context.Context, p
 	if err != nil {
 		return nil, resolvedServiceIdentity{}, "", nil, err
 	}
-	replacement, err := s.applyServiceNetworkIdentityToUnit(plan, target, resolved.Persisted)
+	replacement, err := s.applyServiceNetworkIdentityToUnit(ctx, plan, target, resolved.Persisted)
 	if err != nil {
 		return nil, resolvedServiceIdentity{}, "", nil, err
 	}
@@ -3144,7 +3429,7 @@ func (s *Server) prepareServiceNetworkIdentityReplacement(ctx context.Context, p
 	return target, resolved, replacement, generationService, nil
 }
 
-func (s *Server) applyServiceNetworkIdentityToUnit(plan *serviceNetworkMutationPlan, target *db.Service, identity db.ServiceIdentity) (string, error) {
+func (s *Server) applyServiceNetworkIdentityToUnit(ctx context.Context, plan *serviceNetworkMutationPlan, target *db.Service, identity db.ServiceIdentity) (string, error) {
 	target.Identity = &identity
 	unitPath, ok := target.Artifacts.Gen(db.ArtifactSystemdUnit, target.Generation)
 	if !ok {
@@ -3159,12 +3444,24 @@ func (s *Server) applyServiceNetworkIdentityToUnit(plan *serviceNetworkMutationP
 	if err != nil {
 		return "", fmt.Errorf("render atomic network and identity replacement: %w", err)
 	}
+	replacement, sandboxPlan, err := renderRegularNetworkSandboxTarget(ctx, replacement, plan.previous, target, root, true)
+	if err != nil {
+		return "", fmt.Errorf("render atomic network and identity sandbox replacement: %w", err)
+	}
 	replacementPath, err := writeOwnedRegularNetworkArtifact(plan.artifactTxn, db.ArtifactSystemdUnit, root, "bin", plan.name+"-network-identity-", ".service", []byte(replacement), 0o644)
 	if err != nil {
 		return "", fmt.Errorf("write atomic network and identity replacement: %w", err)
 	}
 	if plan.artifactTxn == nil {
 		return "", errors.New("atomic network and identity replacement has no artifact transaction")
+	}
+	if sandboxPlan != nil {
+		if err := probeServiceSandboxForMutation(ctx, *sandboxPlan, identity.UID, identity.GID); err != nil {
+			return "", fmt.Errorf("probe atomic network and identity sandbox replacement: %w", err)
+		}
+	}
+	if err := verifyGeneratedSystemdUnitForSandboxMutation(ctx, replacementPath); err != nil {
+		return "", fmt.Errorf("verify atomic network and identity sandbox replacement: %w", err)
 	}
 	artifact := target.Artifacts[db.ArtifactSystemdUnit]
 	artifact.Refs[db.Gen(target.Generation)] = replacementPath
@@ -3220,8 +3517,9 @@ func buildServiceNetworkIdentityMigrationRequest(plan *serviceNetworkMutationPla
 		ReplacementUnit: replacement, TargetService: target,
 		GenerationPaths:   generationService.InstallTargetPaths(),
 		GenerationIntents: serviceIdentityInstallTargetStates(states), GenerationUnits: units,
-		GenerationEnablement: &enablement,
-		StageGeneration:      stagedNativeIdentityGeneration(generationService, units),
+		GenerationEnablement:     &enablement,
+		StageGeneration:          stagedNativeIdentityGeneration(generationService, units),
+		SandboxPreflightComplete: true,
 	}, nil
 }
 
@@ -3295,18 +3593,53 @@ func (m *isoNetworkIdentityMutation) finish(retErr *error) {
 }
 
 func (m *isoNetworkIdentityMutation) run() error {
+	m.plan.deferSandbox = true
+	if m.direction == serviceNetworkRegularToISO || m.direction == serviceNetworkISOToISO {
+		return m.runPlannedDesiredISO()
+	}
 	if err := m.mutation.Stage(m.ctx); err != nil {
 		return fmt.Errorf("stage ISO service network replacement: %w", err)
 	}
 	return m.runAfterStage()
 }
 
+func (m *isoNetworkIdentityMutation) runPlannedDesiredISO() error {
+	if err := m.mutation.stagePlannedDesiredISO(m.ctx); err != nil {
+		return fmt.Errorf("plan ISO service network replacement: %w", err)
+	}
+	request, guarded, err := m.buildMigrationRequest()
+	if err != nil {
+		return err
+	}
+	if err := m.mutation.publishPlannedISOReservation(m.ctx); err != nil {
+		return fmt.Errorf("publish preflighted ISO service network reservation: %w", err)
+	}
+	if err := m.prepareBoundary(); err != nil {
+		return m.recover(err)
+	}
+	return m.runPrepared(request, guarded)
+}
+
 func (m *isoNetworkIdentityMutation) runAfterStage() error {
+	if m.direction == serviceNetworkISOToRegular {
+		return m.runISOToRegularAfterStage()
+	}
 	if err := m.prepareBoundary(); err != nil {
 		return m.recover(err)
 	}
 	request, guarded, err := m.buildMigrationRequest()
 	if err != nil {
+		return m.recover(err)
+	}
+	return m.runPrepared(request, guarded)
+}
+
+func (m *isoNetworkIdentityMutation) runISOToRegularAfterStage() error {
+	request, guarded, err := m.buildMigrationRequest()
+	if err != nil {
+		return err
+	}
+	if err := m.prepareISOToRegularBoundary(); err != nil {
 		return m.recover(err)
 	}
 	return m.runPrepared(request, guarded)
@@ -3340,7 +3673,7 @@ func (m *isoNetworkIdentityMutation) buildMigrationRequest() (serviceIdentityMig
 	if err != nil {
 		return serviceIdentityMigrationRequest{}, false, err
 	}
-	replacement, err := m.server.applyServiceNetworkIdentityToUnit(m.plan, m.mutation.target, resolved.Persisted)
+	replacement, err := m.server.applyServiceNetworkIdentityToUnit(m.ctx, m.plan, m.mutation.target, resolved.Persisted)
 	if err != nil {
 		return serviceIdentityMigrationRequest{}, false, err
 	}
@@ -3461,7 +3794,7 @@ func runRegularServiceNetworkMutationSteps(ctx context.Context, steps serviceNet
 }
 
 func (s *Server) withRegularServiceNetworkAllocationLock(plan *serviceNetworkMutationPlan, run func() error) error {
-	required := plan != nil && slices.Contains(plan.desired.Modes, "svc")
+	required := plan != nil && (slices.Contains(plan.desired.Modes, "svc") || slices.Contains(plan.desired.Modes, "iso"))
 	return s.withRegularServiceNetworkAllocation(required, run)
 }
 

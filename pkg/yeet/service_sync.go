@@ -41,6 +41,10 @@ type serviceSyncResult struct {
 	PortsSynced      bool
 	RunAs            string
 	RunAsSynced      bool
+	Sandbox          string
+	SandboxRO        []string
+	SandboxRW        []string
+	SandboxSynced    bool
 	Skip             string
 }
 
@@ -200,28 +204,85 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 		result.Skip = "service not found on catch"
 		return result, false, nil
 	}
-	root, zfs, err := serviceRootForLocalConfig(target.Host, resp.Info)
+	sandbox, err := serviceSandboxForSync(target, resp.Info)
 	if err != nil {
 		return serviceSyncResult{}, false, err
 	}
-	result.Root = root
-	result.ZFS = zfs
-	if err := syncServiceEntryRoot(cfgLoc.Config, target, resp.Info, root, zfs, &result); err != nil {
-		return serviceSyncResult{}, false, err
-	}
-	if err := syncServiceIdentity(cfgLoc.Config, target, resp.Info, &result); err != nil {
-		return serviceSyncResult{}, false, err
-	}
-	if err := syncServiceSnapshotPolicy(cfgLoc.Config, target, resp.Info.Snapshots, &result); err != nil {
-		return serviceSyncResult{}, false, err
-	}
-	if err := syncServicePorts(cfgLoc.Config, target, resp.Info.Network.PortsPresent, resp.Info.Network.Ports, &result); err != nil {
-		return serviceSyncResult{}, false, err
-	}
-	if err := syncServiceNetwork(cfgLoc.Config, target, resp.Info.Network); err != nil {
+	if err := applyServiceSyncInfo(cfgLoc.Config, target, resp.Info, sandbox, &result); err != nil {
 		return serviceSyncResult{}, false, err
 	}
 	return result, true, nil
+}
+
+func applyServiceSyncInfo(cfg *ProjectConfig, target serviceSyncTarget, info catchrpc.ServiceInfo, sandbox serviceSyncSandbox, result *serviceSyncResult) error {
+	root, zfs, err := serviceRootForLocalConfig(target.Host, info)
+	if err != nil {
+		return err
+	}
+	result.Root = root
+	result.ZFS = zfs
+	if err := syncServiceEntryRoot(cfg, target, info, root, zfs, result); err != nil {
+		return err
+	}
+	if err := syncServiceSandbox(cfg, target, sandbox, result); err != nil {
+		return err
+	}
+	if err := syncServiceIdentity(cfg, target, info, result); err != nil {
+		return err
+	}
+	if err := syncServiceSnapshotPolicy(cfg, target, info.Snapshots, result); err != nil {
+		return err
+	}
+	if err := syncServicePorts(cfg, target, info.Network.PortsPresent, info.Network.Ports, result); err != nil {
+		return err
+	}
+	if err := syncServiceNetwork(cfg, target, info.Network); err != nil {
+		return err
+	}
+	return nil
+}
+
+type serviceSyncSandbox struct {
+	state     string
+	readOnly  []string
+	writable  []string
+	available bool
+}
+
+func serviceSandboxForSync(target serviceSyncTarget, info catchrpc.ServiceInfo) (serviceSyncSandbox, error) {
+	if strings.TrimSpace(info.ServiceType) != "systemd" {
+		if info.Sandbox != nil {
+			return serviceSyncSandbox{}, fmt.Errorf("catch returned sandbox state for non-native service %s@%s", target.Service, target.Host)
+		}
+		return serviceSyncSandbox{available: true}, nil
+	}
+	if info.Sandbox == nil {
+		return serviceSyncSandbox{}, fmt.Errorf("catch did not return sandbox state for native service %s@%s", target.Service, target.Host)
+	}
+	state, ro, rw, err := sandboxEntryFromServiceInfo(info.Sandbox)
+	if err != nil {
+		return serviceSyncSandbox{}, fmt.Errorf("catch returned invalid sandbox state for %s@%s: %w", target.Service, target.Host, err)
+	}
+	return serviceSyncSandbox{state: state, readOnly: ro, writable: rw, available: true}, nil
+}
+
+func syncServiceSandbox(cfg *ProjectConfig, target serviceSyncTarget, sandbox serviceSyncSandbox, result *serviceSyncResult) error {
+	if !sandbox.available {
+		return nil
+	}
+	entry, ok := cfg.ServiceEntry(target.Service, target.Host)
+	if !ok {
+		return serviceSyncMissingEntryError(target)
+	}
+	entry.Sandbox = sandbox.state
+	entry.SandboxRO = cloneSandboxStringSlice(sandbox.readOnly)
+	entry.SandboxRW = cloneSandboxStringSlice(sandbox.writable)
+	cfg.SetServiceEntry(entry)
+	result.Sandbox = sandbox.state
+	result.SandboxRO = cloneSandboxStringSlice(sandbox.readOnly)
+	result.SandboxRW = cloneSandboxStringSlice(sandbox.writable)
+	result.SandboxSynced = true
+	return nil
 }
 
 func syncServiceNetwork(cfg *ProjectConfig, target serviceSyncTarget, network catchrpc.ServiceNetwork) error {

@@ -267,6 +267,66 @@ yeet run <svc> ./bin/<svc>
 yeet run <svc> ./script.sh -- --app-flag value
 ```
 
+### Native sandboxing
+
+Fresh native binaries, shebang scripts, and scheduled jobs run through
+Bubblewrap by default. Existing native services stay in the `legacy` state
+until you choose `on` or `off` for each service:
+
+```bash
+yeet service set api --sandbox=on
+yeet service set api --sandbox=off
+```
+
+`legacy` is an information state, not a value accepted by `--sandbox`.
+`--sandbox=off` is the explicit escape hatch. It is independent of both
+`--run-as=root` and the selected network mode.
+
+The default sandbox mounts the service data directory read-write and mounts
+the payload and required host runtime files read-only. `/tmp` and `/run` are
+private. `/root`, `/home`, `/var`, `/sys`, and other services are absent unless
+the fixed runtime policy or an explicit exposure requires them.
+
+Expose an additional read-only file or directory with `--sandbox-ro`. Expose a
+writable directory with `--sandbox-rw`. Both flags accept `SOURCE` or
+`SOURCE:DEST` and can be repeated:
+
+```bash
+yeet run api ./api --sandbox-ro=/etc/api --sandbox-rw=/srv/api-cache:/cache
+```
+
+For an existing service, a mentioned read-only or writable list is the
+complete desired list for that access class. Catch refuses to remove an
+existing entry implicitly. Preserve the current entries while adding another,
+or use the class-specific `reset` token to replace the list:
+
+```bash
+yeet service set api --sandbox-ro=/etc/api --sandbox-ro=/etc/ssl
+yeet service set api --sandbox-ro=reset --sandbox-ro=/etc/api
+```
+
+An exposure-only `service set` command changes an `off` service to `on`. To
+edit dormant exposures while keeping direct execution, repeat the state in the
+same command:
+
+```bash
+yeet service set api --sandbox=off --sandbox-ro=/etc/api
+```
+
+Sandboxed workloads get new user, PID, IPC, and UTS namespaces. They inherit
+the network mode and systemd cgroup that Yeet already selected. This limits
+filesystem and process visibility, but it is not VM isolation. A root workload
+still shares the host kernel, so an escape has host-root consequences.
+
+Catch installs and probes Bubblewrap for a fresh Catch installation and when a
+new or changed native service results in sandbox state `on`. Ordinary Yeet or
+Catch upgrades and services that remain `legacy` or explicitly remain `off` do
+not install it. An exposure-only edit of an `off` service results in `on` and
+therefore installs and probes Bubblewrap; include `--sandbox=off` in that edit
+to keep the exposures dormant. See the
+[native sandboxing guide](https://yeetrun.com/docs/concepts/native-sandboxing)
+for the complete policy and troubleshooting steps.
+
 ### Scheduled job
 
 ```bash

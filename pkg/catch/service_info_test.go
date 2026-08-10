@@ -66,6 +66,114 @@ func TestServiceIdentityInfoClassifiesNativeIdentityAndReportsDrift(t *testing.T
 	}
 }
 
+func TestServiceSandboxInfoUsesExactActiveGenerationAndClones(t *testing.T) {
+	service := &db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       2,
+		LatestGeneration: 9,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(2): {
+				State: "on",
+				ReadOnly: []db.ServiceSandboxExposure{
+					{Source: "/z", Destination: "/inside/z"},
+					{Source: "/a", Destination: "/a"},
+				},
+				Writable: []db.ServiceSandboxExposure{{Source: "/work", Destination: "/data"}},
+			},
+			db.Gen(9): {State: "off"},
+			"staged":  {State: "off", Writable: []db.ServiceSandboxExposure{{Source: "/staged", Destination: "/staged"}}},
+		}},
+	}
+
+	got := serviceSandboxInfo(service.View())
+	want := &catchrpc.ServiceSandbox{
+		State: "on",
+		ReadOnly: []catchrpc.ServiceSandboxExposure{
+			{Source: "/a", Destination: "/a"},
+			{Source: "/z", Destination: "/inside/z"},
+		},
+		Writable: []catchrpc.ServiceSandboxExposure{{Source: "/work", Destination: "/data"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("serviceSandboxInfo = %#v, want exact active generation %#v", got, want)
+	}
+	got.State = "off"
+	got.ReadOnly[0].Source = "/mutated"
+	again := serviceSandboxInfo(service.View())
+	if !reflect.DeepEqual(again, want) {
+		t.Fatalf("serviceSandboxInfo aliases DB state: %#v, want %#v", again, want)
+	}
+}
+
+func TestServiceSandboxInfoLegacyInvalidAndServiceExclusions(t *testing.T) {
+	legacy := serviceSandboxInfo((&db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 4,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(9): {State: "on"}, "staged": {State: "off"},
+		}},
+	}).View())
+	if !reflect.DeepEqual(legacy, &catchrpc.ServiceSandbox{State: "legacy"}) {
+		t.Fatalf("missing active policy = %#v, want legacy", legacy)
+	}
+
+	tests := []struct {
+		name    string
+		service *db.Service
+	}{
+		{name: "invalid view"},
+		{name: "compose", service: &db.Service{Name: "compose", ServiceType: db.ServiceTypeDockerCompose}},
+		{name: "vm", service: &db.Service{Name: "vm", ServiceType: db.ServiceTypeVM}},
+		{name: "catch helper", service: &db.Service{Name: CatchService, ServiceType: db.ServiceTypeSystemd}},
+		{name: "system helper", service: &db.Service{Name: SystemService, ServiceType: db.ServiceTypeSystemd}},
+		{name: "nil exact policy", service: &db.Service{
+			Name: "nil-policy", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+			Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{db.Gen(1): nil}},
+		}},
+		{name: "invalid exact policy", service: &db.Service{
+			Name: "invalid-policy", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+			Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+				db.Gen(1): {State: "broken"},
+			}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var view db.ServiceView
+			if tt.service != nil {
+				view = tt.service.View()
+			}
+			if got := serviceSandboxInfo(view); got != nil {
+				t.Fatalf("serviceSandboxInfo = %#v, want nil", got)
+			}
+		})
+	}
+}
+
+func TestServiceInfoIncludesActiveSandboxPolicy(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"api": {
+			Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 3, LatestGeneration: 8,
+			Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+				db.Gen(3): {State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/input", Destination: "/input"}}},
+				db.Gen(8): {State: "on"},
+			}},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	resp, err := server.serviceInfo("api")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	want := &catchrpc.ServiceSandbox{State: "off", ReadOnly: []catchrpc.ServiceSandboxExposure{{Source: "/input", Destination: "/input"}}}
+	if !resp.Found || !reflect.DeepEqual(resp.Info.Sandbox, want) {
+		t.Fatalf("serviceInfo sandbox = %#v, want active %#v", resp.Info.Sandbox, want)
+	}
+}
+
 func TestServiceNetworkInfoReportsEffectiveModes(t *testing.T) {
 	runtimeService := func(state iso.AllocationState) *db.Service {
 		return &db.Service{

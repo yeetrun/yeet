@@ -1718,6 +1718,37 @@ func TestHostStoragePlanMigrateNoneReturnsPersistenceActions(t *testing.T) {
 	}
 }
 
+func TestUpdatedServiceForHostStoragePinnedRootPreservesSandboxPolicyWithoutAliasing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "services", "api")
+	policy := &db.ServiceSandboxPolicy{
+		State:    "on",
+		ReadOnly: []db.ServiceSandboxExposure{{Source: filepath.Join(root, "data", "config"), Destination: "/config"}},
+		Writable: []db.ServiceSandboxExposure{{Source: "/opt/cache", Destination: "/cache"}},
+	}
+	previous := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, Generation: 4,
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			db.Gen(4): policy.Clone(), "latest": policy.Clone(),
+		}},
+	}
+	target, err := updatedServiceForHostStorageRootMigration(Config{}, serviceRootMigrationPlan{
+		ServiceName: previous.Name, OldRoot: root, NewRoot: root, Mode: serviceRootMigrationCopy,
+	}, previous)
+	if err != nil {
+		t.Fatalf("update pinned host-storage service: %v", err)
+	}
+	if !reflect.DeepEqual(target.Sandbox, previous.Sandbox) {
+		t.Fatalf("pinned host-storage sandbox = %#v, want byte-equivalent %#v", target.Sandbox, previous.Sandbox)
+	}
+	target.Sandbox.Refs[db.Gen(4)].ReadOnly[0].Source = "/mutated"
+	if previous.Sandbox.Refs[db.Gen(4)].ReadOnly[0].Source != filepath.Join(root, "data", "config") {
+		t.Fatal("pinned host-storage sandbox aliases previous service")
+	}
+	if target.Sandbox.Refs[db.ArtifactRef("latest")].ReadOnly[0].Source != filepath.Join(root, "data", "config") {
+		t.Fatal("pinned host-storage exact sandbox ref aliases latest")
+	}
+}
+
 func TestPlanServicesRootBatchAllMovesAffectedServices(t *testing.T) {
 	root := t.TempDir()
 	oldServicesRoot := filepath.Join(root, "services")

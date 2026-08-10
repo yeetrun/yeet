@@ -2184,6 +2184,112 @@ func TestDoInstallHoldsInstallLockThroughRuntimeAdoptionClose(t *testing.T) {
 	}
 }
 
+func TestCatchInstallBubblewrapGateRunsInsideInstallTransaction(t *testing.T) {
+	t.Run("existing Catch upgrade never ensures", func(t *testing.T) {
+		var order []string
+		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{closeHook: func() {
+			order = append(order, "install-catch")
+		}})
+		deps.acquireInstallLock = func(context.Context, string) (io.Closer, error) {
+			order = append(order, "acquire-install-lock")
+			return closeFunc(func() error {
+				order = append(order, "release-install-lock")
+				return nil
+			}), nil
+		}
+		deps.catchAlreadyInstalled = func(*catch.Config) (bool, error) {
+			order = append(order, "inspect-catch-generation")
+			return true, nil
+		}
+		deps.ensureBubblewrap = func(context.Context) error {
+			order = append(order, "ensure-bubblewrap")
+			return nil
+		}
+
+		if err := runCatchInstallTransaction(&catch.Config{}, t.TempDir(), deps); err != nil {
+			t.Fatalf("runCatchInstallTransaction: %v", err)
+		}
+		want := []string{"acquire-install-lock", "inspect-catch-generation", "install-catch", "release-install-lock"}
+		if !reflect.DeepEqual(order, want) {
+			t.Fatalf("upgrade order = %#v, want %#v", order, want)
+		}
+	})
+
+	t.Run("fresh ensure failure precedes installer construction", func(t *testing.T) {
+		ensureErr := errors.New("Bubblewrap probe denied")
+		installerCalls := 0
+		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{})
+		deps.catchAlreadyInstalled = func(*catch.Config) (bool, error) { return false, nil }
+		deps.ensureBubblewrap = func(context.Context) error { return ensureErr }
+		deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			installerCalls++
+			return &fakeCatchInstaller{}, nil
+		}
+
+		err := runCatchInstallTransaction(&catch.Config{}, t.TempDir(), deps)
+		if !errors.Is(err, ensureErr) || !strings.Contains(err.Error(), "prepare Bubblewrap for first Catch install") {
+			t.Fatalf("runCatchInstallTransaction error = %v, want wrapped %v", err, ensureErr)
+		}
+		if installerCalls != 0 {
+			t.Fatalf("installer construction calls = %d, want zero after prerequisite failure", installerCalls)
+		}
+	})
+
+	t.Run("inspection failure never ensures or installs", func(t *testing.T) {
+		inspectErr := errors.New("read Catch generation")
+		ensureCalls := 0
+		installerCalls := 0
+		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{})
+		deps.catchAlreadyInstalled = func(*catch.Config) (bool, error) { return false, inspectErr }
+		deps.ensureBubblewrap = func(context.Context) error { ensureCalls++; return nil }
+		deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			installerCalls++
+			return &fakeCatchInstaller{}, nil
+		}
+
+		err := runCatchInstallTransaction(&catch.Config{}, t.TempDir(), deps)
+		if !errors.Is(err, inspectErr) || !strings.Contains(err.Error(), "inspect existing Catch install") {
+			t.Fatalf("runCatchInstallTransaction error = %v, want wrapped %v", err, inspectErr)
+		}
+		if ensureCalls != 0 || installerCalls != 0 {
+			t.Fatalf("ensure/installer calls = %d/%d, want 0/0", ensureCalls, installerCalls)
+		}
+	})
+}
+
+func TestCatchAlreadyInstalledRequiresActiveCatchGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		generation int
+		create     bool
+		want       bool
+	}{
+		{name: "missing record"},
+		{name: "provisional generation zero", create: true},
+		{name: "active generation", create: true, generation: 1, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := cdb.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+			if test.create {
+				if _, _, err := store.MutateService(catch.CatchService, func(_ *cdb.Data, service *cdb.Service) error {
+					service.Generation = test.generation
+					return nil
+				}); err != nil {
+					t.Fatalf("seed Catch service: %v", err)
+				}
+			}
+			got, err := catchAlreadyInstalled(&catch.Config{DB: store})
+			if err != nil {
+				t.Fatalf("catchAlreadyInstalled: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("catchAlreadyInstalled = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCatchUpgradeDoesNotRestartVMsWhileReconcilingRuntimePolicy(t *testing.T) {
 	var order []string
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{rollbackAvailable: true})
@@ -2301,6 +2407,8 @@ func successfulCatchInstallDeps(ts installTSNet, inst catchServiceInstaller) cat
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
+		ensureBubblewrap:      func(context.Context) error { return nil },
+		catchAlreadyInstalled: func(*catch.Config) (bool, error) { return true, nil },
 	}
 }
 
@@ -2349,6 +2457,8 @@ func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
+		ensureBubblewrap:      func(context.Context) error { return nil },
+		catchAlreadyInstalled: func(*catch.Config) (bool, error) { return true, nil },
 	})
 	if err != nil {
 		t.Fatalf("doInstallWith returned error: %v", err)
@@ -2410,6 +2520,8 @@ func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
+		ensureBubblewrap:      func(context.Context) error { return nil },
+		catchAlreadyInstalled: func(*catch.Config) (bool, error) { return true, nil },
 	})
 	if err == nil {
 		t.Fatalf("doInstallWith succeeded")
@@ -2448,6 +2560,8 @@ func TestDoInstallRequiresTSNet(t *testing.T) {
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
+		ensureBubblewrap:      func(context.Context) error { return nil },
+		catchAlreadyInstalled: func(*catch.Config) (bool, error) { return true, nil },
 	})
 	if err == nil {
 		t.Fatalf("doInstallWith succeeded")
@@ -2484,6 +2598,8 @@ func TestDoInstallValidationAndInstallerErrors(t *testing.T) {
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
+		ensureBubblewrap:      func(context.Context) error { return nil },
+		catchAlreadyInstalled: func(*catch.Config) (bool, error) { return true, nil },
 	})
 	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "failed to create installer") {
 		t.Fatalf("installer error = %v, want wrapped %v", err, wantErr)
@@ -2518,7 +2634,8 @@ func TestWriteCurrentExecutableReadAndWriteErrorsFailInstaller(t *testing.T) {
 func TestNormalizeCatchInstallDepsFillsDefaults(t *testing.T) {
 	deps := normalizeCatchInstallDeps(catchInstallDeps{})
 	if deps.writeInstallMeta == nil || deps.initTSNet == nil || deps.newInstaller == nil ||
-		deps.ensureManagedServiceAccount == nil || deps.executable == nil || deps.readFile == nil || deps.logf == nil || deps.tsnetHost == nil {
+		deps.ensureManagedServiceAccount == nil || deps.executable == nil || deps.readFile == nil || deps.logf == nil || deps.tsnetHost == nil ||
+		deps.ensureBubblewrap == nil || deps.catchAlreadyInstalled == nil {
 		t.Fatalf("normalizeCatchInstallDeps left default unset: %#v", deps)
 	}
 }

@@ -1254,6 +1254,8 @@ type catchVMLegacyJailerUpgrade interface {
 type catchInstallDeps struct {
 	writeInstallMeta             func(string) error
 	initTSNet                    func(string) (installTSNet, error)
+	ensureBubblewrap             func(context.Context) error
+	catchAlreadyInstalled        func(*catch.Config) (bool, error)
 	ensureManagedServiceAccount  func() error
 	newInstaller                 func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
 	executable                   func() (string, error)
@@ -1285,6 +1287,8 @@ func defaultCatchInstallDeps() catchInstallDeps {
 		initTSNet: func(dataDir string) (installTSNet, error) {
 			return initTSNet(dataDir)
 		},
+		ensureBubblewrap:      catch.EnsureBubblewrap,
+		catchAlreadyInstalled: catchAlreadyInstalled,
 		ensureManagedServiceAccount: func() error {
 			_, err := catch.EnsureManagedServiceAccount()
 			return err
@@ -1336,7 +1340,8 @@ func runCatchInstallTransaction(cfg *catch.Config, dataDir string, deps catchIns
 	if err := validateCatchInstallPlan(plan); err != nil {
 		return err
 	}
-	installLock, err := deps.acquireInstallLock(context.Background(), dataDir)
+	ctx := context.Background()
+	installLock, err := deps.acquireInstallLock(ctx, dataDir)
 	if err != nil {
 		return fmt.Errorf("acquire Catch install transaction lock: %w", err)
 	}
@@ -1345,6 +1350,15 @@ func runCatchInstallTransaction(cfg *catch.Config, dataDir string, deps catchIns
 			err = errors.Join(err, fmt.Errorf("release Catch install transaction lock: %w", closeErr))
 		}
 	}()
+	installed, err := deps.catchAlreadyInstalled(cfg)
+	if err != nil {
+		return fmt.Errorf("inspect existing Catch install: %w", err)
+	}
+	if !installed {
+		if err := deps.ensureBubblewrap(ctx); err != nil {
+			return fmt.Errorf("prepare Bubblewrap for first Catch install: %w", err)
+		}
+	}
 	summary, err := installCatchAndAdoptVMRuntimes(cfg, plan, deps)
 	if err != nil {
 		return err
@@ -1512,6 +1526,12 @@ func normalizeCatchInstallFileDeps(deps, defaults catchInstallDeps) catchInstall
 }
 
 func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInstallDeps {
+	if deps.ensureBubblewrap == nil {
+		deps.ensureBubblewrap = defaults.ensureBubblewrap
+	}
+	if deps.catchAlreadyInstalled == nil {
+		deps.catchAlreadyInstalled = defaults.catchAlreadyInstalled
+	}
 	if deps.prepareLegacyVMJailerUpgrade == nil {
 		deps.prepareLegacyVMJailerUpgrade = defaults.prepareLegacyVMJailerUpgrade
 	}
@@ -1528,6 +1548,19 @@ func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInst
 		deps.acquireInstallLock = defaults.acquireInstallLock
 	}
 	return deps
+}
+
+func catchAlreadyInstalled(cfg *catch.Config) (bool, error) {
+	if cfg == nil || cfg.DB == nil {
+		return false, fmt.Errorf("required Catch database is unavailable")
+	}
+	installed := false
+	err := cfg.DB.WithLatestDataLocked(func(view cdb.DataView) error {
+		service, ok := view.Services().GetOk(catch.CatchService)
+		installed = ok && service.Generation() > 0
+		return nil
+	})
+	return installed, err
 }
 
 func acquireCatchInstallLock(ctx context.Context, dataDir string, trustedUID uint32) (*os.File, error) {

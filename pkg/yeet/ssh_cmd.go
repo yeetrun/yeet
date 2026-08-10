@@ -1099,10 +1099,25 @@ func shellQuote(value string) string {
 	if value == "" {
 		return "''"
 	}
-	if !strings.ContainsAny(value, " \t\n'\"\\$&;|<>*?()[]{}") {
+	if shellWordIsSafeUnquoted(value) {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func shellWordIsSafeUnquoted(value string) bool {
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
+			continue
+		}
+		switch char {
+		case '_', '@', '%', '+', '=', ':', ',', '.', '/', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func shellJoin(args []string) string {

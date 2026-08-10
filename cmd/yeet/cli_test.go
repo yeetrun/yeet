@@ -163,11 +163,25 @@ func TestCLIServiceSetHelp(t *testing.T) {
 	if !strings.Contains(stdout, "Set service settings") {
 		t.Fatalf("stdout = %q, want service set command help", stdout)
 	}
-	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
 		t.Fatalf("stdout = %q, want service set usage", stdout)
 	}
 	if strings.Contains(stdout, "service COMMAND [ARGS...]") {
 		t.Fatalf("stdout = %q, got group help instead of service set help", stdout)
+	}
+	for _, want := range []string{"--sandbox=on|off", "--sandbox-ro=SOURCE[:DEST]", "--sandbox-rw=SOURCE[:DEST]"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCLIRunHelpIncludesSandboxOptions(t *testing.T) {
+	stdout := captureCLIHelpOutput(t, "run", "--help")
+	for _, want := range []string{"--sandbox=on|off", "--sandbox-ro=SOURCE[:DEST]", "--sandbox-rw=SOURCE[:DEST]"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
 	}
 }
 

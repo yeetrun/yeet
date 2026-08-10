@@ -399,10 +399,24 @@ func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *pro
 	}()
 
 	runArgs := draft.runArgs()
-	if err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
+	result, err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange)
+	if err != nil {
+		err = runSandboxSyncErrorForConfig(err, host, service, cfgLoc)
 		return cleanupFailedNewRunDraft(ctx, draft, host, service, err)
 	}
-	return saveRunDraftExecutionConfig(cfgLoc, host, draft, runArgs)
+	return saveRunDraftExecutionConfigWithResult(cfgLoc, host, draft, runArgs, result)
+}
+
+func runSandboxSyncErrorForConfig(err error, host, service string, cfgLoc *projectConfigLocation) error {
+	var syncErr *runSandboxConfigSyncError
+	if !errors.As(err, &syncErr) {
+		return err
+	}
+	configPath := ""
+	if cfgLoc != nil {
+		configPath = cfgLoc.Path
+	}
+	return newRunSandboxConfigSyncError(host, service, configPath, syncErr.cause)
 }
 
 func cleanupFailedNewRunDraft(ctx context.Context, draft RunDraft, host, service string, cause error) error {
@@ -436,18 +450,27 @@ func runDraftStagedOnlyService(resp catchrpc.ServiceInfoResponse) bool {
 	return resp.Info.DataType == "" || resp.Info.DataType == "unknown"
 }
 
-func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
+func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) (runChangeResult, error) {
 	if isStdoutWriter(stdout) {
-		return runDraftWithChanges(ctx, draft, runArgs, forceDeploy)
+		return runDraftWithChangesResult(ctx, draft, runArgs, forceDeploy)
 	}
-	return runDraftWithChangesTo(ctx, stdout, draft, runArgs, forceDeploy)
+	return runDraftWithChangesToResult(ctx, stdout, draft, runArgs, forceDeploy)
 }
 
 func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, draft RunDraft, runArgs []string) error {
+	return saveRunDraftExecutionConfigWithResult(cfgLoc, host, draft, runArgs, runChangeResult{})
+}
+
+func saveRunDraftExecutionConfigWithResult(cfgLoc *projectConfigLocation, host string, draft RunDraft, runArgs []string, result runChangeResult) error {
 	configRunArgs := runArgsWithoutSensitiveRunOptions(runArgs)
-	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
+	if err := saveRunConfigWithPayloadKindResult(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS, result); err != nil {
 		if draft.RunAsSet {
-			return serviceIdentityConfigWriteError(host, draft.Service, draft.RunAs, err)
+			identityErr := serviceIdentityConfigWriteError(host, draft.Service, draft.RunAs, err)
+			var syncErr *runSandboxConfigSyncError
+			if errors.As(err, &syncErr) {
+				return errors.Join(identityErr, err)
+			}
+			return identityErr
 		}
 		return err
 	}
@@ -536,11 +559,16 @@ func runArgsWithSensitiveRunOptionsHidden(args []string) []string {
 	return out
 }
 
-func runDraftWithChanges(ctx context.Context, draft RunDraft, runArgs []string, forceDeploy bool) error {
-	return runDraftWithChangesTo(ctx, os.Stdout, draft, runArgs, forceDeploy)
+func runDraftWithChangesResult(ctx context.Context, draft RunDraft, runArgs []string, forceDeploy bool) (runChangeResult, error) {
+	return runDraftWithChangesToResult(ctx, os.Stdout, draft, runArgs, forceDeploy)
 }
 
 func runDraftWithChangesTo(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
+	_, err := runDraftWithChangesToResult(ctx, stdout, draft, runArgs, forceDeploy)
+	return err
+}
+
+func runDraftWithChangesToResult(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) (runChangeResult, error) {
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -559,7 +587,7 @@ func runDraftWithChangesTo(ctx context.Context, stdout io.Writer, draft RunDraft
 	}
 	alwaysDeploy := draft.PayloadKind == "local-image" || draft.PayloadKind == serviceTypeVM
 	entry := runDraftNetworkGuardEntry(draft)
-	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, entry, forceDeploy, runner, alwaysDeploy)
+	return runWithChangesToWithContextRunnerResult(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, entry, forceDeploy, runner, alwaysDeploy)
 }
 
 func runDraftNetworkGuardEntry(draft RunDraft) ServiceEntry {

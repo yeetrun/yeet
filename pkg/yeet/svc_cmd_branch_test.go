@@ -1114,6 +1114,173 @@ func TestServiceSetNetworkPartialSuccessQuotesExactConfigPath(t *testing.T) {
 	}
 }
 
+func TestServiceSetSyncCommandQuotesMetacharactersAndPreservesDefaultHomePath(t *testing.T) {
+	got := serviceSetSyncCommand("api", "host-a", "/tmp/config-`id`.toml")
+	want := "yeet --host host-a service sync api --config '/tmp/config-`id`.toml'"
+	if got != want {
+		t.Fatalf("custom recovery command = %q, want %q", got, want)
+	}
+	defaultCommand := serviceSetSyncCommand("api", "host-a", "")
+	if !strings.HasSuffix(defaultCommand, " --config ~/yeet-services/yeet.toml") {
+		t.Fatalf("default recovery command lost shell home expansion: %q", defaultCommand)
+	}
+}
+
+func TestServiceSetSandboxSavesCatchCanonicalPolicyAfterRemoteSuccess(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "api"
+	dir := t.TempDir()
+	loc := &projectConfigLocation{
+		Path: filepath.Join(dir, projectConfigName), Dir: dir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	loc.Config.SetServiceEntry(ServiceEntry{
+		Name: "api", Host: "host.example.com", Sandbox: "off",
+		SandboxRO: []string{"/old/read"}, SandboxRW: []string{"/old/write"},
+	})
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	remoteCalls := 0
+	execRemoteFn = func(_ context.Context, service string, args []string, _ io.Reader, _ bool) error {
+		remoteCalls++
+		if service != "api" || !reflect.DeepEqual(args, []string{"service", "set", "--sandbox=on", "--sandbox-ro=reset", "--sandbox-ro=/requested"}) {
+			t.Fatalf("remote request = %q %#v", service, args)
+		}
+		return nil
+	}
+	fetches := 0
+	fetchServiceInfoForSyncFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		fetches++
+		if host != "host.example.com" || service != "api" {
+			t.Fatalf("ServiceInfo target = %s/%s", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Sandbox: &catchrpc.ServiceSandbox{
+				State: "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{
+					{Source: "/canonical/z", Destination: "/z"},
+					{Source: "/canonical/read", Destination: "/canonical/read"},
+				},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/canonical/write", Destination: "/work"}},
+			},
+		}}, nil
+	}
+	req := svcCommandRequest{
+		Command: svcCommand{
+			Name:    "service",
+			Args:    []string{"set", "--sandbox=on", "--sandbox-ro=reset", "--sandbox-ro=/requested"},
+			RawArgs: []string{"service", "set", "--sandbox=on", "--sandbox-ro=reset", "--sandbox-ro=/requested"},
+		},
+		Config: loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api",
+	}
+	if err := handleServiceSet(context.Background(), req); err != nil {
+		t.Fatalf("handleServiceSet: %v", err)
+	}
+	if remoteCalls != 1 || fetches != 1 {
+		t.Fatalf("remote calls/fetches = %d/%d, want 1/1", remoteCalls, fetches)
+	}
+	loaded, err := loadProjectConfigFromFile(loc.Path)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	entry, _ := loaded.Config.ServiceEntry("api", "host.example.com")
+	if entry.Sandbox != "on" ||
+		!reflect.DeepEqual(entry.SandboxRO, []string{"/canonical/read", "/canonical/z:/z"}) ||
+		!reflect.DeepEqual(entry.SandboxRW, []string{"/canonical/write:/work"}) {
+		t.Fatalf("saved sandbox = %q %#v %#v", entry.Sandbox, entry.SandboxRO, entry.SandboxRW)
+	}
+	for _, stored := range append(append([]string{}, entry.SandboxRO...), entry.SandboxRW...) {
+		if stored == "reset" {
+			t.Fatalf("reset sentinel persisted in %#v", entry)
+		}
+	}
+}
+
+func TestServiceSetSandboxRemoteFailureDoesNotFetchOrMutateConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "api"
+	dir := t.TempDir()
+	loc := &projectConfigLocation{
+		Path: filepath.Join(dir, projectConfigName), Dir: dir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host.example.com", Sandbox: "legacy"})
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("remote rejected sandbox")
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return want }
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatal("ServiceInfo fetched before remote success")
+		return catchrpc.ServiceInfoResponse{}, nil
+	}
+	req := svcCommandRequest{
+		Command: svcCommand{Name: "service", Args: []string{"set", "--sandbox=on"}, RawArgs: []string{"service", "set", "--sandbox=on"}},
+		Config:  loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api",
+	}
+	if err := handleServiceSet(context.Background(), req); !errors.Is(err, want) {
+		t.Fatalf("handleServiceSet error = %v, want %v", err, want)
+	}
+	after, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("config changed before remote success:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestServiceSetSandboxPostSuccessFailuresNameCatchChangeAndRecovery(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		fetchErr  error
+		saveError error
+	}{
+		{name: "fetch", fetchErr: errors.New("info unavailable")},
+		{name: "save", saveError: errors.New("disk full")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			preserveSvcCommandGlobals(t)
+			oldCreate := createProjectConfigFileFn
+			t.Cleanup(func() { createProjectConfigFileFn = oldCreate })
+			serviceOverride = "api"
+			dir := filepath.Join(t.TempDir(), "config with spaces")
+			loc := &projectConfigLocation{
+				Path: filepath.Join(dir, "custom.toml"), Dir: dir,
+				Config: &ProjectConfig{Version: projectConfigVersion},
+			}
+			loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host.example.com", Sandbox: "legacy"})
+			execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return nil }
+			fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				if tt.fetchErr != nil {
+					return catchrpc.ServiceInfoResponse{}, tt.fetchErr
+				}
+				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+					ServiceType: "systemd", Sandbox: &catchrpc.ServiceSandbox{State: "on"},
+				}}, nil
+			}
+			if tt.saveError != nil {
+				createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, tt.saveError }
+			}
+			req := svcCommandRequest{
+				Command: svcCommand{Name: "service", Args: []string{"set", "--sandbox=on"}, RawArgs: []string{"service", "set", "--sandbox=on"}},
+				Config:  loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api",
+			}
+			err := handleServiceSet(context.Background(), req)
+			wantRecovery := "`yeet --host host.example.com service sync api --config '" + loc.Path + "'`"
+			if err == nil || !strings.Contains(err.Error(), "catch sandbox changed") || !strings.Contains(err.Error(), wantRecovery) {
+				t.Fatalf("error = %v, want Catch-changed recovery %s", err, wantRecovery)
+			}
+		})
+	}
+}
+
 func TestServiceSetUpdatesSnapshotConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
@@ -1800,6 +1967,7 @@ func TestSvcRunSnapshotFieldInheritRunsRemoteAndSavesConfig(t *testing.T) {
 
 func TestSvcRunExplicitSnapshotFlagsDeployWhenConfigAlreadyMatches(t *testing.T) {
 	preserveSvcCommandGlobals(t)
+	stubExistingNativeSandboxInfo(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
@@ -2203,6 +2371,7 @@ func TestServiceSetSnapshotFieldInheritClearsOnlyLocalField(t *testing.T) {
 
 func TestSvcRunFromStoredConfigViaHandle(t *testing.T) {
 	preserveSvcCommandGlobals(t)
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"

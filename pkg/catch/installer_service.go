@@ -315,6 +315,7 @@ func commitGeneratedServiceRefs(d *db.Data, s *db.Service, serviceName string, c
 	s.LatestGeneration = commit.latestGeneration
 	s.Generation = commit.generation
 	commitArtifactRefs(s.Artifacts, commit)
+	commitSandboxRefs(s.Sandbox, commit)
 	if d != nil {
 		commitImageRefs(d.Images, serviceName, commit)
 	}
@@ -332,6 +333,19 @@ func commitArtifactRefs(artifacts db.ArtifactStore, commit generatedServiceCommi
 		for _, ref := range commit.dstRefs {
 			refs.Refs[db.ArtifactRef(ref)] = val
 		}
+	}
+}
+
+func commitSandboxRefs(sandbox *db.ServiceSandboxStore, commit generatedServiceCommit) {
+	if sandbox == nil {
+		return
+	}
+	policy, ok := sandbox.Refs[db.ArtifactRef(commit.srcRef)]
+	if !ok {
+		return
+	}
+	for _, ref := range commit.dstRefs {
+		sandbox.Refs[db.ArtifactRef(ref)] = policy.Clone()
 	}
 }
 
@@ -401,6 +415,14 @@ func pruneServiceArtifacts(s *db.Service, knownFiles set.Set[string]) {
 	minGen := s.LatestGeneration - maxGenerations
 	for _, refs := range s.Artifacts {
 		pruneArtifactRefs(refs, minGen, knownFiles)
+	}
+	if s.Sandbox == nil {
+		return
+	}
+	for ref := range s.Sandbox.Refs {
+		if !shouldKeepArtifactRef(ref, minGen) {
+			delete(s.Sandbox.Refs, ref)
+		}
 	}
 }
 

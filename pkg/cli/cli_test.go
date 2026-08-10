@@ -55,6 +55,184 @@ func fuzzArgs(raw string) []string {
 	return args
 }
 
+func TestParseSandboxExposure(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		allowReset bool
+		want       SandboxExposure
+		reset      bool
+		wantErr    string
+	}{
+		{name: "same destination", raw: "/srv/shared", want: SandboxExposure{Source: "/srv/shared", Destination: "/srv/shared"}},
+		{name: "remapped", raw: "/srv/shared:/opt/input", want: SandboxExposure{Source: "/srv/shared", Destination: "/opt/input"}},
+		{name: "reset", raw: "reset", allowReset: true, reset: true},
+		{name: "run rejects reset", raw: "reset", wantErr: "reset is only valid with yeet service set"},
+		{name: "relative source", raw: "srv/shared", wantErr: "source must be absolute"},
+		{name: "relative destination", raw: "/srv/shared:opt/input", wantErr: "destination must be absolute"},
+		{name: "dirty destination", raw: "/srv/shared:/opt/../input", wantErr: "destination must be a clean absolute path"},
+		{name: "literal colon", raw: "/srv/shared:/opt/input:copy", wantErr: "literal colons are not supported"},
+		{name: "empty destination", raw: "/srv/shared:", wantErr: "destination must not be empty"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, reset, err := ParseSandboxExposure(tt.raw, tt.allowReset)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseSandboxExposure(%q) error = %v, want %q", tt.raw, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseSandboxExposure(%q): %v", tt.raw, err)
+			}
+			if reset != tt.reset {
+				t.Fatalf("reset = %v, want %v", reset, tt.reset)
+			}
+			if got != tt.want {
+				t.Fatalf("exposure = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		exposure SandboxExposure
+		want     string
+	}{
+		{exposure: SandboxExposure{Source: "/srv/shared", Destination: "/srv/shared"}, want: "/srv/shared"},
+		{exposure: SandboxExposure{Source: "/srv/shared", Destination: "/opt/input"}, want: "/srv/shared:/opt/input"},
+	} {
+		if got := FormatSandboxExposure(tt.exposure); got != tt.want {
+			t.Errorf("FormatSandboxExposure(%#v) = %q, want %q", tt.exposure, got, tt.want)
+		}
+	}
+}
+
+func TestParseRunSandbox(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    SandboxOptions
+		wantErr string
+	}{
+		{name: "on", args: []string{"--sandbox=ON", "payload"}, want: SandboxOptions{State: "on", StateSet: true}},
+		{name: "off", args: []string{"--sandbox", "off", "payload"}, want: SandboxOptions{State: "off", StateSet: true}},
+		{name: "invalid state", args: []string{"--sandbox=enabled", "payload"}, wantErr: "--sandbox must be on or off"},
+		{name: "empty state", args: []string{"--sandbox=", "payload"}, wantErr: "--sandbox must be on or off"},
+		{name: "repeated state", args: []string{"--sandbox=on", "--sandbox=off", "payload"}, wantErr: "--sandbox may only be supplied once"},
+		{name: "repeatable lists preserve order", args: []string{"--sandbox-ro", "/etc/app", "--sandbox-rw=/srv/cache:/cache", "--sandbox-ro=/srv/input:/input", "--sandbox-rw", "/srv/data", "payload"}, want: SandboxOptions{
+			ReadOnly:    []SandboxExposure{{Source: "/etc/app", Destination: "/etc/app"}, {Source: "/srv/input", Destination: "/input"}},
+			ReadOnlySet: true,
+			Writable:    []SandboxExposure{{Source: "/srv/cache", Destination: "/cache"}, {Source: "/srv/data", Destination: "/srv/data"}},
+			WritableSet: true,
+		}},
+		{name: "bare read only", args: []string{"--sandbox-ro"}, wantErr: "--sandbox-ro requires SOURCE[:DEST]"},
+		{name: "bare writable", args: []string{"--sandbox-rw"}, wantErr: "--sandbox-rw requires SOURCE[:DEST]"},
+		{name: "path flags retain presence without state", args: []string{"--sandbox-ro=/etc/app", "payload"}, want: SandboxOptions{ReadOnly: []SandboxExposure{{Source: "/etc/app", Destination: "/etc/app"}}, ReadOnlySet: true}},
+		{name: "run rejects reset", args: []string{"--sandbox-ro=reset", "payload"}, wantErr: "reset is only valid with yeet service set"},
+		{name: "explicit off permits dormant lists", args: []string{"--sandbox=off", "--sandbox-ro=/etc/app", "--sandbox-rw=/srv/cache:/cache", "payload"}, want: SandboxOptions{
+			State:       "off",
+			StateSet:    true,
+			ReadOnly:    []SandboxExposure{{Source: "/etc/app", Destination: "/etc/app"}},
+			ReadOnlySet: true,
+			Writable:    []SandboxExposure{{Source: "/srv/cache", Destination: "/cache"}},
+			WritableSet: true,
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, _, err := ParseRun(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseRun(%#v) error = %v, want %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseRun(%#v): %v", tt.args, err)
+			}
+			if !reflect.DeepEqual(flags.Sandbox, tt.want) {
+				t.Fatalf("Sandbox = %#v, want %#v", flags.Sandbox, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseServiceSetSandbox(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    SandboxOptions
+		wantErr string
+	}{
+		{name: "on", args: []string{"api", "--sandbox=on"}, want: SandboxOptions{State: "on", StateSet: true}},
+		{name: "without explicit state retains paths", args: []string{"api", "--sandbox-ro=/etc/app"}, want: SandboxOptions{ReadOnly: []SandboxExposure{{Source: "/etc/app", Destination: "/etc/app"}}, ReadOnlySet: true}},
+		{name: "reset alone", args: []string{"api", "--sandbox-ro=reset", "--sandbox-rw=reset"}, want: SandboxOptions{ReadOnlySet: true, ReadOnlyReset: true, WritableSet: true, WritableReset: true}},
+		{name: "reset plus values", args: []string{"api", "--sandbox=on", "--sandbox-ro=reset", "--sandbox-ro=/etc/app", "--sandbox-rw=/srv/cache:/cache", "--sandbox-rw=reset", "--sandbox-rw=/srv/data"}, want: SandboxOptions{
+			State:         "on",
+			StateSet:      true,
+			ReadOnly:      []SandboxExposure{{Source: "/etc/app", Destination: "/etc/app"}},
+			ReadOnlySet:   true,
+			ReadOnlyReset: true,
+			Writable:      []SandboxExposure{{Source: "/srv/cache", Destination: "/cache"}, {Source: "/srv/data", Destination: "/srv/data"}},
+			WritableSet:   true,
+			WritableReset: true,
+		}},
+		{name: "bare read only", args: []string{"--sandbox-ro"}, wantErr: "--sandbox-ro requires SOURCE[:DEST]"},
+		{name: "bare writable", args: []string{"--sandbox-rw"}, wantErr: "--sandbox-rw requires SOURCE[:DEST]"},
+		{name: "repeated reset", args: []string{"api", "--sandbox-ro=reset", "--sandbox-ro=reset"}, wantErr: "--sandbox-ro reset may only be supplied once"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, _, err := ParseServiceSet(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseServiceSet(%#v) error = %v, want %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseServiceSet(%#v): %v", tt.args, err)
+			}
+			if !reflect.DeepEqual(flags.Sandbox, tt.want) {
+				t.Fatalf("Sandbox = %#v, want %#v", flags.Sandbox, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseServiceSetSandboxIsExclusiveWithOtherFamilies(t *testing.T) {
+	for _, args := range [][]string{
+		{"api", "--sandbox=on", `--cron=30 2 * * *`},
+		{"api", "--sandbox=on", "--run-as=app"},
+		{"api", "--sandbox=on", "--net=svc"},
+		{"api", "--sandbox=on", "--zfs"},
+		{"api", "--sandbox=on", "-p", "80:80"},
+		{"api", "--sandbox=on", "--snapshots=on"},
+	} {
+		if _, _, err := ParseServiceSet(args); err == nil || !strings.Contains(err.Error(), "sandbox settings cannot be combined with other service settings") {
+			t.Fatalf("ParseServiceSet(%#v) error = %v, want sandbox combination error", args, err)
+		}
+	}
+}
+
+func TestCommandRegistrySandboxFlags(t *testing.T) {
+	for _, specs := range []map[string]FlagSpec{
+		RemoteFlagSpecs()["run"],
+		RemoteGroupFlagSpecs()["service"]["set"],
+	} {
+		for _, name := range []string{"--sandbox", "--sandbox-ro", "--sandbox-rw"} {
+			spec, ok := specs[name]
+			if !ok || !spec.ConsumesValue {
+				t.Fatalf("flag %s = %#v present=%v, want value-consuming registry flag", name, spec, ok)
+			}
+		}
+	}
+}
+
 func TestParseRunFlagsAndArgs(t *testing.T) {
 	args := []string{
 		"--net", "svc,ts,lan",
@@ -1648,7 +1826,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
-	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
 		t.Fatalf("run usage = %q", got)
 	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, `yeet run <svc> ./job --cron="0 3 * * *" --run-as=backup --net=iso -- --daily`) {
@@ -1672,7 +1850,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	hostSet, ok := reg.Groups["host"].Commands["set"]

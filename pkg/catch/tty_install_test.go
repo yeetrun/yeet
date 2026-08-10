@@ -598,6 +598,49 @@ func TestRunCmdFuncBuildsInstallConfigWithoutLiveInstaller(t *testing.T) {
 	}
 }
 
+func TestTask6ARunFileInstallerCarriesSandboxOptions(t *testing.T) {
+	want := cli.SandboxOptions{
+		State:       "off",
+		StateSet:    true,
+		ReadOnly:    []cli.SandboxExposure{{Source: "/srv/input", Destination: "/input"}},
+		ReadOnlySet: true,
+		Writable:    []cli.SandboxExposure{{Source: "/srv/cache", Destination: "/cache"}},
+		WritableSet: true,
+	}
+	execer := &ttyExecer{sn: "native-sandbox"}
+	cfg, err := execer.runFileInstallerCfg(cli.RunFlags{Sandbox: want}, []string{"--serve"})
+	if err != nil {
+		t.Fatalf("runFileInstallerCfg: %v", err)
+	}
+	field := reflect.ValueOf(cfg).FieldByName("Sandbox")
+	if !field.IsValid() {
+		t.Fatal("runFileInstallerCfg result has no Sandbox field; RunFlags sandbox options were dropped")
+	}
+	got, ok := field.Interface().(cli.SandboxOptions)
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("installer sandbox = %#v, want %#v", got, want)
+	}
+}
+
+func TestTask6AVMRejectsSandboxBeforeProvisioning(t *testing.T) {
+	oldRunVM := runVMCmdFunc
+	called := false
+	runVMCmdFunc = func(*ttyExecer, cli.RunFlags, string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { runVMCmdFunc = oldRunVM })
+
+	execer := &ttyExecer{s: newTestServer(t), sn: "sandbox-vm"}
+	err := execer.runCmdFunc(cli.RunFlags{Sandbox: cli.SandboxOptions{State: "on", StateSet: true}}, []string{"vm://ubuntu/26.04"})
+	if err == nil || !strings.Contains(err.Error(), "native binaries, scripts, and scheduled jobs") {
+		t.Fatalf("VM sandbox error = %v, want native-only guidance", err)
+	}
+	if called {
+		t.Fatal("VM provisioning ran before sandbox flag rejection")
+	}
+}
+
 func TestRunAndStagePublishResetReachISOValidation(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

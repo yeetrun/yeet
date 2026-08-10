@@ -137,6 +137,22 @@ func TestMigrateVersion12LeavesOldServiceIdentityNil(t *testing.T) {
 	}
 }
 
+func TestMigrateVersion14LeavesNativeSandboxLegacy(t *testing.T) {
+	d := &Data{DataVersion: 14, Services: map[string]*Service{
+		"api": {Name: "api", ServiceType: ServiceTypeSystemd},
+	}}
+	migrated, err := migrate(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated || d.DataVersion != 15 {
+		t.Fatalf("migrated/version = %t/%d, want true/15", migrated, d.DataVersion)
+	}
+	if d.Services["api"].Sandbox != nil {
+		t.Fatalf("migrated sandbox = %#v, want nil legacy policy", d.Services["api"].Sandbox)
+	}
+}
+
 func TestISOStateCloneIsDeep(t *testing.T) {
 	d := &Data{
 		ISOPool: &ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16")},
@@ -386,6 +402,64 @@ func TestServiceIdentityRoundTrip(t *testing.T) {
 	}
 	if !got.AsStruct().Services["api"].IdentityInstallPending {
 		t.Fatal("round-tripped IdentityInstallPending = false, want true")
+	}
+}
+
+func TestServiceSandboxPolicyRoundTripClonesAndLooksUpExactGeneration(t *testing.T) {
+	src := &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"native": {
+				Name:             "native",
+				ServiceType:      ServiceTypeSystemd,
+				Generation:       4,
+				LatestGeneration: 5,
+				Sandbox: &ServiceSandboxStore{Refs: map[ArtifactRef]*ServiceSandboxPolicy{
+					Gen(3): {State: "off"},
+					Gen(4): {
+						State:    "on",
+						ReadOnly: []ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}},
+						Writable: []ServiceSandboxExposure{{Source: "/srv/native/data", Destination: "/var/lib/native"}},
+					},
+					"latest": {State: "on"},
+				}},
+			},
+		},
+	}
+
+	raw, err := json.Marshal(src)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var roundTrip Data
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(&roundTrip, src) {
+		t.Fatalf("JSON round trip = %#v, want %#v", &roundTrip, src)
+	}
+
+	service := roundTrip.Services["native"]
+	current, ok := service.SandboxPolicy(4)
+	if !ok || current.State != "on" || !reflect.DeepEqual(current.ReadOnly, []ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}}) || !reflect.DeepEqual(current.Writable, []ServiceSandboxExposure{{Source: "/srv/native/data", Destination: "/var/lib/native"}}) {
+		t.Fatalf("gen-4 sandbox policy = %#v, %t; want active explicit policy", current, ok)
+	}
+	older, ok := service.SandboxPolicy(3)
+	if !ok || older.State != "off" {
+		t.Fatalf("gen-3 sandbox policy = %#v, %t; want off", older, ok)
+	}
+	if policy, ok := service.SandboxPolicy(5); ok || policy != nil {
+		t.Fatalf("gen-5 sandbox policy = %#v, %t; want absent", policy, ok)
+	}
+
+	current.ReadOnly[0].Destination = "/mutated"
+	if got := service.Sandbox.Refs[Gen(4)].ReadOnly[0].Destination; got != "/etc/ssl" {
+		t.Fatalf("SandboxPolicy result mutated stored policy destination to %q", got)
+	}
+	clone := roundTrip.Clone()
+	clone.Services["native"].Sandbox.Refs[Gen(4)].Writable[0].Source = "/mutated"
+	if got := roundTrip.Services["native"].Sandbox.Refs[Gen(4)].Writable[0].Source; got != "/srv/native/data" {
+		t.Fatalf("Data.Clone mutated stored policy source to %q", got)
 	}
 }
 

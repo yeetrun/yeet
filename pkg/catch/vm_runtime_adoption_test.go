@@ -581,6 +581,30 @@ ExecStart="/new catch" vm-run --service devbox --service-root /srv/devbox \
 	}
 }
 
+func TestParseVMRuntimeAdoptionUnitPreprocessesExecStartLineContinuations(t *testing.T) {
+	raw := []byte(`# /etc/systemd/system/yeet-devbox.service
+[Service]
+ExecStart=/bin/catch vm-run \
+ --service devbox --service-root "/srv/dev box" \
+ --config-file /srv/devbox/run/firecracker.json
+`)
+	argv, paths, err := parseVMRuntimeAdoptionUnit(raw)
+	if err != nil {
+		t.Fatalf("parseVMRuntimeAdoptionUnit: %v", err)
+	}
+	wantArgv := []string{
+		"/bin/catch", "vm-run", "--service", "devbox", "--service-root", "/srv/dev box",
+		"--config-file", "/srv/devbox/run/firecracker.json",
+	}
+	if !slices.Equal(argv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", argv, wantArgv)
+	}
+	wantPaths := []string{"/etc/systemd/system/yeet-devbox.service"}
+	if !slices.Equal(paths, wantPaths) {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+}
+
 func TestReadVMRuntimeAdoptionUnitState(t *testing.T) {
 	binDir := t.TempDir()
 	systemctl := filepath.Join(binDir, "systemctl")

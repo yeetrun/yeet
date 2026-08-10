@@ -1276,7 +1276,7 @@ Install/update from a payload (binary, compose, image, Dockerfile, VM)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
+yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
 ```
 
 ## Operating Rules
@@ -1308,6 +1308,24 @@ Schedule a native binary or script with a five-field cron expression
 Run a native service as USER[:GROUP]
 
 - **Type**: `string`
+
+### `--sandbox`
+
+Native sandbox state: on, off
+
+- **Type**: `string`
+
+### `--sandbox-ro`
+
+Expose a read-only file or directory as SOURCE[:DEST]; repeat for multiple paths
+
+- **Type**: `[]string`
+
+### `--sandbox-rw`
+
+Expose a writable directory as SOURCE[:DEST]; repeat for multiple paths
+
+- **Type**: `[]string`
 
 ### `--vcpus`
 
@@ -3641,7 +3659,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] service set <svc> [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+yeet [GLOBAL_OPTIONS] service set <svc> [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Operating Rules
@@ -3673,6 +3691,24 @@ Update the schedule of an existing scheduled native service with a five-field cr
 Run a native service as USER[:GROUP]
 
 - **Type**: `string`
+
+### `--sandbox`
+
+Native sandbox state: on, off
+
+- **Type**: `string`
+
+### `--sandbox-ro`
+
+Expose a read-only file or directory as SOURCE[:DEST]; repeat for multiple paths
+
+- **Type**: `[]string`
+
+### `--sandbox-rw`
+
+Expose a writable directory as SOURCE[:DEST]; repeat for multiple paths
+
+- **Type**: `[]string`
 
 ### `--net`
 

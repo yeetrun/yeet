@@ -84,6 +84,7 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 
 	info.Staged = serviceHasStagedChanges(sv)
 	info.Identity = serviceIdentityInfo(sv)
+	info.Sandbox = serviceSandboxInfo(sv)
 	info.Network = serviceNetworkInfo(sv)
 	portInfo := servicePublishPortInfo(sn, sv)
 	info.Network.Ports = portInfo.Ports
@@ -159,6 +160,44 @@ func serviceIdentityInfo(sv db.ServiceView) *catchrpc.ServiceIdentity {
 	}
 	return info
 }
+
+func serviceSandboxInfo(sv db.ServiceView) *catchrpc.ServiceSandbox {
+	if !sv.Valid() || sv.ServiceType() != db.ServiceTypeSystemd || sv.Name() == CatchService || sv.Name() == SystemService {
+		return nil
+	}
+	stored, ok := sv.AsStruct().SandboxPolicy(sv.Generation())
+	if !ok {
+		return &catchrpc.ServiceSandbox{State: "legacy"}
+	}
+	if stored == nil {
+		return nil
+	}
+	policy, err := normalizeServiceSandboxPolicy(serviceSandboxPolicy{
+		State:    stored.State,
+		ReadOnly: serviceSandboxExposuresFromDB(stored.ReadOnly),
+		Writable: serviceSandboxExposuresFromDB(stored.Writable),
+	})
+	if err != nil {
+		return nil
+	}
+	return &catchrpc.ServiceSandbox{
+		State:    policy.State,
+		ReadOnly: serviceSandboxRPCExposures(policy.ReadOnly),
+		Writable: serviceSandboxRPCExposures(policy.Writable),
+	}
+}
+
+func serviceSandboxRPCExposures(exposures []serviceSandboxExposure) []catchrpc.ServiceSandboxExposure {
+	if len(exposures) == 0 {
+		return nil
+	}
+	out := make([]catchrpc.ServiceSandboxExposure, len(exposures))
+	for index, exposure := range exposures {
+		out[index] = catchrpc.ServiceSandboxExposure{Source: exposure.Source, Destination: exposure.Destination}
+	}
+	return out
+}
+
 func servicePublishPortInfo(serviceName string, sv db.ServiceView) catchrpc.ServiceNetwork {
 	out := catchrpc.ServiceNetwork{PortsPresent: true}
 	ports := normalizePublish(sv.Publish().AsSlice())

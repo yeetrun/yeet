@@ -97,6 +97,7 @@ func TestHandleSvcCmdUsesConfigHost(t *testing.T) {
 }
 
 func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
 	oldPush := pushAllLocalImagesFn
@@ -174,6 +175,7 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 }
 
 func TestRunFromProjectConfigRehydratesRunAs(t *testing.T) {
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec, oldArch, oldService, oldTerminal, oldHashes := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn, fetchRemoteArtifactHashesFn
 	t.Cleanup(func() {
 		execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn, fetchRemoteArtifactHashesFn = oldExec, oldArch, oldService, oldTerminal, oldHashes
@@ -224,9 +226,7 @@ func TestScheduledRunUsesNormalPipelineForExplicitAndConfiguredPayload(t *testin
 	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
 		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
-	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
-		return catchrpc.ServiceInfoResponse{Found: false}, nil
-	}
+	stubSuccessfulFreshNativeSandboxInfo(t)
 
 	tmp := t.TempDir()
 	payload := filepath.Join(tmp, "owesplit")
@@ -298,9 +298,7 @@ func TestScheduledConfigOnlyRunResolvesImageLookingNativePathFromConfigDirectory
 	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
 		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
-	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
-		return catchrpc.ServiceInfoResponse{Found: false}, nil
-	}
+	stubSuccessfulFreshNativeSandboxInfo(t)
 
 	configDir := t.TempDir()
 	childDir := filepath.Join(configDir, "nested", "child")
@@ -383,9 +381,7 @@ func TestExplicitCronReplacesConfiguredScheduleInRemoteRunAndPersistedConfig(t *
 	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
 		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
-	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
-		return catchrpc.ServiceInfoResponse{Found: false}, nil
-	}
+	stubSuccessfulFreshNativeSandboxInfo(t)
 
 	tmp := t.TempDir()
 	payload := filepath.Join(tmp, "backup.sh")
@@ -434,6 +430,7 @@ func TestExplicitCronReplacesConfiguredScheduleInRemoteRunAndPersistedConfig(t *
 }
 
 func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
+	stubSuccessfulFreshNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
 	oldService := serviceOverride
@@ -489,6 +486,7 @@ func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
 }
 
 func TestHandleSvcCmdRunForceUsesStoredPayload(t *testing.T) {
+	stubExistingNativeSandboxInfo(t)
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
 	oldService := serviceOverride
@@ -504,6 +502,7 @@ func TestHandleSvcCmdRunForceUsesStoredPayload(t *testing.T) {
 		serviceOverride = oldService
 		fetchRemoteArtifactHashesFn = oldHashes
 		isTerminalFn = oldIsTerminal
+		resetHostOverride()
 		_ = os.Chdir(cwd)
 	}()
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/fileutil"
 )
 
 func TestTailscaleMonitorLoopReturnsAfterStableIDStored(t *testing.T) {
@@ -93,6 +94,31 @@ func TestSystemdIdentityInstallPlanSurfaces(t *testing.T) {
 	rewritten, err := rewriteInstalledSystemdUnitIdentity("[Service]\nWorkingDirectory=/srv/api\n", "app", "app")
 	if err != nil || !strings.Contains(rewritten, systemdIdentityEnvironment("app", "/srv/api")) {
 		t.Fatalf("rewritten unit = %q, %v", rewritten, err)
+	}
+}
+
+func TestRewriteInstalledSystemdUnitIdentityPreservesRecognizedHome(t *testing.T) {
+	dataDir := "/srv/api/data"
+	for _, tt := range []struct {
+		name             string
+		workingDirectory string
+	}{
+		{name: "sandbox on", workingDirectory: "/"},
+		{name: "sandbox off", workingDirectory: dataDir},
+		{name: "legacy", workingDirectory: dataDir},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "[Service]\nWorkingDirectory=" + tt.workingDirectory + "\n" +
+				"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n"
+			rewritten, err := rewriteInstalledSystemdUnitIdentity(raw, "app", "workers")
+			if err != nil {
+				t.Fatalf("rewrite installed identity: %v", err)
+			}
+			want := "Environment=HOME=" + dataDir + " USER=app LOGNAME=app SHELL=/bin/sh\n"
+			if !strings.Contains(rewritten, want) {
+				t.Fatalf("rewritten identity lost recognized HOME; want %q in:\n%s", want, rewritten)
+			}
+		})
 	}
 }
 
@@ -312,6 +338,184 @@ func TestSystemdUnitRendersUserAndGroup(t *testing.T) {
 	}
 	if strings.Index(got, "EnvironmentFile=") > strings.Index(got, "Environment=HOME=") {
 		t.Fatalf("identity environment must follow EnvironmentFile so it cannot be overridden:\n%s", got)
+	}
+}
+
+func TestSystemdUnitUsesIndependentHomeDirectory(t *testing.T) {
+	unit := SystemdUnit{
+		Name:             "api",
+		Executable:       "/srv/api/bin/api",
+		WorkingDirectory: "/",
+		HomeDirectory:    "/srv/api/data",
+		User:             "app",
+		Group:            "app",
+	}
+
+	paths, err := unit.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles: %v", err)
+	}
+	raw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"WorkingDirectory=/\n",
+		"Environment=HOME=/srv/api/data USER=app LOGNAME=app SHELL=/bin/sh\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("unit missing independent HOME environment line %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestTask6BSystemdUnitRendersBubblewrapServiceWithoutExecutingTimer(t *testing.T) {
+	root := t.TempDir()
+	payload := filepath.Join(root, "api-1")
+	data := filepath.Join(root, "data")
+	planArgs := []string{
+		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--disable-userns",
+		"--uid", "70000", "--gid", "70001", "--hostname", "api", "--new-session", "--die-with-parent",
+		"--ro-bind", payload, payload,
+		"--bind", data, data,
+		"--chdir", data,
+		"--",
+	}
+	wantArgv := append([]string{"/usr/bin/bwrap"}, planArgs...)
+	wantArgv = append(wantArgv, payload, "--serve", "argument with space")
+	unit := SystemdUnit{
+		Name:                "api",
+		Executable:          "/usr/bin/bwrap",
+		ConditionExecutable: payload,
+		Arguments:           append(planArgs, payload, "--serve", "argument with space"),
+		WorkingDirectory:    "/",
+		HomeDirectory:       data,
+		User:                "70000",
+		Group:               "70001",
+		NetNS:               "yeet-api-ns",
+		Requires:            "yeet-api-ns.service",
+		After:               "yeet-api-ns.service",
+		Timer:               &TimerConfig{OnCalendar: "hourly", Persistent: true},
+	}
+	paths, err := unit.WriteOutUnitFiles(root)
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles: %v", err)
+	}
+	serviceRaw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := string(serviceRaw)
+	task6BAssertSystemdSandboxArgv(t, service, wantArgv)
+	task6BAssertSystemdSandboxDirectives(t, service, payload, data)
+	task6BAssertSystemdTimer(t, paths[db.ArtifactSystemdTimerFile], payload)
+}
+
+func task6BAssertSystemdSandboxArgv(t *testing.T, service string, wantArgv []string) {
+	t.Helper()
+	value := task6BSystemdExecStartValue(t, service)
+	argv, err := ParseSystemdExecStart(value)
+	if err != nil {
+		t.Fatalf("ParseSystemdExecStart: %v", err)
+	}
+	if diff := cmp.Diff(wantArgv, argv); diff != "" {
+		t.Fatalf("Bubblewrap argv mismatch (-want +got):\n%s", diff)
+	}
+	separatorCount := 0
+	for _, value := range argv {
+		if value == "--" {
+			separatorCount++
+		}
+	}
+	if separatorCount != 1 {
+		t.Fatalf("policy separators = %d, want 1: %#v", separatorCount, argv)
+	}
+}
+
+func task6BAssertSystemdSandboxDirectives(t *testing.T, service, payload, data string) {
+	t.Helper()
+	for _, want := range []string{
+		"ConditionFileIsExecutable=" + payload + "\n",
+		"WorkingDirectory=/\n",
+		"Environment=HOME=" + data + " USER=70000 LOGNAME=70000 SHELL=/bin/sh\n",
+		"User=70000\n",
+		"Group=70001\n",
+		"NetworkNamespacePath=/var/run/netns/yeet-api-ns\n",
+		"Requires=yeet-api-ns.service\n",
+		"After=yeet-api-ns.service\n",
+	} {
+		if !strings.Contains(service, want) {
+			t.Fatalf("service unit missing %q:\n%s", want, service)
+		}
+	}
+	if strings.Contains(service, "BindReadOnlyPaths=") || strings.Contains(service, "PrivateMounts=yes") {
+		t.Fatalf("sandboxed service retained systemd resolver mount:\n%s", service)
+	}
+}
+
+func task6BAssertSystemdTimer(t *testing.T, path, payload string) {
+	t.Helper()
+	timerRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timer := string(timerRaw)
+	for _, want := range []string{"OnCalendar=hourly\n", "Persistent=true\n", "WantedBy=timers.target\n"} {
+		if !strings.Contains(timer, want) {
+			t.Fatalf("timer missing %q:\n%s", want, timer)
+		}
+	}
+	for _, forbidden := range []string{"ExecStart=", "/usr/bin/bwrap", payload, "NetworkNamespacePath=", "Requires=yeet-api-ns.service"} {
+		if strings.Contains(timer, forbidden) {
+			t.Fatalf("timer unit contains workload execution directive %q:\n%s", forbidden, timer)
+		}
+	}
+}
+
+func task6BSystemdExecStartValue(t *testing.T, unit string) string {
+	t.Helper()
+	var values []string
+	inService := false
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inService = line == "[Service]"
+			continue
+		}
+		if inService && strings.HasPrefix(line, "ExecStart=") {
+			values = append(values, strings.TrimPrefix(line, "ExecStart="))
+		}
+	}
+	if len(values) != 1 {
+		t.Fatalf("Service ExecStart values = %#v, want one\n%s", values, unit)
+	}
+	return values[0]
+}
+
+func TestSystemdUnitPropagatesExecStartRenderError(t *testing.T) {
+	unit := SystemdUnit{
+		Name:       "api",
+		Executable: "/srv/api/bin/api",
+		Arguments:  []string{"bad\nargument"},
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, fileutil.ApplyVersion("api.service"))
+	want := []byte("existing unit sentinel\n")
+	if err := os.WriteFile(path, want, 0o644); err != nil {
+		t.Fatalf("seed unit file: %v", err)
+	}
+
+	_, err := unit.WriteOutUnitFiles(root)
+	if err == nil || !strings.Contains(err.Error(), "render systemd ExecStart: argument 1 contains line break") {
+		t.Fatalf("WriteOutUnitFiles error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read unit file after render error: %v", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unit file mutated after render error (-want +got):\n%s", diff)
 	}
 }
 

@@ -77,6 +77,7 @@ func TestServiceSyncWritesNativeRunAsFromCatch(t *testing.T) {
 		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
 			ServiceType: "systemd", Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
 			Identity: &catchrpc.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010, Class: "operator"},
+			Sandbox:  &catchrpc.ServiceSandbox{State: "legacy"},
 		}}, nil
 	}
 
@@ -110,6 +111,179 @@ func TestServiceSyncLeavesDockerRunAsUntouchedWhenIdentityOmitted(t *testing.T) 
 	entry, _ := cfg.ServiceEntry("compose", "host-a")
 	if entry.RunAs != "legacy-local-value" || result.RunAsSynced {
 		t.Fatalf("entry/result = %#v %#v, want identity untouched", entry, result)
+	}
+}
+
+func TestServiceSyncStoresAuthoritativeNativeSandbox(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	target := serviceSyncTarget{Service: "api", Host: "host-a"}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name: target.Service, Host: target.Host, Type: serviceTypeRun,
+		Sandbox: "off", SandboxRO: []string{"/old"}, SandboxRW: []string{"/old-rw"},
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: cfg}
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Sandbox: &catchrpc.ServiceSandbox{
+				State: "on",
+				ReadOnly: []catchrpc.ServiceSandboxExposure{
+					{Source: "/z", Destination: "/inside/z"},
+					{Source: "/a", Destination: "/a"},
+				},
+				Writable: []catchrpc.ServiceSandboxExposure{{Source: "/work", Destination: "/data"}},
+			},
+		}}, nil
+	}
+
+	result, ok, err := syncOneServiceRoot(context.Background(), loc, target)
+	if err != nil {
+		t.Fatalf("syncOneServiceRoot: %v", err)
+	}
+	if !ok || !result.SandboxSynced || result.Sandbox != "on" {
+		t.Fatalf("result = %#v, want synced on sandbox", result)
+	}
+	wantRO := []string{"/a", "/z:/inside/z"}
+	wantRW := []string{"/work:/data"}
+	if !reflect.DeepEqual(result.SandboxRO, wantRO) || !reflect.DeepEqual(result.SandboxRW, wantRW) {
+		t.Fatalf("result sandbox = ro %#v rw %#v, want ro %#v rw %#v", result.SandboxRO, result.SandboxRW, wantRO, wantRW)
+	}
+	entry, _ := cfg.ServiceEntry(target.Service, target.Host)
+	if entry.Sandbox != "on" || !reflect.DeepEqual(entry.SandboxRO, wantRO) || !reflect.DeepEqual(entry.SandboxRW, wantRW) {
+		t.Fatalf("entry sandbox = %#v, want Catch canonical policy", entry)
+	}
+}
+
+func TestServiceSyncRejectsMissingNativeSandboxWithoutMutation(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	target := serviceSyncTarget{Service: "api", Host: "host-a"}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name: target.Service, Host: target.Host, Type: serviceTypeRun,
+		ServiceRoot: "/old/root", Sandbox: "off", SandboxRO: []string{"/old"},
+	})
+	before, _ := cfg.ServiceEntry(target.Service, target.Host)
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: cfg}
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/new/root"},
+		}}, nil
+	}
+
+	_, ok, err := syncOneServiceRoot(context.Background(), loc, target)
+	if err == nil || !strings.Contains(err.Error(), "did not return sandbox state") {
+		t.Fatalf("syncOneServiceRoot error = %v, want missing native sandbox", err)
+	}
+	if ok {
+		t.Fatal("syncOneServiceRoot ok = true, want false")
+	}
+	after, _ := cfg.ServiceEntry(target.Service, target.Host)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("entry mutated on invalid response:\n got %#v\nwant %#v", after, before)
+	}
+}
+
+func TestServiceSyncRejectsSandboxOnNonNativeServiceWithoutMutation(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	target := serviceSyncTarget{Service: "compose", Host: "host-a"}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: target.Service, Host: target.Host, Type: serviceTypeRun, ServiceRoot: "/old/root"})
+	before, _ := cfg.ServiceEntry(target.Service, target.Host)
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: cfg}
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "docker-compose",
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/new/root"},
+			Sandbox:     &catchrpc.ServiceSandbox{State: "on"},
+		}}, nil
+	}
+
+	_, ok, err := syncOneServiceRoot(context.Background(), loc, target)
+	if err == nil || !strings.Contains(err.Error(), "sandbox state for non-native service") {
+		t.Fatalf("syncOneServiceRoot error = %v, want non-native sandbox rejection", err)
+	}
+	if ok {
+		t.Fatal("syncOneServiceRoot ok = true, want false")
+	}
+	after, _ := cfg.ServiceEntry(target.Service, target.Host)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("entry mutated on invalid response:\n got %#v\nwant %#v", after, before)
+	}
+}
+
+func TestServiceSyncClearsStaleSandboxForAuthoritativeNonNativeAbsence(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	target := serviceSyncTarget{Service: "compose", Host: "host-a"}
+	wantArgs := []string{"--pull", "--net=host", "--", "app-arg"}
+	wantPorts := []string{"8080:80"}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name: target.Service, Host: target.Host, Type: serviceTypeRun,
+		Payload: "compose.yml", PayloadKind: "compose", EnvFile: ".env", RunAs: "legacy:local",
+		ServiceRoot: "/srv/compose", Args: wantArgs, Ports: wantPorts,
+		Sandbox: "on", SandboxRO: []string{"/old/read:/read"}, SandboxRW: []string{"/old/write:/write"},
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: cfg}
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "docker-compose",
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/compose"},
+		}}, nil
+	}
+
+	result, ok, err := syncOneServiceRoot(context.Background(), loc, target)
+	if err != nil {
+		t.Fatalf("syncOneServiceRoot: %v", err)
+	}
+	if !ok || !result.SandboxSynced || result.Sandbox != "" || len(result.SandboxRO) != 0 || len(result.SandboxRW) != 0 {
+		t.Fatalf("result = %#v, want authoritative empty sandbox sync", result)
+	}
+	entry, found := cfg.ServiceEntry(target.Service, target.Host)
+	if !found {
+		t.Fatal("synced entry missing")
+	}
+	if entry.Sandbox != "" || len(entry.SandboxRO) != 0 || len(entry.SandboxRW) != 0 {
+		t.Fatalf("stale sandbox survived non-native sync: %#v", entry)
+	}
+	if entry.Payload != "compose.yml" || entry.PayloadKind != "compose" || entry.EnvFile != ".env" ||
+		entry.RunAs != "legacy:local" || entry.ServiceRoot != "/srv/compose" ||
+		!reflect.DeepEqual(entry.Args, wantArgs) || !reflect.DeepEqual(entry.Ports, wantPorts) {
+		t.Fatalf("non-sandbox fields changed during sandbox clear: %#v", entry)
+	}
+	wantArgs[0] = "mutated"
+	wantPorts[0] = "mutated"
+	again, _ := cfg.ServiceEntry(target.Service, target.Host)
+	if reflect.DeepEqual(again.Args, wantArgs) || reflect.DeepEqual(again.Ports, wantPorts) {
+		t.Fatalf("synced entry aliases caller slices: %#v", again)
+	}
+}
+
+func TestServiceSyncCreateMissingNativeEntryIncludesLegacySandbox(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	target := serviceSyncTarget{Service: "api", Host: "host-b", CreateMissing: true}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Config: cfg}
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd",
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Sandbox:     &catchrpc.ServiceSandbox{State: "legacy"},
+		}}, nil
+	}
+
+	result, ok, err := syncOneServiceRoot(context.Background(), loc, target)
+	if err != nil {
+		t.Fatalf("syncOneServiceRoot: %v", err)
+	}
+	if !ok || !result.Created || !result.SandboxSynced || result.Sandbox != "legacy" {
+		t.Fatalf("result = %#v, want created legacy sandbox", result)
+	}
+	entry, exists := cfg.ServiceEntry(target.Service, target.Host)
+	if !exists || entry.Sandbox != "legacy" || len(entry.SandboxRO) != 0 || len(entry.SandboxRW) != 0 {
+		t.Fatalf("created entry = %#v, want authoritative legacy sandbox", entry)
 	}
 }
 

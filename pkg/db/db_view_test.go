@@ -325,6 +325,37 @@ func TestServiceIdentityCloneAndView(t *testing.T) {
 	}
 }
 
+func TestServiceSandboxCloneAndView(t *testing.T) {
+	policy := &ServiceSandboxPolicy{
+		State:    "on",
+		ReadOnly: []ServiceSandboxExposure{{Source: "/etc/ssl", Destination: "/etc/ssl"}},
+		Writable: []ServiceSandboxExposure{{Source: "/srv/api/data", Destination: "/var/lib/api"}},
+	}
+	service := &Service{Sandbox: &ServiceSandboxStore{Refs: map[ArtifactRef]*ServiceSandboxPolicy{Gen(4): policy}}}
+
+	clone := service.Clone()
+	if clone.Sandbox == service.Sandbox || clone.Sandbox.Refs[Gen(4)] == policy {
+		t.Fatalf("sandbox clone aliases source: %#v", clone.Sandbox)
+	}
+	clone.Sandbox.Refs[Gen(4)].Writable[0].Destination = "/mutated"
+	if got := service.Sandbox.Refs[Gen(4)].Writable[0].Destination; got != "/var/lib/api" {
+		t.Fatalf("Service.Clone mutated sandbox destination to %q", got)
+	}
+
+	sandboxView := service.View().Sandbox()
+	if !sandboxView.Valid() {
+		t.Fatal("ServiceView.Sandbox is invalid for a persisted sandbox policy")
+	}
+	viewClone := sandboxView.AsStruct()
+	if viewClone == service.Sandbox || viewClone.Refs[Gen(4)] == policy {
+		t.Fatalf("ServiceSandboxStoreView.AsStruct aliases source: %#v", viewClone)
+	}
+	viewClone.Refs[Gen(4)].ReadOnly[0].Source = "/mutated"
+	if got := service.Sandbox.Refs[Gen(4)].ReadOnly[0].Source; got != "/etc/ssl" {
+		t.Fatalf("sandbox view clone mutated source to %q", got)
+	}
+}
+
 func TestNilViewsAreInvalidAndAsStructIsNil(t *testing.T) {
 	if (DataView{}).Valid() {
 		t.Fatal("zero DataView is valid")

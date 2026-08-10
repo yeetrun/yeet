@@ -92,6 +92,7 @@ func (src *Service) Clone() *Service {
 	if dst.Identity != nil {
 		dst.Identity = ptr.To(*src.Identity)
 	}
+	dst.Sandbox = src.Sandbox.Clone()
 	dst.SnapshotPolicy = src.SnapshotPolicy.Clone()
 	dst.Publish = append(src.Publish[:0:0], src.Publish...)
 	if dst.Artifacts != nil {
@@ -122,6 +123,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	Name                   string
 	ServiceType            ServiceType
 	Identity               *ServiceIdentity
+	Sandbox                *ServiceSandboxStore
 	IdentityInstallPending bool
 	ServiceRoot            string
 	ServiceRootZFS         string
@@ -155,6 +157,69 @@ var _ServiceIdentityCloneNeedsRegeneration = ServiceIdentity(struct {
 	RequestedGroup string
 	UID            uint32
 	GID            uint32
+}{})
+
+// Clone makes a deep copy of ServiceSandboxStore.
+// The result aliases no memory with the original.
+func (src *ServiceSandboxStore) Clone() *ServiceSandboxStore {
+	if src == nil {
+		return nil
+	}
+	dst := new(ServiceSandboxStore)
+	*dst = *src
+	if dst.Refs != nil {
+		dst.Refs = map[ArtifactRef]*ServiceSandboxPolicy{}
+		for k, v := range src.Refs {
+			if v == nil {
+				dst.Refs[k] = nil
+			} else {
+				dst.Refs[k] = v.Clone()
+			}
+		}
+	}
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxStoreCloneNeedsRegeneration = ServiceSandboxStore(struct {
+	Refs map[ArtifactRef]*ServiceSandboxPolicy
+}{})
+
+// Clone makes a deep copy of ServiceSandboxPolicy.
+// The result aliases no memory with the original.
+func (src *ServiceSandboxPolicy) Clone() *ServiceSandboxPolicy {
+	if src == nil {
+		return nil
+	}
+	dst := new(ServiceSandboxPolicy)
+	*dst = *src
+	dst.ReadOnly = append(src.ReadOnly[:0:0], src.ReadOnly...)
+	dst.Writable = append(src.Writable[:0:0], src.Writable...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxPolicyCloneNeedsRegeneration = ServiceSandboxPolicy(struct {
+	State    string
+	ReadOnly []ServiceSandboxExposure
+	Writable []ServiceSandboxExposure
+}{})
+
+// Clone makes a deep copy of ServiceSandboxExposure.
+// The result aliases no memory with the original.
+func (src *ServiceSandboxExposure) Clone() *ServiceSandboxExposure {
+	if src == nil {
+		return nil
+	}
+	dst := new(ServiceSandboxExposure)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceSandboxExposureCloneNeedsRegeneration = ServiceSandboxExposure(struct {
+	Source      string
+	Destination string
 }{})
 
 // Clone makes a deep copy of SnapshotPolicy.

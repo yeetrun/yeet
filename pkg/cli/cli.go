@@ -40,6 +40,27 @@ type GroupInfo struct {
 	Hidden      bool
 }
 
+type SandboxExposure struct {
+	Source      string
+	Destination string
+}
+
+type SandboxOptions struct {
+	State         string
+	StateSet      bool
+	ReadOnly      []SandboxExposure
+	ReadOnlySet   bool
+	ReadOnlyReset bool
+	Writable      []SandboxExposure
+	WritableSet   bool
+	WritableReset bool
+}
+
+// HasChange reports whether any sandbox setting was explicitly supplied.
+func (o SandboxOptions) HasChange() bool {
+	return o.StateSet || o.ReadOnlySet || o.WritableSet
+}
+
 type RunFlags struct {
 	Cron             string
 	CronSet          bool
@@ -74,6 +95,7 @@ type RunFlags struct {
 	SnapshotRequired string
 	SnapshotEvents   string
 	SnapshotChange   bool
+	Sandbox          SandboxOptions
 }
 
 type ServiceSetFlags struct {
@@ -109,6 +131,7 @@ type ServiceSetFlags struct {
 	SnapshotRequired string
 	SnapshotEvents   string
 	SnapshotChange   bool
+	Sandbox          SandboxOptions
 }
 
 // HasNetworkChange reports whether any network setting was explicitly supplied.
@@ -342,6 +365,9 @@ type dockerPushFlagsParsed struct {
 type runFlagsParsed struct {
 	Cron             string   `flag:"cron" help:"Schedule a native binary or script with a five-field cron expression"`
 	RunAs            string   `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
+	Sandbox          string   `flag:"sandbox" help:"Native sandbox state: on, off"`
+	SandboxRO        []string `flag:"sandbox-ro" help:"Expose a read-only file or directory as SOURCE[:DEST]; repeat for multiple paths"`
+	SandboxRW        []string `flag:"sandbox-rw" help:"Expose a writable directory as SOURCE[:DEST]; repeat for multiple paths"`
 	CPUs             int      `flag:"vcpus"`
 	Memory           string   `flag:"memory"`
 	MemoryMin        string   `flag:"memory-min"`
@@ -380,6 +406,9 @@ type envCopyFlagsParsed struct {
 type serviceSetFlagsParsed struct {
 	Cron             string   `flag:"cron" help:"Update the schedule of an existing scheduled native service with a five-field cron expression"`
 	RunAs            string   `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
+	Sandbox          string   `flag:"sandbox" help:"Native sandbox state: on, off"`
+	SandboxRO        []string `flag:"sandbox-ro" help:"Expose a read-only file or directory as SOURCE[:DEST]; repeat for multiple paths"`
+	SandboxRW        []string `flag:"sandbox-rw" help:"Expose a writable directory as SOURCE[:DEST]; repeat for multiple paths"`
 	Net              string   `flag:"net" help:"Replace all network modes for an existing non-VM service; use yeet vm set for VMs. Resulting modes that include ts require tags; stored tags may be inherited"`
 	TsVer            string   `flag:"ts-ver" help:"Patch the Tailscale version; pass an empty value to clear"`
 	TsExit           string   `flag:"ts-exit" help:"Patch the Tailscale exit node; pass an empty value to clear"`
@@ -626,7 +655,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"umount":  {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
 	"remove":  {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
 	"restart": {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
@@ -845,7 +874,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--sandbox=on|off] [--sandbox-ro=SOURCE[:DEST]] [--sandbox-rw=SOURCE[:DEST]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet service set <svc> -p 80:80 -p 443:443",
 					"yeet service set <svc> --publish-reset -p 443:443",
@@ -1127,6 +1156,16 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
+	sandbox, err := parseSandboxOptions(
+		parseArgs,
+		parsed.Flags.Sandbox,
+		orderedFlagValues(parseArgs, "--sandbox-ro", ""),
+		orderedFlagValues(parseArgs, "--sandbox-rw", ""),
+		false,
+	)
+	if err != nil {
+		return RunFlags{}, nil, err
+	}
 	runAs, runAsSet, err := parseRunAs(parseArgs, parsed.Flags.RunAs)
 	if err != nil {
 		return RunFlags{}, nil, err
@@ -1169,6 +1208,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		SnapshotRequired: strings.TrimSpace(parsed.Flags.SnapshotRequired),
 		SnapshotEvents:   strings.TrimSpace(parsed.Flags.SnapshotEvents),
 		SnapshotChange:   hasAnySnapshotRunFlag(parsed.Flags),
+		Sandbox:          sandbox,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -1307,6 +1347,16 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 	if err != nil {
 		return ServiceSetFlags{}, err
 	}
+	sandbox, err := parseSandboxOptions(
+		parseArgs,
+		parsed.Sandbox,
+		orderedFlagValues(parseArgs, "--sandbox-ro", ""),
+		orderedFlagValues(parseArgs, "--sandbox-rw", ""),
+		true,
+	)
+	if err != nil {
+		return ServiceSetFlags{}, err
+	}
 	network, err := serviceSetNetworkFlagsFromParsed(parsed, parseArgs)
 	if err != nil {
 		return ServiceSetFlags{}, err
@@ -1344,6 +1394,7 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		SnapshotRequired: strings.TrimSpace(parsed.SnapshotRequired),
 		SnapshotEvents:   strings.TrimSpace(parsed.SnapshotEvents),
 		SnapshotChange:   hasAnySnapshotServiceSetFlag(parsed),
+		Sandbox:          sandbox,
 	}
 	if err := validateServiceSetFlags(flags, longFlagWasSupplied(parseArgs, "--service-root")); err != nil {
 		return ServiceSetFlags{}, err
@@ -1438,6 +1489,9 @@ func parseServiceSetMacvlanVLAN(raw string, set bool) (int, error) {
 }
 
 func validateServiceSetFlags(flags ServiceSetFlags, serviceRootSet bool) error {
+	if err := validateServiceSetSandboxCombination(serviceSetChangesFromFlags(flags, serviceRootSet)); err != nil {
+		return err
+	}
 	if err := validateServiceSetCronExclusivity(flags, serviceRootSet); err != nil {
 		return err
 	}
@@ -1470,7 +1524,7 @@ func validateServiceSetRootFlags(flags ServiceSetFlags) error {
 		return err
 	}
 	if !serviceSetHasChange(flags, rootChange) {
-		return fmt.Errorf("service set requires settings to change")
+		return fmt.Errorf("service set requires settings to change; use --sandbox or another service setting")
 	}
 	return nil
 }
@@ -1497,7 +1551,7 @@ func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
 }
 
 func serviceSetHasNonCronChange(flags ServiceSetFlags, rootChange bool) bool {
-	return flags.RunAsSet || flags.HasNetworkChange() || rootChange || flags.Copy || flags.Empty || flags.SnapshotChange || hasServiceSetPublishChange(flags)
+	return flags.RunAsSet || flags.HasNetworkChange() || rootChange || flags.Copy || flags.Empty || flags.SnapshotChange || hasServiceSetPublishChange(flags) || flags.Sandbox.HasChange()
 }
 
 func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
@@ -1509,6 +1563,139 @@ func validateServiceSetCronExclusivity(flags ServiceSetFlags, serviceRootSet boo
 		return fmt.Errorf("--cron cannot be combined with other service settings; apply them with separate service set commands")
 	}
 	return nil
+}
+
+type serviceSetChanges struct {
+	cron     bool
+	identity bool
+	network  bool
+	root     bool
+	publish  bool
+	snapshot bool
+	sandbox  bool
+}
+
+func (changes serviceSetChanges) any() bool {
+	return changes.cron || changes.identity || changes.network || changes.root || changes.publish || changes.snapshot || changes.sandbox
+}
+
+func serviceSetChangesFromFlags(flags ServiceSetFlags, serviceRootSet bool) serviceSetChanges {
+	return serviceSetChanges{
+		cron:     flags.CronSet,
+		identity: flags.RunAsSet,
+		network:  flags.HasNetworkChange(),
+		root:     serviceRootSet || flags.ZFS || flags.Copy || flags.Empty,
+		publish:  hasServiceSetPublishChange(flags),
+		snapshot: flags.SnapshotChange,
+		sandbox:  flags.Sandbox.HasChange(),
+	}
+}
+
+func validateServiceSetSandboxCombination(changes serviceSetChanges) error {
+	other := changes
+	other.sandbox = false
+	if changes.sandbox && other.any() {
+		return fmt.Errorf("sandbox settings cannot be combined with other service settings; apply them with separate service set commands")
+	}
+	return nil
+}
+
+// ParseSandboxExposure parses a syntactic SOURCE[:DEST] sandbox bind. Catch
+// validates host paths, types, ownership, access, symlinks, and canonical form.
+func ParseSandboxExposure(raw string, allowReset bool) (exposure SandboxExposure, reset bool, err error) {
+	if raw == "reset" {
+		if !allowReset {
+			return SandboxExposure{}, false, fmt.Errorf("reset is only valid with yeet service set")
+		}
+		return SandboxExposure{}, true, nil
+	}
+
+	parts := strings.Split(raw, ":")
+	if len(parts) > 2 {
+		return SandboxExposure{}, false, fmt.Errorf("literal colons are not supported")
+	}
+	source := parts[0]
+	if !filepath.IsAbs(source) {
+		return SandboxExposure{}, false, fmt.Errorf("source must be absolute")
+	}
+	destination := source
+	if len(parts) == 2 {
+		destination = parts[1]
+	}
+	if destination == "" {
+		return SandboxExposure{}, false, fmt.Errorf("destination must not be empty")
+	}
+	if !filepath.IsAbs(destination) {
+		return SandboxExposure{}, false, fmt.Errorf("destination must be absolute")
+	}
+	if filepath.Clean(destination) != destination {
+		return SandboxExposure{}, false, fmt.Errorf("destination must be a clean absolute path")
+	}
+	return SandboxExposure{Source: source, Destination: destination}, false, nil
+}
+
+// FormatSandboxExposure returns the shortest syntax that describes exposure.
+func FormatSandboxExposure(exposure SandboxExposure) string {
+	if exposure.Source == exposure.Destination {
+		return exposure.Source
+	}
+	return exposure.Source + ":" + exposure.Destination
+}
+
+func parseSandboxOptions(parseArgs []string, state string, ro, rw []string, allowReset bool) (SandboxOptions, error) {
+	stateSet := longFlagWasSupplied(parseArgs, "--sandbox")
+	if countLongFlag(parseArgs, "--sandbox") > 1 {
+		return SandboxOptions{}, fmt.Errorf("--sandbox may only be supplied once")
+	}
+	state = strings.ToLower(strings.TrimSpace(state))
+	if stateSet && state != "on" && state != "off" {
+		return SandboxOptions{}, fmt.Errorf("--sandbox must be on or off")
+	}
+	if hasFlagWithoutValue(parseArgs, "--sandbox-ro") {
+		return SandboxOptions{}, fmt.Errorf("--sandbox-ro requires SOURCE[:DEST]")
+	}
+	if hasFlagWithoutValue(parseArgs, "--sandbox-rw") {
+		return SandboxOptions{}, fmt.Errorf("--sandbox-rw requires SOURCE[:DEST]")
+	}
+
+	readOnly, readOnlyReset, err := parseSandboxExposureList(ro, "--sandbox-ro", allowReset)
+	if err != nil {
+		return SandboxOptions{}, err
+	}
+	writable, writableReset, err := parseSandboxExposureList(rw, "--sandbox-rw", allowReset)
+	if err != nil {
+		return SandboxOptions{}, err
+	}
+	return SandboxOptions{
+		State:         state,
+		StateSet:      stateSet,
+		ReadOnly:      readOnly,
+		ReadOnlySet:   longFlagWasSupplied(parseArgs, "--sandbox-ro"),
+		ReadOnlyReset: readOnlyReset,
+		Writable:      writable,
+		WritableSet:   longFlagWasSupplied(parseArgs, "--sandbox-rw"),
+		WritableReset: writableReset,
+	}, nil
+}
+
+func parseSandboxExposureList(values []string, flagName string, allowReset bool) ([]SandboxExposure, bool, error) {
+	var exposures []SandboxExposure
+	reset := false
+	for _, raw := range values {
+		exposure, isReset, err := ParseSandboxExposure(raw, allowReset)
+		if err != nil {
+			return nil, false, fmt.Errorf("%s: %w", flagName, err)
+		}
+		if isReset {
+			if reset {
+				return nil, false, fmt.Errorf("%s reset may only be supplied once", flagName)
+			}
+			reset = true
+			continue
+		}
+		exposures = append(exposures, exposure)
+	}
+	return exposures, reset, nil
 }
 
 func parseRunAs(args []string, value string) (string, bool, error) {

@@ -322,21 +322,21 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 		args        []string
 		wantService string
 		wantHost    string
-		wantBridged string
+		wantBridged []string
 		wantOK      bool
 	}{
 		{
 			name:        "inline root after service",
 			args:        []string{"service", "set", "svc-a", "--service-root=/srv/apps/svc-a"},
 			wantService: "svc-a",
-			wantBridged: "service set --service-root=/srv/apps/svc-a",
+			wantBridged: []string{"service", "set", "--service-root=/srv/apps/svc-a"},
 			wantOK:      true,
 		},
 		{
 			name:        "root flag before service",
 			args:        []string{"service", "set", "--service-root", "/srv/apps/svc-a", "svc-a"},
 			wantService: "svc-a",
-			wantBridged: "service set --service-root /srv/apps/svc-a",
+			wantBridged: []string{"service", "set", "--service-root", "/srv/apps/svc-a"},
 			wantOK:      true,
 		},
 		{
@@ -344,7 +344,7 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			args:        []string{"service", "set", "svc-a", "--service-root=tank/apps/svc-a", "--zfs"},
 			wantService: "svc-a",
 			wantHost:    "",
-			wantBridged: "service set --service-root=tank/apps/svc-a --zfs",
+			wantBridged: []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
 			wantOK:      true,
 		},
 		{
@@ -352,21 +352,35 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			args:        []string{"service", "set", "svc-a", "-p", "80:80"},
 			wantService: "svc-a",
 			wantHost:    "",
-			wantBridged: "service set -p 80:80",
+			wantBridged: []string{"service", "set", "-p", "80:80"},
 			wantOK:      true,
 		},
 		{
 			name:        "service set cron inline",
 			args:        []string{"service", "set", "reports", `--cron=30 2 * * *`},
 			wantService: "reports",
-			wantBridged: `service set --cron=30 2 * * *`,
+			wantBridged: []string{"service", "set", `--cron=30 2 * * *`},
 			wantOK:      true,
 		},
 		{
 			name:        "service set cron separate value",
 			args:        []string{"service", "set", "--cron", "30 2 * * *", "reports"},
 			wantService: "reports",
-			wantBridged: "service set --cron 30 2 * * *",
+			wantBridged: []string{"service", "set", "--cron", "30 2 * * *"},
+			wantOK:      true,
+		},
+		{
+			name:        "sandbox inline values",
+			args:        []string{"service", "set", "api", "--sandbox=on", "--sandbox-ro=/etc/app", "--sandbox-rw=/srv/cache:/cache"},
+			wantService: "api",
+			wantBridged: []string{"service", "set", "--sandbox=on", "--sandbox-ro=/etc/app", "--sandbox-rw=/srv/cache:/cache"},
+			wantOK:      true,
+		},
+		{
+			name:        "sandbox separate and repeated values",
+			args:        []string{"service", "set", "api", "--sandbox", "on", "--sandbox-ro", "/etc/app", "--sandbox-ro", "/usr/share/app:/share", "--sandbox-rw", "/srv/cache:/cache"},
+			wantService: "api",
+			wantBridged: []string{"service", "set", "--sandbox", "on", "--sandbox-ro", "/etc/app", "--sandbox-ro", "/usr/share/app:/share", "--sandbox-rw", "/srv/cache:/cache"},
 			wantOK:      true,
 		},
 	}
@@ -382,8 +396,8 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			if host != tt.wantHost {
 				t.Fatalf("host = %q, want %q", host, tt.wantHost)
 			}
-			if got := strings.Join(bridged, " "); got != tt.wantBridged {
-				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
+			if !reflect.DeepEqual(bridged, tt.wantBridged) {
+				t.Fatalf("bridged args = %#v, want %#v", bridged, tt.wantBridged)
 			}
 		})
 	}

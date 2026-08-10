@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
@@ -1131,6 +1133,7 @@ func TestRegularNetworkIdentityMigrationPreservesDisabledUnitEnablement(t *testi
 }
 
 func TestRegularNetworkMutationExplicitHostStagesFreshUnitWithoutNamespaceDirectives(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "api")
 	if err := ensureDirsForRoot(root, ""); err != nil {
@@ -1176,9 +1179,14 @@ func TestRegularNetworkMutationExplicitHostStagesFreshUnitWithoutNamespaceDirect
 		t.Fatal(err)
 	}
 	got := string(raw)
-	for _, stale := range []string{"NetworkNamespacePath=", "BindReadOnlyPaths=", "yeet-api-ns.service", "yeet-api-ts.service"} {
+	for _, stale := range []string{"NetworkNamespacePath=", "/etc/netns/yeet-api-ns/resolv.conf", "yeet-api-ns.service", "yeet-api-ts.service"} {
 		if strings.Contains(got, stale) {
 			t.Fatalf("fresh host unit retained %q:\n%s", stale, got)
+		}
+	}
+	for _, want := range []string{"BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf\n", "PrivateMounts=yes\n"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fresh host unit lost canonical direct resolver ownership %q:\n%s", want, got)
 		}
 	}
 	if !strings.Contains(got, "Requires=database.service") || !strings.Contains(got, "ExecStart=/srv/api/bin/api-7 --serve") {
@@ -1186,7 +1194,100 @@ func TestRegularNetworkMutationExplicitHostStagesFreshUnitWithoutNamespaceDirect
 	}
 }
 
+func TestRenderRegularNetworkSystemdUnitPreservesSandboxResolverOwnership(t *testing.T) {
+	oldEnsure := ensureBubblewrapForServiceSandboxMutation
+	oldValidate := validateServiceSandboxPolicyForMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+	})
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error { return nil }
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+		return req.Policy, nil
+	}
+	for _, tt := range []struct {
+		name   string
+		policy serviceSandboxPolicy
+	}{
+		{name: "sandbox on", policy: serviceSandboxPolicy{State: "on"}},
+		{name: "sandbox off", policy: serviceSandboxPolicy{State: "off"}},
+		{name: "legacy", policy: serviceSandboxPolicy{State: "legacy"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			root := server.defaultServiceRootDir("api")
+			dataDir := serviceDataDirForRoot(root)
+			binDir := serviceRunDirForRoot(root)
+			for _, dir := range []string{dataDir, binDir} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload := filepath.Join(binDir, "api-7")
+			oldResolver := filepath.Join(binDir, "resolv-old.conf")
+			newResolver := filepath.Join(binDir, "resolv-new.conf")
+			for path, content := range map[string]string{payload: "payload", oldResolver: "nameserver 1.1.1.1\n", newResolver: "nameserver 2.2.2.2\n"} {
+				if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			argv := payload + " --serve"
+			workingDirectory := dataDir
+			if tt.policy.State == "on" {
+				argv = bubblewrapPath + " --uid 1000 --gid 1000 --ro-bind " + oldResolver + " /etc/resolv.conf --chdir " + dataDir + " -- " + payload + " --serve"
+				workingDirectory = "/"
+			}
+			raw := "[Unit]\nRequires=database.service yeet-api-ns.service\nAfter=database.service yeet-api-ns.service\n" +
+				"[Service]\nExecStart=" + argv + "\nWorkingDirectory=" + workingDirectory + "\n" +
+				"Environment=HOME=" + dataDir + " USER=1000 LOGNAME=1000 SHELL=/bin/sh\n" +
+				"NetworkNamespacePath=/var/run/netns/old\nBindReadOnlyPaths=" + oldResolver + ":/etc/resolv.conf\nPrivateMounts=yes\n"
+			previous := &db.Service{
+				Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, Generation: 7,
+				Identity: &db.ServiceIdentity{UID: 1000, GID: 1000},
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{db.Gen(7): payload}},
+					db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(7): filepath.Join(binDir, "api.service")}},
+					db.ArtifactNetNSResolv: {Refs: map[db.ArtifactRef]string{db.Gen(7): oldResolver}},
+				},
+			}
+			target := previous.Clone()
+			target.Artifacts[db.ArtifactNetNSResolv].Refs[db.Gen(7)] = newResolver
+			if tt.policy.State == "legacy" {
+				previous.Sandbox, target.Sandbox = nil, nil
+			} else {
+				stored := serviceSandboxPolicyToDB(tt.policy)
+				previous.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{db.Gen(7): stored.Clone()}}
+				target.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{db.Gen(7): stored.Clone()}}
+			}
+			got, _, err := renderRegularNetworkSystemdUnit(context.Background(), raw, previous, target, root, &networkConfig{
+				NetNS: "new", Deps: []string{"yeet-api-ns.service"}, ResolvConf: newResolver,
+			}, true)
+			if err != nil {
+				t.Fatalf("render network unit: %v", err)
+			}
+			if !strings.Contains(got, "NetworkNamespacePath=/var/run/netns/new\n") {
+				t.Fatalf("network unit did not select target namespace:\n%s", got)
+			}
+			systemdResolver := "BindReadOnlyPaths=" + newResolver + ":/etc/resolv.conf\n"
+			if tt.policy.State == "on" {
+				if strings.Contains(got, "BindReadOnlyPaths=") || strings.Contains(got, "PrivateMounts=yes") {
+					t.Fatalf("sandbox-on unit retained systemd resolver ownership:\n%s", got)
+				}
+				argv := serviceIdentityExecStartArgv(t, got)
+				if !slicesContainAdjacent(argv, "--ro-bind", newResolver) {
+					t.Fatalf("sandbox-on argv did not select target resolver: %#v", argv)
+				}
+				return
+			}
+			if !strings.Contains(got, systemdResolver) || !strings.Contains(got, "PrivateMounts=yes\n") {
+				t.Fatalf("direct unit lost target systemd resolver ownership:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestRegularNetworkMutationTailscaleStagesEveryArtifactFresh(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server := newTestServer(t)
 	root := server.defaultServiceRootDir("api")
 	if err := ensureDirsForRoot(root, ""); err != nil {
@@ -1570,6 +1671,45 @@ func TestRegularNetworkSvcAllocationLockCoversInitialAndMutationPaths(t *testing
 				t.Fatalf("serialized allocation reused address: %v", got)
 			}
 		})
+	}
+}
+
+func TestRegularNetworkISOAllocationPlanningUsesSharedAllocationLock(t *testing.T) {
+	server := newTestServer(t)
+	svcPlan := &serviceNetworkMutationPlan{name: "worker", desired: db.ServiceNetworkConfig{Modes: []string{"svc"}}}
+	isoPlan := &serviceNetworkMutationPlan{name: "api", desired: db.ServiceNetworkConfig{Modes: []string{"iso"}}}
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondAttempted := make(chan struct{})
+	secondEntered := make(chan struct{})
+	done := make(chan error, 2)
+	go func() {
+		done <- server.withRegularServiceNetworkAllocationLock(svcPlan, func() error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+	go func() {
+		close(secondAttempted)
+		done <- server.withRegularServiceNetworkAllocationLock(isoPlan, func() error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+	<-secondAttempted
+	select {
+	case <-secondEntered:
+		close(releaseFirst)
+		t.Fatal("ISO allocation planning entered while the shared network allocation lock was held")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -1972,6 +2112,7 @@ func TestServiceSetISOLifecycleRestoresOrFailsClosedOnEveryPostStageFailure(t *t
 }
 
 func TestStageNativeISOServiceNetworkReplacementPreservesPayloadAndUsesFreshOwnedArtifacts(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "api")
 	if err := ensureDirsForRoot(root, ""); err != nil {
@@ -2051,6 +2192,7 @@ func TestStageNativeISOServiceNetworkReplacementPreservesPayloadAndUsesFreshOwne
 
 func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *testing.T) {
 	t.Run("commit", func(t *testing.T) {
+		stubServiceNetworkStaticVerification(t)
 		server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
 		mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2088,6 +2230,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 	})
 
 	t.Run("discard", func(t *testing.T) {
+		stubServiceNetworkStaticVerification(t)
 		server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
 		mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2117,6 +2260,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 	})
 
 	t.Run("discard conflict preserves concurrent ISO record", func(t *testing.T) {
+		stubServiceNetworkStaticVerification(t)
 		server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
 		mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2173,6 +2317,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 	})
 
 	t.Run("commit conflict does not overwrite concurrent ISO record", func(t *testing.T) {
+		stubServiceNetworkStaticVerification(t)
 		server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
 		baseSystemctl := runISOSystemctlForRuntime
@@ -2299,6 +2444,7 @@ func TestComposeISOCommitConflictRecoveryDoesNotStopConcurrentRuntime(t *testing
 }
 
 func TestISOToISOCommitConflictRecoveryDoesNotStopConcurrentRuntime(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, true)
 	plan.desired = db.ServiceNetworkConfig{Modes: []string{"iso"}}
 	plan.network = NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true}
@@ -2356,6 +2502,7 @@ func TestISOServiceNetworkRestoreClaimsStagedRuntimeBeforeCleanup(t *testing.T) 
 		{name: "stop failure retains attributable tombstone", stopErr: errors.New("stop replacement failed"), wantErr: true, wantTomb: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			stubServiceNetworkStaticVerification(t)
 			server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, false)
 			stubNativeISOServiceNetworkMutationRuntime(t)
 			mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2508,6 +2655,7 @@ func TestISOServiceNetworkFailClosedPreservesConcurrentServiceRecords(t *testing
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			stubServiceNetworkStaticVerification(t)
 			server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 			stubNativeISOServiceNetworkMutationRuntime(t)
 			mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2565,6 +2713,7 @@ func TestRestoreISOStageReservationWithoutExactSnapshotPreservesConcurrentServic
 }
 
 func TestISOStageRollbackPreservesLiveReferencedOwnedArtifact(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 	stubNativeISOServiceNetworkMutationRuntime(t)
 	mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2817,6 +2966,7 @@ func TestComposeISOTailscaleStageInjectedFailureAfterEachArtifactRemovesOwnedFil
 }
 
 func TestNativeISOServiceNetworkVerifyRepairsTopologyAfterActivation(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 	stubNativeISOServiceNetworkMutationRuntime(t)
 	mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -2841,6 +2991,7 @@ func TestNativeISOServiceNetworkVerifyRepairsTopologyAfterActivation(t *testing.
 }
 
 func TestNativeISOToRegularMutationRestoresAfterPostCommitActivationFailure(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, true)
 	stubNativeISOServiceNetworkMutationRuntime(t)
 	oldActivatePrevious := activatePreviousISONetworkRuntimeForMutation
@@ -2976,6 +3127,7 @@ func TestISOServiceNetworkRestoreHandlesPostPublicationClaimOutcomes(t *testing.
 		{name: "uncommitted claim invokes no cleanup", committed: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			stubServiceNetworkStaticVerification(t)
 			server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 			stubNativeISOServiceNetworkMutationRuntime(t)
 			mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkRegularToISO}
@@ -3803,10 +3955,38 @@ func newNativeISOServiceNetworkMutationFixture(t *testing.T, currentISO bool) (*
 	return server, plan, unit
 }
 
+func stubServiceNetworkStaticVerification(t *testing.T) {
+	t.Helper()
+	previous := verifyGeneratedSystemdUnitForSandboxMutation
+	calls := 0
+	t.Cleanup(func() {
+		verifyGeneratedSystemdUnitForSandboxMutation = previous
+		if calls == 0 {
+			t.Error("service network mutation did not statically verify its generated unit")
+		}
+	})
+	verifyGeneratedSystemdUnitForSandboxMutation = func(ctx context.Context, path string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read generated unit at static-verifier seam: %w", err)
+		}
+		if !strings.Contains(string(raw), "[Service]") {
+			return fmt.Errorf("generated unit at static-verifier seam has no Service section")
+		}
+		calls++
+		return nil
+	}
+}
+
 func stubNativeISOServiceNetworkMutationRuntime(t *testing.T) {
 	t.Helper()
 	oldRegularSystemctl := runRegularNetworkSystemctlForRuntime
 	oldISOSystemctl := runISOSystemctlForRuntime
+	oldCatchSystemctl := catchSystemctl
+	oldCatchActive := catchSystemdUnitActive
 	oldActive := inspectRegularNetworkUnitActive
 	oldEnabled := inspectRegularNetworkUnitEnabled
 	oldDetect := detectISOFirewallBackendForRuntime
@@ -3819,6 +3999,8 @@ func stubNativeISOServiceNetworkMutationRuntime(t *testing.T) {
 	t.Cleanup(func() {
 		runRegularNetworkSystemctlForRuntime = oldRegularSystemctl
 		runISOSystemctlForRuntime = oldISOSystemctl
+		catchSystemctl = oldCatchSystemctl
+		catchSystemdUnitActive = oldCatchActive
 		inspectRegularNetworkUnitActive = oldActive
 		inspectRegularNetworkUnitEnabled = oldEnabled
 		detectISOFirewallBackendForRuntime = oldDetect
@@ -3836,6 +4018,19 @@ func stubNativeISOServiceNetworkMutationRuntime(t *testing.T) {
 		}
 		return nil, nil
 	}
+	active := make(map[string]bool)
+	catchSystemctl = func(args ...string) error {
+		if len(args) == 2 {
+			switch args[0] {
+			case "start", "restart", "try-restart":
+				active[args[1]] = true
+			case "stop":
+				active[args[1]] = false
+			}
+		}
+		return nil
+	}
+	catchSystemdUnitActive = func(unit string) bool { return active[unit] }
 	inspectRegularNetworkUnitActive = func(context.Context, string) (bool, error) { return false, nil }
 	inspectRegularNetworkUnitEnabled = func(context.Context, string) (bool, error) { return false, nil }
 	detectISOFirewallBackendForRuntime = func() (netns.FirewallBackend, error) { return netns.BackendNFT, nil }
@@ -3920,6 +4115,7 @@ func TestStageComposeISOServiceNetworkReplacementPreservesStableAllocationAndFre
 }
 
 func TestServiceSetNetworkAndRunAsBuildOneIdentityMigrationTarget(t *testing.T) {
+	stubServiceNetworkStaticVerification(t)
 	server := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "api")
 	if err := ensureDirsForRoot(root, ""); err != nil {
@@ -3970,6 +4166,832 @@ func TestServiceSetNetworkAndRunAsBuildOneIdentityMigrationTarget(t *testing.T) 
 	}
 	if !strings.Contains(request.ReplacementUnit, "User="+strconv.Itoa(os.Geteuid())) || !strings.Contains(request.ReplacementUnit, "Group="+strconv.Itoa(os.Getegid())) {
 		t.Fatalf("replacement unit did not carry target identity:\n%s", request.ReplacementUnit)
+	}
+}
+
+func TestISOToRegularCombinedIdentitySandboxPreflightPrecedesRuntimeBoundary(t *testing.T) {
+	server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, true)
+	stubNativeISOServiceNetworkMutationRuntime(t)
+	payload := filepath.Join(serviceRunDirForRoot(plan.previous.ServiceRoot), "api-4")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolver := filepath.Join(serviceRunDirForRoot(plan.previous.ServiceRoot), "target-resolv.conf")
+	if err := os.WriteFile(resolver, []byte("nameserver 1.1.1.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	identity := db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}
+	policy := serviceSandboxPolicy{State: "on"}
+	plan.previous.Artifacts[db.ArtifactBinary].Refs[db.Gen(plan.previous.Generation)] = payload
+	plan.previous.Artifacts[db.ArtifactNetNSResolv] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(plan.previous.Generation): resolver,
+	}}
+	plan.previous.Identity = &identity
+	plan.previous.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+		db.Gen(plan.previous.Generation): serviceSandboxPolicyToDB(policy),
+	}}
+	dataDir := serviceDataDirForRoot(plan.previous.ServiceRoot)
+	baseUnit := "[Unit]\nDescription=api\n\n[Service]\nExecStart=" + payload + " --serve\nUser=root\nGroup=root\n" +
+		"WorkingDirectory=" + dataDir + "\nEnvironment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n" +
+		"NetworkNamespacePath=/var/run/netns/" + plan.previous.ISO.NetNS + "\n"
+	sandboxPlan, err := buildValidatedServiceSandboxPlan(serviceSandboxPlanRequest{
+		Service: plan.name, Policy: policy, Payload: payload, DataDir: dataDir, ResolverSource: resolver,
+		Hostname: plan.name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalUnit, _, err := renderNativeSandboxUnitWithPlan(baseUnit, nativeSandboxUnitRequest{
+		CurrentPolicy: serviceSandboxPolicy{State: "legacy"}, TargetPolicy: policy, Identity: identity,
+		Payload: payload, DataDir: dataDir, Resolver: resolver, Hostname: plan.name,
+	}, &sandboxPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(originalUnit, []byte(canonicalUnit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.Services[plan.name] = plan.previous.Clone()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mutation := &isoServiceNetworkMutation{server: server, plan: plan, direction: serviceNetworkISOToRegular}
+	plan.deferSandbox = true
+	operation := &isoNetworkIdentityMutation{
+		server: server, ctx: context.Background(), plan: plan,
+		flags: cli.ServiceSetFlags{
+			RunAs: strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid()), RunAsSet: true,
+		},
+		direction: serviceNetworkISOToRegular, mutation: mutation,
+	}
+	if err := mutation.Stage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	setRegularNetworkTargetArtifact(mutation.target, db.ArtifactNetNSResolv, resolver)
+
+	oldEnsure, oldValidate := ensureBubblewrapForServiceSandboxMutation, validateServiceSandboxPolicyForMutation
+	oldProbe, oldVerify := probeServiceSandboxForMutation, verifyGeneratedSystemdUnitForSandboxMutation
+	oldMigration, baseSystemctl := migrateServiceNetworkIdentityLocked, runISOSystemctlForRuntime
+	oldStageSystemd := stageRegularNetworkSystemdArtifactsForMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+		verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+		migrateServiceNetworkIdentityLocked = oldMigration
+		runISOSystemctlForRuntime = baseSystemctl
+		stageRegularNetworkSystemdArtifactsForMutation = oldStageSystemd
+	})
+	var events []string
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		events = append(events, "ensure")
+		return nil
+	}
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+		events = append(events, "validate")
+		if !active || req.ResolverSource != resolver {
+			t.Fatalf("combined validation active/resolver = %t/%q, want true/%q", active, req.ResolverSource, resolver)
+		}
+		return req.Policy, nil
+	}
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+		events = append(events, "probe")
+		return nil
+	}
+	verifyGeneratedSystemdUnitForSandboxMutation = func(context.Context, string) error {
+		events = append(events, "verify")
+		return nil
+	}
+	postBoundary := errors.New("injected post-boundary identity migration failure")
+	migrateServiceNetworkIdentityLocked = func(context.Context, *Server, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error) {
+		events = append(events, "migrate")
+		return serviceIdentityMigrationResult{}, postBoundary
+	}
+	runISOSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) != 0 && args[0] == "stop" {
+			events = append(events, "stop")
+		}
+		return baseSystemctl(ctx, args...)
+	}
+	stageRegularNetworkSystemdArtifactsForMutation = func(service *svc.SystemdService) ([]string, error) {
+		return service.InstallUnits(), nil
+	}
+
+	err = operation.runAfterStage()
+	operation.finish(&err)
+	if !errors.Is(err, postBoundary) {
+		t.Fatalf("combined ISO-to-regular error = %v, want %v", err, postBoundary)
+	}
+	wantPrefix := []string{"ensure", "validate", "probe", "verify", "stop", "migrate"}
+	if len(events) < len(wantPrefix) || !reflect.DeepEqual(events[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("combined ISO-to-regular events = %v, want prefix %v", events, wantPrefix)
+	}
+	current, viewErr := server.serviceView(plan.name)
+	if viewErr != nil {
+		t.Fatal(viewErr)
+	}
+	wantJSON, wantErr := json.MarshalIndent(plan.previous, "", "  ")
+	gotJSON, gotErr := json.MarshalIndent(current.AsStruct(), "", "  ")
+	if wantErr != nil || gotErr != nil {
+		t.Fatalf("render combined recovery records: want=%v got=%v", wantErr, gotErr)
+	}
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Fatalf("combined ISO-to-regular recovery mismatch:\nwant %s\n got %s", wantJSON, gotJSON)
+	}
+	if _, statErr := os.Stat(originalUnit); statErr != nil {
+		t.Fatalf("combined ISO-to-regular recovery lost previous unit: %v", statErr)
+	}
+}
+
+func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t *testing.T) {
+	preflightFailure := errors.New("injected final sandbox static verification failure")
+	for _, tt := range []struct {
+		name                  string
+		verifyErr             error
+		concurrentAfterVerify bool
+		allocationAfterVerify bool
+		wantEvents            []string
+	}{
+		{
+			name:       "reservation and topology follow final preflight",
+			wantEvents: []string{"ensure", "validate", "probe", "verify", "reservation", "topology", "migrate"},
+		},
+		{
+			name:       "preflight failure leaves database and runtime untouched",
+			verifyErr:  preflightFailure,
+			wantEvents: []string{"ensure", "validate", "probe", "verify"},
+		},
+		{
+			name:                  "concurrent replacement wins before reservation publication",
+			concurrentAfterVerify: true,
+			wantEvents:            []string{"ensure", "validate", "probe", "verify"},
+		},
+		{
+			name:                  "changed allocation plan is rejected before publication",
+			allocationAfterVerify: true,
+			wantEvents:            []string{"ensure", "validate", "probe", "verify"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, previous, flags := newRegularToISOCombinedSandboxFixture(t)
+			stubNativeISOServiceNetworkMutationRuntime(t)
+
+			oldRunning := isServiceRunningForNetworkMutation
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+			oldMigration := migrateServiceNetworkIdentityLocked
+			oldStageSystemd := stageRegularNetworkSystemdArtifactsForMutation
+			oldRegularSystemctl := runRegularNetworkSystemctlForRuntime
+			oldISOSystemctl := runISOSystemctlForRuntime
+			oldEnsureTopology := ensureISOTopologyForRuntime
+			oldRemoveTopology := removeISOTopologyForRuntime
+			t.Cleanup(func() {
+				isServiceRunningForNetworkMutation = oldRunning
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+				migrateServiceNetworkIdentityLocked = oldMigration
+				stageRegularNetworkSystemdArtifactsForMutation = oldStageSystemd
+				runRegularNetworkSystemctlForRuntime = oldRegularSystemctl
+				runISOSystemctlForRuntime = oldISOSystemctl
+				ensureISOTopologyForRuntime = oldEnsureTopology
+				removeISOTopologyForRuntime = oldRemoveTopology
+			})
+
+			isServiceRunningForNetworkMutation = func(*Server, string) (bool, error) { return false, nil }
+			stageRegularNetworkSystemdArtifactsForMutation = func(service *svc.SystemdService) ([]string, error) {
+				return service.InstallUnits(), nil
+			}
+			var events []string
+			var preflightViolation error
+			topologyCalls, runtimeCalls, migrationCalls := 0, 0, 0
+			var preflightResolver string
+			var topologyAllocation db.ISOAllocation
+			var concurrent *db.Service
+			observePreflight := func(stage string) {
+				current, err := server.serviceView(previous.Name)
+				if err != nil && preflightViolation == nil {
+					preflightViolation = fmt.Errorf("%s: read service record: %w", stage, err)
+					return
+				}
+				if preflightViolation == nil && !reflect.DeepEqual(current.AsStruct(), previous) {
+					preflightViolation = fmt.Errorf("%s: database changed before final sandbox preflight completed", stage)
+				}
+				if preflightViolation == nil && (topologyCalls != 0 || runtimeCalls != 0) {
+					preflightViolation = fmt.Errorf("%s: topology/runtime calls = %d/%d before final sandbox preflight completed", stage, topologyCalls, runtimeCalls)
+				}
+			}
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				events = append(events, "ensure")
+				observePreflight("ensure")
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+				events = append(events, "validate")
+				observePreflight("validate")
+				if !active || req.Policy.State != "on" {
+					return serviceSandboxPolicy{}, fmt.Errorf("final sandbox validation active/state = %t/%q", active, req.Policy.State)
+				}
+				preflightResolver = req.ResolverSource
+				return req.Policy, nil
+			}
+			probeServiceSandboxForMutation = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+				events = append(events, "probe")
+				observePreflight("probe")
+				if uid != uint32(os.Geteuid()) || gid != uint32(os.Getegid()) {
+					return fmt.Errorf("final sandbox probe identity = %d:%d", uid, gid)
+				}
+				resolverMounted := false
+				for _, mount := range plan.Mounts {
+					resolverMounted = resolverMounted || mount.Source == preflightResolver && mount.Destination == "/etc/resolv.conf"
+				}
+				if !resolverMounted {
+					return fmt.Errorf("final sandbox probe omitted resolver %q", preflightResolver)
+				}
+				return nil
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+				events = append(events, "verify")
+				observePreflight("verify")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if !strings.Contains(string(raw), "NetworkNamespacePath=/var/run/netns/") || !strings.Contains(string(raw), bubblewrapPath) {
+					return errors.New("final combined unit omitted ISO namespace or Bubblewrap")
+				}
+				if tt.concurrentAfterVerify {
+					concurrent = previous.Clone()
+					concurrent.Identity = concurrent.Identity.Clone()
+					concurrent.Identity.UID++
+					if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+						data.Services[previous.Name] = concurrent.Clone()
+						return nil
+					}); err != nil {
+						return err
+					}
+				}
+				if tt.allocationAfterVerify {
+					resolverRaw, err := os.ReadFile(preflightResolver)
+					if err != nil {
+						return err
+					}
+					hostIP, err := netip.ParseAddr(strings.TrimSpace(strings.TrimPrefix(string(resolverRaw), "nameserver ")))
+					if err != nil {
+						return err
+					}
+					link := netip.PrefixFrom(hostIP.Prev(), 30).Masked()
+					peer := &db.Service{
+						Name: "peer", ServiceType: db.ServiceTypeSystemd,
+						Network: &db.ServiceNetworkConfig{Modes: []string{"iso"}},
+						ISO:     newDBISOAllocation("peer", isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}}, link),
+					}
+					if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+						data.Services[peer.Name] = peer
+						return nil
+					}); err != nil {
+						return err
+					}
+				}
+				return tt.verifyErr
+			}
+			ensureISOTopologyForRuntime = func(_ context.Context, spec netns.ISOTopologySpec) error {
+				current, err := server.serviceView(previous.Name)
+				if err != nil {
+					return err
+				}
+				if current.ISO().AsStruct() == nil || current.ISO().State() != string(iso.StateReserved) {
+					return fmt.Errorf("topology observed unreserved service: %#v", current.AsStruct())
+				}
+				if !reflect.DeepEqual(current.ISO().AsStruct(), &spec.Allocation) {
+					return fmt.Errorf("published allocation differs from topology plan: record=%#v topology=%#v", current.ISO().AsStruct(), spec.Allocation)
+				}
+				if preflightResolver != "" {
+					raw, err := os.ReadFile(preflightResolver)
+					if err != nil {
+						return err
+					}
+					if string(raw) != "nameserver "+spec.Allocation.HostIP.String()+"\n" {
+						return fmt.Errorf("preflighted resolver %q does not match allocation %s", string(raw), spec.Allocation.HostIP)
+					}
+				}
+				topologyAllocation = spec.Allocation
+				events = append(events, "reservation", "topology")
+				topologyCalls++
+				return nil
+			}
+			runRegularNetworkSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
+				runtimeCalls++
+				return oldRegularSystemctl(ctx, args...)
+			}
+			runISOSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
+				runtimeCalls++
+				return oldISOSystemctl(ctx, args...)
+			}
+			removeISOTopologyForRuntime = func(context.Context, netns.ISOTopologySpec) error {
+				runtimeCalls++
+				return nil
+			}
+			migrationFailure := errors.New("injected post-topology migration failure")
+			migrateServiceNetworkIdentityLocked = func(_ context.Context, _ *Server, request serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+				events = append(events, "migrate")
+				migrationCalls++
+				if request.TargetService == nil || request.TargetService.ISO == nil || !reflect.DeepEqual(request.TargetService.ISO, &topologyAllocation) {
+					return serviceIdentityMigrationResult{}, fmt.Errorf("migration target allocation differs from preflighted topology: %#v", request.TargetService)
+				}
+				return serviceIdentityMigrationResult{}, migrationFailure
+			}
+
+			err := server.updateServiceNetworkLocked(context.Background(), previous.Name, flags, io.Discard)
+			switch {
+			case tt.verifyErr != nil:
+				if !errors.Is(err, tt.verifyErr) {
+					t.Fatalf("regular-to-ISO preflight error = %v, want %v", err, tt.verifyErr)
+				}
+				if topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0 {
+					t.Fatalf("preflight failure topology/runtime/migration calls = %d/%d/%d, want zero", topologyCalls, runtimeCalls, migrationCalls)
+				}
+			case tt.concurrentAfterVerify:
+				if err == nil || concurrent == nil {
+					t.Fatalf("concurrent reservation publication error = %v, replacement=%#v", err, concurrent)
+				}
+				if topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0 {
+					t.Fatalf("concurrent publication topology/runtime/migration calls = %d/%d/%d, want zero", topologyCalls, runtimeCalls, migrationCalls)
+				}
+			case tt.allocationAfterVerify:
+				if err == nil {
+					t.Fatal("changed allocation plan was published after sandbox preflight")
+				}
+				if topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0 {
+					t.Fatalf("changed allocation topology/runtime/migration calls = %d/%d/%d, want zero", topologyCalls, runtimeCalls, migrationCalls)
+				}
+				peer, peerErr := server.serviceView("peer")
+				if peerErr != nil || peer.ISO().AsStruct() == nil {
+					t.Fatalf("concurrent allocation claimant was not preserved: record=%#v error=%v", peer.AsStruct(), peerErr)
+				}
+			case !errors.Is(err, migrationFailure):
+				t.Fatalf("regular-to-ISO post-topology error = %v, want %v", err, migrationFailure)
+			}
+			if preflightViolation != nil {
+				t.Fatal(preflightViolation)
+			}
+			if !reflect.DeepEqual(events, tt.wantEvents) {
+				t.Fatalf("regular-to-ISO events = %v, want %v", events, tt.wantEvents)
+			}
+			current, viewErr := server.serviceView(previous.Name)
+			if viewErr != nil {
+				t.Fatal(viewErr)
+			}
+			wantRecord := previous
+			if concurrent != nil {
+				wantRecord = concurrent
+			}
+			if !reflect.DeepEqual(current.AsStruct(), wantRecord) {
+				t.Fatalf("regular-to-ISO failure record = %#v, want exact %#v (mutation error: %v)", current.AsStruct(), wantRecord, err)
+			}
+			for _, pattern := range []string{"iso-resolv-*", "iso-gate-*", "api-network-*"} {
+				matches, globErr := filepath.Glob(filepath.Join(serviceBinDirForRoot(previous.ServiceRoot), pattern))
+				if globErr != nil {
+					t.Fatal(globErr)
+				}
+				if len(matches) != 0 {
+					t.Fatalf("regular-to-ISO failure left staged %s artifacts: %v", pattern, matches)
+				}
+			}
+		})
+	}
+}
+
+func newRegularToISOCombinedSandboxFixture(t *testing.T) (*Server, *db.Service, cli.ServiceSetFlags) {
+	t.Helper()
+	server, plan, unit := newNativeISOServiceNetworkMutationFixture(t, false)
+	root := plan.previous.ServiceRoot
+	payload := filepath.Join(serviceRunDirForRoot(root), "api-4")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := serviceDataDirForRoot(root)
+	identity := db.ServiceIdentity{
+		RequestedUser: "root", RequestedGroup: "root", UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}
+	policy := serviceSandboxPolicy{State: "on"}
+	baseUnit := "[Unit]\nDescription=api\n\n[Service]\nExecStart=" + payload + " --serve\nUser=root\nGroup=root\n" +
+		"WorkingDirectory=" + dataDir + "\nEnvironment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n"
+	sandboxPlan, err := buildValidatedServiceSandboxPlan(serviceSandboxPlanRequest{
+		Service: plan.name, Policy: policy, Payload: payload, DataDir: dataDir,
+		ResolverSource: "/etc/resolv.conf", UID: identity.UID, GID: identity.GID, Hostname: plan.name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalUnit, _, err := renderNativeSandboxUnitWithPlan(baseUnit, nativeSandboxUnitRequest{
+		CurrentPolicy: serviceSandboxPolicy{State: "legacy"}, TargetPolicy: policy, Identity: identity,
+		Payload: payload, DataDir: dataDir, Resolver: "/etc/resolv.conf", Hostname: plan.name,
+	}, &sandboxPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte(canonicalUnit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous := plan.previous.Clone()
+	previous.Identity = &identity
+	previous.Artifacts[db.ArtifactBinary] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(previous.Generation): payload,
+		"latest":                    payload,
+	}}
+	previous.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+		db.Gen(previous.Generation): serviceSandboxPolicyToDB(policy),
+		"latest":                    serviceSandboxPolicyToDB(policy),
+	}}
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.Services[previous.Name] = previous.Clone()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return server, previous, cli.ServiceSetFlags{
+		Net: "iso", NetSet: true,
+		RunAs: strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid()), RunAsSet: true,
+	}
+}
+
+func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t *testing.T) {
+	preflightFailure := errors.New("injected ISO-to-ISO final sandbox verification failure")
+	migrationFailure := errors.New("injected ISO-to-ISO post-publication migration failure")
+	for _, tt := range []struct {
+		name             string
+		verifyErr        error
+		migrationErr     error
+		sameServiceRace  bool
+		peerAllocation   bool
+		wantEvents       []string
+		wantFinalSuccess bool
+	}{
+		{
+			name:       "preflight failure leaves exact previous database and runtime",
+			verifyErr:  preflightFailure,
+			wantEvents: []string{"ensure", "validate", "probe", "verify"},
+		},
+		{
+			name:             "stable allocation publishes only after final preflight",
+			wantEvents:       []string{"ensure", "validate", "probe", "verify", "reservation", "topology", "migrate"},
+			wantFinalSuccess: true,
+		},
+		{
+			name:         "post-publication failure restores previous ISO runtime",
+			migrationErr: migrationFailure,
+			wantEvents:   []string{"ensure", "validate", "probe", "verify", "reservation", "topology", "migrate", "restore-topology"},
+		},
+		{
+			name:            "same-service replacement wins before publication",
+			sameServiceRace: true,
+			wantEvents:      []string{"ensure", "validate", "probe", "verify"},
+		},
+		{
+			name:           "peer allocation collision wins before publication",
+			peerAllocation: true,
+			wantEvents:     []string{"ensure", "validate", "probe", "verify"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, previous, flags := newISOToISOCombinedSandboxFixture(t)
+			stubNativeISOServiceNetworkMutationRuntime(t)
+
+			oldRunning := isServiceRunningForNetworkMutation
+			oldEnsure := ensureBubblewrapForServiceSandboxMutation
+			oldValidate := validateServiceSandboxPolicyForMutation
+			oldProbe := probeServiceSandboxForMutation
+			oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+			oldMigration := migrateServiceNetworkIdentityLocked
+			oldStageSystemd := stageRegularNetworkSystemdArtifactsForMutation
+			oldRegularSystemctl := runRegularNetworkSystemctlForRuntime
+			oldISOSystemctl := runISOSystemctlForRuntime
+			oldEnsureTopology := ensureISOTopologyForRuntime
+			oldRemoveTopology := removeISOTopologyForRuntime
+			t.Cleanup(func() {
+				isServiceRunningForNetworkMutation = oldRunning
+				ensureBubblewrapForServiceSandboxMutation = oldEnsure
+				validateServiceSandboxPolicyForMutation = oldValidate
+				probeServiceSandboxForMutation = oldProbe
+				verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+				migrateServiceNetworkIdentityLocked = oldMigration
+				stageRegularNetworkSystemdArtifactsForMutation = oldStageSystemd
+				runRegularNetworkSystemctlForRuntime = oldRegularSystemctl
+				runISOSystemctlForRuntime = oldISOSystemctl
+				ensureISOTopologyForRuntime = oldEnsureTopology
+				removeISOTopologyForRuntime = oldRemoveTopology
+			})
+
+			isServiceRunningForNetworkMutation = func(*Server, string) (bool, error) { return false, nil }
+			stageRegularNetworkSystemdArtifactsForMutation = func(service *svc.SystemdService) ([]string, error) {
+				return service.InstallUnits(), nil
+			}
+			var events []string
+			var preflightViolation error
+			var preflightResolver string
+			var published db.ISOAllocation
+			var concurrent *db.Service
+			var migratedTarget *db.Service
+			topologyCalls, runtimeCalls, migrationCalls, removeCalls := 0, 0, 0, 0
+			observePreflight := func(stage string) {
+				current, err := server.serviceView(previous.Name)
+				if err != nil && preflightViolation == nil {
+					preflightViolation = fmt.Errorf("%s: read service record: %w", stage, err)
+					return
+				}
+				if preflightViolation == nil && !reflect.DeepEqual(current.AsStruct(), previous) {
+					preflightViolation = fmt.Errorf("%s: database changed before final ISO-to-ISO sandbox preflight completed", stage)
+				}
+				if preflightViolation == nil && (topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0) {
+					preflightViolation = fmt.Errorf("%s: topology/runtime/migration calls = %d/%d/%d before final ISO-to-ISO sandbox preflight completed", stage, topologyCalls, runtimeCalls, migrationCalls)
+				}
+			}
+			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+				events = append(events, "ensure")
+				observePreflight("ensure")
+				return nil
+			}
+			validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+				events = append(events, "validate")
+				observePreflight("validate")
+				if !active || req.Policy.State != "on" {
+					return serviceSandboxPolicy{}, fmt.Errorf("ISO-to-ISO validation active/state = %t/%q", active, req.Policy.State)
+				}
+				preflightResolver = req.ResolverSource
+				return req.Policy, nil
+			}
+			probeServiceSandboxForMutation = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+				events = append(events, "probe")
+				observePreflight("probe")
+				if uid != uint32(os.Geteuid()) || gid != uint32(os.Getegid()) {
+					return fmt.Errorf("ISO-to-ISO final sandbox probe identity = %d:%d", uid, gid)
+				}
+				for _, mount := range plan.Mounts {
+					if mount.Source == preflightResolver && mount.Destination == "/etc/resolv.conf" {
+						return nil
+					}
+				}
+				return fmt.Errorf("ISO-to-ISO final sandbox probe omitted resolver %q", preflightResolver)
+			}
+			verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+				events = append(events, "verify")
+				observePreflight("verify")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if !strings.Contains(string(raw), bubblewrapPath) || !strings.Contains(string(raw), "NetworkNamespacePath=/var/run/netns/"+previous.ISO.NetNS) {
+					return errors.New("final ISO-to-ISO unit omitted Bubblewrap or stable namespace")
+				}
+				switch {
+				case tt.sameServiceRace:
+					concurrent = previous.Clone()
+					concurrent.Identity = concurrent.Identity.Clone()
+					concurrent.Identity.UID++
+					_, err = server.cfg.DB.MutateData(func(data *db.Data) error {
+						data.Services[previous.Name] = concurrent.Clone()
+						return nil
+					})
+				case tt.peerAllocation:
+					peer := &db.Service{
+						Name: "peer", ServiceType: db.ServiceTypeSystemd,
+						Network: &db.ServiceNetworkConfig{Modes: []string{"iso"}},
+						ISO:     newDBISOAllocation("peer", isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}}, previous.ISO.Link),
+					}
+					_, err = server.cfg.DB.MutateData(func(data *db.Data) error {
+						data.Services[peer.Name] = peer
+						return nil
+					})
+				}
+				return errors.Join(err, tt.verifyErr)
+			}
+			ensureISOTopologyForRuntime = func(_ context.Context, spec netns.ISOTopologySpec) error {
+				current, err := server.serviceView(previous.Name)
+				if err != nil {
+					return err
+				}
+				if preflightResolver == "" {
+					events = append(events, "topology")
+					topologyCalls++
+					return nil
+				}
+				if reflect.DeepEqual(current.AsStruct(), previous) {
+					if !reflect.DeepEqual(&spec.Allocation, previous.ISO) {
+						return fmt.Errorf("restored topology allocation = %#v, want previous %#v", spec.Allocation, previous.ISO)
+					}
+					events = append(events, "restore-topology")
+					topologyCalls++
+					return nil
+				}
+				if current.ISO().State() != string(iso.StateReserved) || !reflect.DeepEqual(current.ISO().AsStruct(), &spec.Allocation) {
+					return fmt.Errorf("published ISO-to-ISO record/topology mismatch: %#v / %#v", current.AsStruct(), spec.Allocation)
+				}
+				if spec.Allocation.Link != previous.ISO.Link || spec.Allocation.NetNS != previous.ISO.NetNS || !reflect.DeepEqual(spec.Allocation.DesiredModes, []string{"iso"}) {
+					return fmt.Errorf("published ISO-to-ISO allocation was not the stable planned target: %#v", spec.Allocation)
+				}
+				raw, err := os.ReadFile(preflightResolver)
+				if err != nil || string(raw) != "nameserver "+spec.Allocation.HostIP.String()+"\n" {
+					return fmt.Errorf("preflighted ISO-to-ISO resolver/allocation mismatch: %q: %w", raw, err)
+				}
+				published = spec.Allocation
+				events = append(events, "reservation", "topology")
+				topologyCalls++
+				return nil
+			}
+			runRegularNetworkSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
+				runtimeCalls++
+				return oldRegularSystemctl(ctx, args...)
+			}
+			runISOSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
+				runtimeCalls++
+				return oldISOSystemctl(ctx, args...)
+			}
+			removeISOTopologyForRuntime = func(ctx context.Context, spec netns.ISOTopologySpec) error {
+				removeCalls++
+				return oldRemoveTopology(ctx, spec)
+			}
+			migrateServiceNetworkIdentityLocked = func(_ context.Context, _ *Server, request serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+				events = append(events, "migrate")
+				migrationCalls++
+				if request.TargetService == nil || request.TargetService.ISO == nil || !reflect.DeepEqual(request.TargetService.ISO, &published) {
+					return serviceIdentityMigrationResult{}, fmt.Errorf("ISO-to-ISO migration target allocation differs from preflighted publication: %#v", request.TargetService)
+				}
+				if tt.migrationErr != nil {
+					return serviceIdentityMigrationResult{}, tt.migrationErr
+				}
+				migratedTarget = request.TargetService.Clone()
+				_, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+					current := data.Services[previous.Name]
+					if current == nil || current.ISO == nil || !reflect.DeepEqual(current.ISO, &published) {
+						return fmt.Errorf("migration observed unpreflighted ISO-to-ISO publication: %#v", current)
+					}
+					data.Services[previous.Name] = migratedTarget.Clone()
+					return nil
+				})
+				return serviceIdentityMigrationResult{}, err
+			}
+
+			err := server.updateServiceNetworkLocked(context.Background(), previous.Name, flags, io.Discard)
+			switch {
+			case tt.verifyErr != nil:
+				if !errors.Is(err, tt.verifyErr) {
+					t.Fatalf("ISO-to-ISO preflight error = %v, want %v", err, tt.verifyErr)
+				}
+			case tt.migrationErr != nil:
+				if !errors.Is(err, tt.migrationErr) {
+					t.Fatalf("ISO-to-ISO post-publication error = %v, want %v", err, tt.migrationErr)
+				}
+			case tt.sameServiceRace || tt.peerAllocation:
+				if err == nil {
+					t.Fatal("ISO-to-ISO publication race unexpectedly reached runtime")
+				}
+			case tt.wantFinalSuccess:
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if preflightViolation != nil {
+				t.Fatal(preflightViolation)
+			}
+			if !reflect.DeepEqual(events, tt.wantEvents) {
+				t.Fatalf("ISO-to-ISO events = %v, want %v", events, tt.wantEvents)
+			}
+			current, viewErr := server.serviceView(previous.Name)
+			if viewErr != nil {
+				t.Fatal(viewErr)
+			}
+			wantRecord := previous
+			switch {
+			case concurrent != nil:
+				wantRecord = concurrent
+			case tt.wantFinalSuccess:
+				if migratedTarget == nil {
+					t.Fatal("successful ISO-to-ISO mutation did not migrate the preflighted target")
+				}
+				wantRecord = migratedTarget.Clone()
+				wantRecord.ISO.State = string(iso.StateStopped)
+			}
+			if !serviceNetworkRecordsEqual(current.AsStruct(), wantRecord) {
+				gotJSON, gotJSONErr := json.MarshalIndent(current.AsStruct(), "", "  ")
+				wantJSON, wantJSONErr := json.MarshalIndent(wantRecord, "", "  ")
+				t.Fatalf("ISO-to-ISO final record mismatch (mutation error: %v, JSON errors: %v/%v):\n got %s\nwant %s", err, gotJSONErr, wantJSONErr, gotJSON, wantJSON)
+			}
+			if tt.peerAllocation {
+				peer, peerErr := server.serviceView("peer")
+				if peerErr != nil || peer.ISO().AsStruct() == nil {
+					t.Fatalf("ISO-to-ISO peer allocation race was not preserved: %#v, %v", peer.AsStruct(), peerErr)
+				}
+			}
+			if !tt.wantFinalSuccess {
+				if topologyCalls != 0 && tt.migrationErr == nil {
+					t.Fatalf("ISO-to-ISO failure reached topology %d times", topologyCalls)
+				}
+				if migrationCalls != 0 && tt.migrationErr == nil {
+					t.Fatalf("ISO-to-ISO failure reached migration %d times", migrationCalls)
+				}
+				for _, path := range []string{
+					exactServiceArtifact(previous, db.ArtifactSystemdUnit),
+					exactServiceArtifact(previous, db.ArtifactNetNSResolv),
+					exactServiceArtifact(previous, db.ArtifactNetNSService),
+				} {
+					if _, statErr := os.Stat(path); statErr != nil {
+						t.Fatalf("ISO-to-ISO recovery lost previous artifact %s: %v", path, statErr)
+					}
+				}
+				assertNoISOToISOProvisionalArtifacts(t, previous)
+			}
+			if tt.migrationErr != nil && (removeCalls == 0 || topologyCalls < 2) {
+				t.Fatalf("ISO-to-ISO post-publication recovery remove/topology calls = %d/%d, want removal and restored topology", removeCalls, topologyCalls)
+			}
+		})
+	}
+}
+
+func newISOToISOCombinedSandboxFixture(t *testing.T) (*Server, *db.Service, cli.ServiceSetFlags) {
+	t.Helper()
+	server, previous, flags := newRegularToISOCombinedSandboxFixture(t)
+	allocation := newDBISOAllocation(
+		previous.Name,
+		isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}},
+		netip.MustParsePrefix("172.30.0.0/30"),
+	)
+	allocation.State = string(iso.StateReady)
+	previous.Network = &db.ServiceNetworkConfig{Modes: []string{"iso"}}
+	previous.ISO = allocation
+	root := previous.ServiceRoot
+	resolver := filepath.Join(serviceRunDirForRoot(root), "current-resolv.conf")
+	if err := os.WriteFile(resolver, []byte("nameserver "+allocation.HostIP.String()+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gate := filepath.Join(serviceBinDirForRoot(root), "current-netns.service")
+	if err := os.WriteFile(gate, []byte("[Unit]\nDescription=api current ISO namespace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous.Artifacts[db.ArtifactNetNSResolv] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(previous.Generation): resolver,
+		"latest":                    resolver,
+	}}
+	previous.Artifacts[db.ArtifactNetNSService] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(previous.Generation): gate,
+		"latest":                    gate,
+	}}
+	payload := exactServiceArtifact(previous, db.ArtifactBinary)
+	dataDir := serviceDataDirForRoot(root)
+	identity := *previous.Identity
+	policy := serviceSandboxPolicy{State: "on"}
+	baseUnit := "[Unit]\nDescription=api\n\n[Service]\nExecStart=" + payload + " --serve\nUser=root\nGroup=root\n" +
+		"WorkingDirectory=" + dataDir + "\nEnvironment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n" +
+		"NetworkNamespacePath=/var/run/netns/" + allocation.NetNS + "\n"
+	sandboxPlan, err := buildValidatedServiceSandboxPlan(serviceSandboxPlanRequest{
+		Service: previous.Name, Policy: policy, Payload: payload, DataDir: dataDir,
+		ResolverSource: resolver, UID: identity.UID, GID: identity.GID, Hostname: previous.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalUnit, _, err := renderNativeSandboxUnitWithPlan(baseUnit, nativeSandboxUnitRequest{
+		CurrentPolicy: serviceSandboxPolicy{State: "legacy"}, TargetPolicy: policy, Identity: identity,
+		Payload: payload, DataDir: dataDir, Resolver: resolver, Hostname: previous.Name,
+	}, &sandboxPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := exactServiceArtifact(previous, db.ArtifactSystemdUnit)
+	if err := os.WriteFile(unit, []byte(canonicalUnit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.Services[previous.Name] = previous.Clone()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flags.Net = "iso"
+	return server, previous, flags
+}
+
+func exactServiceArtifact(service *db.Service, name db.ArtifactName) string {
+	path, _ := service.Artifacts.Gen(name, service.Generation)
+	return path
+}
+
+func assertNoISOToISOProvisionalArtifacts(t *testing.T, service *db.Service) {
+	t.Helper()
+	for _, pattern := range []string{"iso-resolv-*", "iso-gate-*", service.Name + "-network-*"} {
+		matches, err := filepath.Glob(filepath.Join(serviceBinDirForRoot(service.ServiceRoot), pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("ISO-to-ISO failure left provisional %s artifacts: %v", pattern, matches)
+		}
 	}
 }
 
@@ -4031,6 +5053,7 @@ func TestServiceSetRunAsAndISOCommitsOrRollsBackAtomically(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			stubServiceNetworkStaticVerification(t)
 			server, plan, originalUnit := newNativeISOServiceNetworkMutationFixture(t, false)
 			stubNativeISOServiceNetworkMutationRuntime(t)
 			if tt.wantOld || tt.wantTombstone {
@@ -4343,10 +5366,23 @@ func TestServiceNetworkIdentityRewriteCreatesAnotherFreshOwnedUnit(t *testing.T)
 	target := previous.Clone()
 	target.Artifacts[db.ArtifactSystemdUnit] = &db.Artifact{Refs: map[db.ArtifactRef]string{db.Gen(0): firstStaged}}
 	plan := &serviceNetworkMutationPlan{name: "api", previous: previous, artifactTxn: txn}
+	oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() { verifyGeneratedSystemdUnitForSandboxMutation = oldVerify })
+	verified := false
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		verified = true
+		if path == firstStaged {
+			t.Fatal("static verification used the pre-identity staged unit")
+		}
+		return nil
+	}
 
-	_, err = server.applyServiceNetworkIdentityToUnit(plan, target, db.ServiceIdentity{UID: 1000, GID: 1000})
+	_, err = server.applyServiceNetworkIdentityToUnit(context.Background(), plan, target, db.ServiceIdentity{UID: 1000, GID: 1000})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !verified {
+		t.Fatal("fresh identity unit was not statically verified")
 	}
 	rewritten, _ := target.Artifacts.Gen(db.ArtifactSystemdUnit, 0)
 	if rewritten == firstStaged {
@@ -4357,6 +5393,155 @@ func TestServiceNetworkIdentityRewriteCreatesAnotherFreshOwnedUnit(t *testing.T)
 	}
 	if _, ok := txn.stagedPaths[rewritten]; !ok {
 		t.Fatalf("fresh identity unit %q was not registered as transaction-owned", rewritten)
+	}
+}
+
+func TestServiceNetworkIdentityRewriteRendersAndProbesOneCombinedSandboxTarget(t *testing.T) {
+	server, previous := newServiceSandboxMutationFixture(t, serviceSandboxPolicy{State: "on"})
+	root := server.serviceRootFromView(previous.View())
+	payload, _ := previous.Artifacts.Gen(db.ArtifactBinary, previous.Generation)
+	dataDir := serviceDataDirForRoot(root)
+	oldResolver := filepath.Join(serviceRunDirForRoot(root), "resolv-old.conf")
+	targetResolver := filepath.Join(serviceRunDirForRoot(root), "resolv-target.conf")
+	for path, content := range map[string]string{
+		oldResolver:    "nameserver 1.1.1.1\n",
+		targetResolver: "nameserver 2.2.2.2\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous.Artifacts[db.ArtifactNetNSResolv] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(previous.Generation): oldResolver,
+	}}
+	txn, err := beginRegularNetworkArtifactTransaction(root, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstContent := "[Unit]\nRequires=yeet-api-ns.service\nAfter=yeet-api-ns.service\n" +
+		"[Service]\nExecStart=" + bubblewrapPath + " --uid 0 --gid 0 --ro-bind " + oldResolver + " /etc/resolv.conf -- " + payload + " --serve\n" +
+		"User=root\nGroup=root\nWorkingDirectory=/\n" +
+		"Environment=HOME=" + dataDir + " USER=root LOGNAME=root SHELL=/bin/sh\n" +
+		"NetworkNamespacePath=/var/run/netns/target\n"
+	firstStaged, err := writeFreshRegularNetworkArtifact(root, "bin", "api-network-", ".service", []byte(firstContent), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.registerStagedPath(firstStaged); err != nil {
+		t.Fatal(err)
+	}
+	target := previous.Clone()
+	setRegularNetworkTargetArtifact(target, db.ArtifactSystemdUnit, firstStaged)
+	setRegularNetworkTargetArtifact(target, db.ArtifactNetNSResolv, targetResolver)
+	plan := &serviceNetworkMutationPlan{name: previous.Name, previous: previous, artifactTxn: txn, deferSandbox: true}
+	identity := db.ServiceIdentity{
+		RequestedUser: strconv.Itoa(os.Geteuid()), RequestedGroup: strconv.Itoa(os.Getegid()),
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}
+
+	oldEnsure := ensureBubblewrapForServiceSandboxMutation
+	oldValidate := validateServiceSandboxPolicyForMutation
+	oldProbe := probeServiceSandboxForMutation
+	oldVerify := verifyGeneratedSystemdUnitForSandboxMutation
+	t.Cleanup(func() {
+		ensureBubblewrapForServiceSandboxMutation = oldEnsure
+		validateServiceSandboxPolicyForMutation = oldValidate
+		probeServiceSandboxForMutation = oldProbe
+		verifyGeneratedSystemdUnitForSandboxMutation = oldVerify
+	})
+	var order []string
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
+		order = append(order, "ensure")
+		return nil
+	}
+	validateServiceSandboxPolicyForMutation = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+		order = append(order, fmt.Sprintf("validate:%t:%d:%d:%s", active, req.UID, req.GID, req.ResolverSource))
+		return req.Policy, nil
+	}
+	probeServiceSandboxForMutation = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+		order = append(order, fmt.Sprintf("probe:%d:%d", uid, gid))
+		if !slicesContainAdjacent(plan.Arguments, "--ro-bind", targetResolver) {
+			t.Fatalf("probe plan resolver = %#v, want %q", plan.Arguments, targetResolver)
+		}
+		return nil
+	}
+	verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
+		order = append(order, "verify")
+		if path == firstStaged {
+			t.Fatal("static verification used the pre-identity staged unit")
+		}
+		return nil
+	}
+
+	replacement, err := server.applyServiceNetworkIdentityToUnit(context.Background(), plan, target, identity)
+	if err != nil {
+		t.Fatalf("apply combined network identity: %v", err)
+	}
+	wantOrder := []string{
+		"ensure",
+		fmt.Sprintf("validate:true:%d:%d:%s", identity.UID, identity.GID, targetResolver),
+		fmt.Sprintf("probe:%d:%d", identity.UID, identity.GID),
+		"verify",
+	}
+	if diff := cmp.Diff(wantOrder, order); diff != "" {
+		t.Fatalf("combined sandbox preflight order mismatch (-want +got):\n%s", diff)
+	}
+	argv := serviceIdentityExecStartArgv(t, replacement)
+	if !slicesContainAdjacent(argv, "--uid", strconv.FormatUint(uint64(identity.UID), 10)) ||
+		!slicesContainAdjacent(argv, "--gid", strconv.FormatUint(uint64(identity.GID), 10)) ||
+		!slicesContainAdjacent(argv, "--ro-bind", targetResolver) {
+		t.Fatalf("combined replacement retained stale sandbox settings: %#v", argv)
+	}
+}
+
+func TestExactReadableNetworkSandboxArtifactsRejectsUnreadableAndNonregularResolver(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "unreadable",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if os.Geteuid() == 0 {
+					t.Skip("root can read a mode-000 regular file")
+				}
+				if err := os.WriteFile(path, []byte("nameserver 127.0.0.1\n"), 0); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "nonregular",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			payload := filepath.Join(root, "payload")
+			if err := os.WriteFile(payload, []byte("payload"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			resolver := filepath.Join(root, "selected-resolver")
+			test.setup(t, resolver)
+			service := &db.Service{
+				Name: "api", Generation: 4,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{db.Gen(4): payload}},
+					db.ArtifactNetNSResolv: {Refs: map[db.ArtifactRef]string{db.Gen(4): resolver}},
+				},
+			}
+
+			_, _, err := exactReadableNetworkSandboxArtifacts(service)
+			if err == nil || !strings.Contains(err.Error(), "validate target network sandbox resolver "+resolver) {
+				t.Fatalf("selected resolver validation error = %v", err)
+			}
+		})
 	}
 }
 

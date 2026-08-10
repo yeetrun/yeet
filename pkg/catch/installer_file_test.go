@@ -5,12 +5,14 @@
 package catch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -47,6 +49,1565 @@ func TestFileInstallerCloseRechecksIdentityRecoveryInsideLock(t *testing.T) {
 	}
 	if _, ok := dv.Services().GetOk("api"); ok {
 		t.Fatal("Close mutated the service despite recovery block")
+	}
+}
+
+func TestTask6CNativeSandboxPreflightOrdersImmutablePayloadBeforeStaging(t *testing.T) {
+	for _, timerBacked := range []bool{false, true} {
+		name := "ordinary"
+		if timerBacked {
+			name = "timer-backed"
+		}
+		t.Run(name, func(t *testing.T) { task6CRunOrderedPreflight(t, timerBacked) })
+	}
+}
+
+func task6CRunOrderedPreflight(t *testing.T, timerBacked bool) {
+	t.Helper()
+	server := newTestServer(t)
+	const serviceName = "preflight-order"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "on"})
+	if timerBacked {
+		seedTask6CTimer(t, server, serviceName)
+	}
+	before := testService(t, server, serviceName).Clone()
+	marker := filepath.Join(t.TempDir(), "payload-executed")
+	payload := "#!/bin/sh\nprintf executed >" + marker + "\nexit 97\n"
+	installer, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: serviceName}, StageOnly: true, PayloadName: "payload.sh"})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	resolver := filepath.Join(t.TempDir(), "selected-resolv.conf")
+	if err := os.WriteFile(resolver, []byte("nameserver 192.0.2.53\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installer.lazyNetwork.MustSet(&networkConfig{ResolvConf: resolver})
+	var events []string
+	task6CSetOrderedPreflightSeams(t, installer, server, before, payload, resolver, &events)
+	if _, err := installer.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6CAssertOrderedPreflightResult(t, server, marker, timerBacked, events)
+}
+
+func task6CSetOrderedPreflightSeams(t *testing.T, installer *FileInstaller, server *Server, before *db.Service, payload, resolver string, events *[]string) {
+	t.Helper()
+	installer.ensureBubblewrapFunc = func(context.Context) error {
+		*events = append(*events, "ensure")
+		task6CAssertImmutablePayload(t, installer, payload)
+		task6CAssertUnitNotPrepared(t, installer, "ensure")
+		task6CAssertServiceEqual(t, server, installer.cfg.ServiceName, before, "before ensure")
+		return nil
+	}
+	installer.validateServiceSandboxPolicyFunc = func(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+		*events = append(*events, "validate")
+		task6CAssertValidationRequest(t, installer, req, active, resolver, *events)
+		task6CAssertImmutablePayload(t, installer, payload)
+		task6CAssertUnitNotPrepared(t, installer, "validation")
+		task6CAssertServiceEqual(t, server, installer.cfg.ServiceName, before, "before validation")
+		return serviceSandboxPolicy{State: "on"}, nil
+	}
+	installer.probeServiceSandboxFunc = func(_ context.Context, plan serviceSandboxPlan, uid, gid uint32) error {
+		*events = append(*events, "probe")
+		task6CAssertProbe(t, installer, plan, uid, gid, *events)
+		task6CAssertServiceEqual(t, server, installer.cfg.ServiceName, before, "before probe")
+		return nil
+	}
+	installer.verifyGeneratedSystemdUnitFunc = func(_ context.Context, path string) error {
+		*events = append(*events, "verify")
+		task6CAssertVerify(t, installer, path, *events)
+		task6CAssertServiceEqual(t, server, installer.cfg.ServiceName, before, "before static verify")
+		return nil
+	}
+}
+
+func task6CAssertValidationRequest(t *testing.T, installer *FileInstaller, req serviceSandboxPlanRequest, active bool, resolver string, events []string) {
+	t.Helper()
+	if !reflect.DeepEqual(events, []string{"ensure", "validate"}) {
+		t.Fatalf("validation order = %v", events)
+	}
+	if !active || req.Policy.State != "on" || req.Payload != installer.artifacts[db.ArtifactBinary] || req.ResolverSource != resolver || req.UID != 70000 || req.GID != 70001 {
+		t.Fatalf("validation request = %#v active=%t", req, active)
+	}
+}
+
+func task6CAssertProbe(t *testing.T, installer *FileInstaller, plan serviceSandboxPlan, uid, gid uint32, events []string) {
+	t.Helper()
+	if !reflect.DeepEqual(events, []string{"ensure", "validate", "probe"}) {
+		t.Fatalf("probe order = %v", events)
+	}
+	if uid != 70000 || gid != 70001 || plan.Executable != bubblewrapPath || len(plan.Arguments) == 0 || plan.Arguments[len(plan.Arguments)-1] != "--" {
+		t.Fatalf("probe = uid:%d gid:%d plan:%#v", uid, gid, plan)
+	}
+	unitRaw, err := os.ReadFile(installer.artifacts[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("sandbox unit must exist before probe: %v", err)
+	}
+	if !strings.Contains(string(unitRaw), "ExecStart="+bubblewrapPath+" ") || !strings.Contains(string(unitRaw), installer.artifacts[db.ArtifactBinary]) {
+		t.Fatalf("probe observed non-sandboxed unit:\n%s", unitRaw)
+	}
+}
+
+func task6CAssertVerify(t *testing.T, installer *FileInstaller, path string, events []string) {
+	t.Helper()
+	if !reflect.DeepEqual(events, []string{"ensure", "validate", "probe", "verify"}) {
+		t.Fatalf("verify order = %v", events)
+	}
+	if path == "" || path != installer.artifacts[db.ArtifactSystemdUnit] {
+		t.Fatalf("verify path = %q, staged unit = %q", path, installer.artifacts[db.ArtifactSystemdUnit])
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unit does not exist before static verify: %v", err)
+	}
+}
+
+func task6CAssertOrderedPreflightResult(t *testing.T, server *Server, marker string, timerBacked bool, events []string) {
+	t.Helper()
+	if !reflect.DeepEqual(events, []string{"ensure", "validate", "probe", "verify"}) {
+		t.Fatalf("preflight events = %v", events)
+	}
+	after := testService(t, server, "preflight-order")
+	if _, ok := after.Artifacts.Staged(db.ArtifactBinary); !ok {
+		t.Fatalf("successful preflight did not stage payload: %#v", after.Artifacts)
+	}
+	if policy := after.Sandbox.Refs[db.ArtifactRef("staged")]; policy == nil || policy.State != "on" {
+		t.Fatalf("successful preflight staged policy = %#v", policy)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("payload execution marker exists after harmless preflight: %v", err)
+	}
+	if timerBacked {
+		if _, ok := after.Artifacts.Staged(db.ArtifactSystemdTimerFile); !ok {
+			t.Fatalf("timer-backed preflight lost timer: %#v", after.Artifacts)
+		}
+	}
+}
+
+func TestTask6CNativeSandboxPreflightFailuresPreserveRunningGeneration(t *testing.T) {
+	wantErr := errors.New("injected sandbox preflight failure")
+	for _, failAt := range []string{"ensure", "validate", "probe", "verify"} {
+		t.Run(failAt, func(t *testing.T) { task6CRunPreflightFailure(t, failAt, wantErr) })
+	}
+}
+
+type task6CFailureHarness struct {
+	t             *testing.T
+	server        *Server
+	installer     *FileInstaller
+	serviceName   string
+	failAt        string
+	wantErr       error
+	marker        string
+	events        []string
+	commandCalls  int
+	before        *db.Service
+	activePayload string
+	activeUnit    string
+	payloadBytes  []byte
+	unitBytes     []byte
+}
+
+func task6CRunPreflightFailure(t *testing.T, failAt string, wantErr error) {
+	t.Helper()
+	h := task6CNewFailureHarness(t, failAt, wantErr)
+	h.installer.ensureBubblewrapFunc = h.ensure
+	h.installer.validateServiceSandboxPolicyFunc = h.validate
+	h.installer.probeServiceSandboxFunc = h.probe
+	h.installer.verifyGeneratedSystemdUnitFunc = h.verify
+	payload := "#!/bin/sh\nprintf executed >" + h.marker + "\n"
+	if _, err := h.installer.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.installer.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("Close error = %v, want %v", err, wantErr)
+	}
+	h.assertRollback()
+}
+
+func task6CNewFailureHarness(t *testing.T, failAt string, wantErr error) *task6CFailureHarness {
+	t.Helper()
+	h := &task6CFailureHarness{t: t, server: newTestServer(t), serviceName: "preflight-fail-" + failAt, failAt: failAt, wantErr: wantErr}
+	seedTask6NativeSandboxService(t, h.server, h.serviceName, &db.ServiceSandboxPolicy{State: "on"})
+	h.before = testService(t, h.server, h.serviceName).Clone()
+	h.activePayload = h.before.Artifacts[db.ArtifactBinary].Refs[db.Gen(h.before.Generation)]
+	h.activeUnit = h.before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(h.before.Generation)]
+	var err error
+	h.payloadBytes, err = os.ReadFile(h.activePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.unitBytes, err = os.ReadFile(h.activeUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.marker = filepath.Join(t.TempDir(), "payload-executed")
+	h.installer, err = NewFileInstaller(h.server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: h.serviceName}, PayloadName: "payload.sh",
+		NewCmd: func(string, ...string) *exec.Cmd { h.commandCalls++; return exec.Command("/usr/bin/false") },
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	return h
+}
+
+func (h *task6CFailureHarness) ensure(context.Context) error {
+	h.events = append(h.events, "ensure")
+	task6CAssertImmutablePayload(h.t, h.installer, "#!/bin/sh\nprintf executed >"+h.marker+"\n")
+	if h.failAt == "ensure" {
+		return h.wantErr
+	}
+	return nil
+}
+
+func (h *task6CFailureHarness) validate(req serviceSandboxPlanRequest, active bool) (serviceSandboxPolicy, error) {
+	h.events = append(h.events, "validate")
+	if !active || req.Policy.State != "on" {
+		h.t.Fatalf("validation request = %#v active=%t", req, active)
+	}
+	if h.failAt == "validate" {
+		return serviceSandboxPolicy{}, h.wantErr
+	}
+	return serviceSandboxPolicy{State: "on"}, nil
+}
+
+func (h *task6CFailureHarness) probe(_ context.Context, _ serviceSandboxPlan, uid, gid uint32) error {
+	h.events = append(h.events, "probe")
+	if uid != 70000 || gid != 70001 {
+		h.t.Fatalf("probe identity = %d:%d", uid, gid)
+	}
+	if h.failAt == "probe" {
+		return h.wantErr
+	}
+	return nil
+}
+
+func (h *task6CFailureHarness) verify(_ context.Context, path string) error {
+	h.events = append(h.events, "verify")
+	if _, err := os.Stat(path); err != nil {
+		h.t.Fatalf("verify path does not exist: %v", err)
+	}
+	if h.failAt == "verify" {
+		return h.wantErr
+	}
+	return nil
+}
+
+func (h *task6CFailureHarness) assertRollback() {
+	h.t.Helper()
+	wantEvents := []string{"ensure", "validate", "probe", "verify"}
+	wantEvents = wantEvents[:slices.Index(wantEvents, h.failAt)+1]
+	if !reflect.DeepEqual(h.events, wantEvents) {
+		h.t.Fatalf("events = %v, want %v", h.events, wantEvents)
+	}
+	task6CAssertServiceEqual(h.t, h.server, h.serviceName, h.before, "after failed preflight")
+	task6CAssertUnchangedFile(h.t, h.activePayload, h.payloadBytes, "active payload")
+	task6CAssertUnchangedFile(h.t, h.activeUnit, h.unitBytes, "active unit")
+	if h.commandCalls != 0 {
+		h.t.Fatalf("install/stop command seam called %d times before preflight succeeded", h.commandCalls)
+	}
+	if _, err := os.Stat(h.marker); !errors.Is(err, os.ErrNotExist) {
+		h.t.Fatalf("payload execution marker exists: %v", err)
+	}
+}
+
+func task6CAssertUnchangedFile(t *testing.T, path string, want []byte, label string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s changed: bytes=%q err=%v", label, got, err)
+	}
+}
+
+func TestTask6CLegacyAndOffSkipActiveSandboxPreflight(t *testing.T) {
+	for _, tt := range []task6CInactiveCase{
+		{name: "legacy omitted"},
+		{name: "existing off with dormant lists", policy: &db.ServiceSandboxPolicy{State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/missing/input", Destination: "/input"}}}, wantState: "off"},
+		{name: "fresh explicit off timer", fresh: true, timer: true, options: cli.SandboxOptions{State: "off", StateSet: true, Writable: []cli.SandboxExposure{{Source: "/missing/cache", Destination: "/cache"}}, WritableSet: true}, wantState: "off"},
+	} {
+		t.Run(tt.name, func(t *testing.T) { task6CRunInactivePreflight(t, tt) })
+	}
+}
+
+func TestTask6CLegacyAndOffPreflightDoesNotResolvePayload(t *testing.T) {
+	for _, state := range []string{"legacy", "off"} {
+		t.Run(state, func(t *testing.T) {
+			installer := &FileInstaller{resolvedSandbox: serviceSandboxPolicy{State: state}}
+			task6CSetUnexpectedActivePreflight(t, installer)
+			if err := installer.preflightNativeSandbox(context.Background(), fileInstallPlan{detectedServiceType: db.ServiceTypeSystemd}); err != nil {
+				t.Fatalf("preflightNativeSandbox: %v", err)
+			}
+		})
+	}
+}
+
+type task6CInactiveCase struct {
+	name      string
+	fresh     bool
+	policy    *db.ServiceSandboxPolicy
+	options   cli.SandboxOptions
+	timer     bool
+	wantState string
+}
+
+func task6CRunInactivePreflight(t *testing.T, tt task6CInactiveCase) {
+	t.Helper()
+	server := newTestServer(t)
+	const serviceName = "preflight-negative"
+	if !tt.fresh {
+		seedTask6NativeSandboxService(t, server, serviceName, tt.policy)
+	}
+	cfg := FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: serviceName}, StageOnly: true, PayloadName: "payload.sh"}
+	if tt.timer {
+		cfg.Timer = &svc.TimerConfig{OnCalendar: "hourly", Persistent: true}
+	}
+	installer, err := NewFileInstaller(server, task6FileInstallerCfgWithSandbox(t, cfg, tt.options))
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.ensureManagedServiceAccount = task6SandboxIdentity
+	task6CSetUnexpectedActivePreflight(t, installer)
+	marker := filepath.Join(t.TempDir(), "payload-executed")
+	if _, err := installer.Write([]byte("#!/bin/sh\nprintf executed >" + marker + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6CAssertInactiveResult(t, server, serviceName, marker, tt.wantState)
+}
+
+func task6CSetUnexpectedActivePreflight(t *testing.T, installer *FileInstaller) {
+	t.Helper()
+	unexpected := func(phase string) { t.Fatalf("%s ran for legacy/off policy", phase) }
+	installer.ensureBubblewrapFunc = func(context.Context) error { unexpected("ensure"); return nil }
+	installer.validateServiceSandboxPolicyFunc = func(serviceSandboxPlanRequest, bool) (serviceSandboxPolicy, error) {
+		unexpected("active validation")
+		return serviceSandboxPolicy{}, nil
+	}
+	installer.probeServiceSandboxFunc = func(context.Context, serviceSandboxPlan, uint32, uint32) error { unexpected("probe"); return nil }
+	installer.verifyGeneratedSystemdUnitFunc = func(context.Context, string) error { unexpected("static verify"); return nil }
+}
+
+func task6CAssertInactiveResult(t *testing.T, server *Server, serviceName, marker, wantState string) {
+	t.Helper()
+	service := testService(t, server, serviceName)
+	unitRaw, err := os.ReadFile(service.Artifacts[db.ArtifactSystemdUnit].Refs["staged"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadPath := service.Artifacts[db.ArtifactBinary].Refs["staged"]
+	if strings.Contains(string(unitRaw), bubblewrapPath) || !strings.Contains(string(unitRaw), "ExecStart="+payloadPath) || !strings.Contains(string(unitRaw), "WorkingDirectory="+server.serviceDataDir(serviceName)) {
+		t.Fatalf("legacy/off unit is not direct:\n%s", unitRaw)
+	}
+	task6CAssertInactivePolicy(t, service, wantState)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("direct staging executed payload: %v", err)
+	}
+}
+
+func task6CAssertInactivePolicy(t *testing.T, service *db.Service, wantState string) {
+	t.Helper()
+	if wantState == "" {
+		if service.Sandbox != nil {
+			if _, ok := service.Sandbox.Refs["staged"]; ok {
+				t.Fatalf("legacy install staged policy: %#v", service.Sandbox)
+			}
+		}
+		return
+	}
+	if policy := service.Sandbox.Refs["staged"]; policy == nil || policy.State != wantState {
+		t.Fatalf("staged off policy = %#v", policy)
+	}
+}
+
+func TestTask6EEnvFileGenerationPreservesActiveSandboxPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		policy     *db.ServiceSandboxPolicy
+		present    bool
+		wantErrSub string
+	}{
+		{name: "absent exact is legacy"},
+		{name: "on", present: true, policy: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}}}},
+		{name: "off", present: true, policy: &db.ServiceSandboxPolicy{State: "off", Writable: []db.ServiceSandboxExposure{{Source: "/srv/cache", Destination: "/cache"}}}},
+		{name: "present nil", present: true, wantErrSub: "nil exact sandbox policy"},
+		{name: "stored legacy", present: true, policy: &db.ServiceSandboxPolicy{State: "legacy"}, wantErrSub: `sandbox state "legacy" is invalid`},
+		{name: "stored bogus", present: true, policy: &db.ServiceSandboxPolicy{State: "bogus"}, wantErrSub: `sandbox state "bogus" is invalid`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			const serviceName = "env-sandbox"
+			seedTask6NativeSandboxService(t, server, serviceName, nil)
+			if tt.present {
+				task11SetExactSandboxPolicy(t, server, serviceName, tt.policy)
+			}
+			before := testService(t, server, serviceName).Clone()
+			beforeFiles := task11DirectoryNames(t, server.serviceBinDir(serviceName))
+			runtimeCalls := 0
+
+			installer, err := NewFileInstaller(server, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: serviceName},
+				EnvFile:      true,
+				StageOnly:    true,
+				NewCmd: func(string, ...string) *exec.Cmd {
+					runtimeCalls++
+					return exec.Command("false")
+				},
+			})
+			if tt.wantErrSub != "" {
+				if installer != nil {
+					installer.Abort()
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Errorf("NewFileInstaller error = %v, want %q", err, tt.wantErrSub)
+				}
+				if installer != nil {
+					t.Error("NewFileInstaller returned an installer for invalid active sandbox state")
+				}
+				if runtimeCalls != 0 {
+					t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+				}
+				if after := testService(t, server, serviceName); !reflect.DeepEqual(after, before) {
+					t.Fatalf("invalid env-file generation mutated service:\nafter=%#v\nbefore=%#v", after, before)
+				}
+				if afterFiles := task11DirectoryNames(t, server.serviceBinDir(serviceName)); !reflect.DeepEqual(afterFiles, beforeFiles) {
+					t.Fatalf("invalid env-file generation mutated artifacts: after=%v before=%v", afterFiles, beforeFiles)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewFileInstaller: %v", err)
+			}
+			if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := installer.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			task6EAssertStagedSandboxPolicy(t, testService(t, server, serviceName), tt.policy)
+
+			generationInstaller, err := server.NewInstaller(InstallerCfg{ServiceName: serviceName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := generationInstaller.commitGen(0); err != nil {
+				t.Fatalf("commitGen: %v", err)
+			}
+			task6EAssertCommittedSandboxPolicy(t, testService(t, server, serviceName), tt.policy)
+		})
+	}
+}
+
+func TestTask11EnvFileCloseRevalidatesActiveSandboxPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		policy     *db.ServiceSandboxPolicy
+		present    bool
+		wantErrSub string
+	}{
+		{name: "absent exact is legacy"},
+		{name: "on", present: true, policy: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}}}},
+		{name: "off", present: true, policy: &db.ServiceSandboxPolicy{State: "off", Writable: []db.ServiceSandboxExposure{{Source: "/srv/cache", Destination: "/cache"}}}},
+		{name: "present nil", present: true, wantErrSub: "nil exact sandbox policy"},
+		{name: "stored legacy", present: true, policy: &db.ServiceSandboxPolicy{State: "legacy"}, wantErrSub: `sandbox state "legacy" is invalid`},
+		{name: "stored bogus", present: true, policy: &db.ServiceSandboxPolicy{State: "bogus"}, wantErrSub: `sandbox state "bogus" is invalid`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			const serviceName = "env-sandbox-close-recheck"
+			seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+			runtimeCalls := 0
+			installer, err := NewFileInstaller(server, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: serviceName},
+				EnvFile:      true,
+				StageOnly:    true,
+				NewCmd: func(string, ...string) *exec.Cmd {
+					runtimeCalls++
+					return exec.Command("false")
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewFileInstaller: %v", err)
+			}
+			if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			task11ReplaceExactSandboxPolicy(t, server, serviceName, tt.present, tt.policy)
+			before := testService(t, server, serviceName).Clone()
+			beforeEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName))
+			beforeUnit := task11PathProof(t, before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(before.Generation)])
+
+			err = installer.Close()
+			if tt.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				task6EAssertStagedSandboxPolicy(t, testService(t, server, serviceName), tt.policy)
+				generationInstaller, newErr := server.NewInstaller(InstallerCfg{ServiceName: serviceName})
+				if newErr != nil {
+					t.Fatal(newErr)
+				}
+				if _, _, commitErr := generationInstaller.commitGen(0); commitErr != nil {
+					t.Fatalf("commitGen: %v", commitErr)
+				}
+				task6EAssertCommittedSandboxPolicy(t, testService(t, server, serviceName), tt.policy)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Errorf("Close error = %v, want %q", err, tt.wantErrSub)
+			}
+			if after := testService(t, server, serviceName); !reflect.DeepEqual(after, before) {
+				t.Fatalf("invalid late env-file policy mutated service:\nafter=%#v\nbefore=%#v", after, before)
+			}
+			if afterEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName)); !reflect.DeepEqual(afterEnv, beforeEnv) {
+				t.Fatalf("invalid late env-file policy changed env artifacts:\nafter=%#v\nbefore=%#v", afterEnv, beforeEnv)
+			}
+			if afterUnit := task11PathProof(t, beforeUnit.Path); !reflect.DeepEqual(afterUnit, beforeUnit) {
+				t.Fatalf("invalid late env-file policy changed active unit:\nafter=%#v\nbefore=%#v", afterUnit, beforeUnit)
+			}
+			if runtimeCalls != 0 {
+				t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+			}
+		})
+	}
+}
+
+func TestTask11EnvFileCloseCleansOnlyOwnedArtifactAfterLateStagingFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		policy      *db.ServiceSandboxPolicy
+		replacement bool
+		wantErrSub  string
+	}{
+		{name: "present nil", wantErrSub: "nil exact sandbox policy"},
+		{name: "stored legacy", policy: &db.ServiceSandboxPolicy{State: "legacy"}, wantErrSub: `sandbox state "legacy" is invalid`},
+		{name: "stored bogus", policy: &db.ServiceSandboxPolicy{State: "bogus"}, wantErrSub: `sandbox state "bogus" is invalid`},
+		{name: "divergent replacement is preserved", policy: &db.ServiceSandboxPolicy{State: "bogus"}, replacement: true, wantErrSub: `sandbox state "bogus" is invalid`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			const serviceName = "env-sandbox-late-stage"
+			seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+			runtimeCalls := 0
+			installer, err := NewFileInstaller(server, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: serviceName},
+				EnvFile:      true,
+				StageOnly:    true,
+				Network:      NetworkOpts{Modes: []string{"svc"}},
+				NewCmd: func(string, ...string) *exec.Cmd {
+					runtimeCalls++
+					return exec.Command("false")
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewFileInstaller: %v", err)
+			}
+			if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			before := testService(t, server, serviceName).Clone()
+			beforeEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName))
+			beforeUnit := task11PathProof(t, before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(before.Generation)])
+
+			releaseAllocation := server.serviceOperationLocks.Lock(regularServiceNetworkAllocationLockName)
+			released := false
+			defer func() {
+				if !released {
+					releaseAllocation()
+				}
+			}()
+			closeResult := make(chan error, 1)
+			go func() { closeResult <- installer.Close() }()
+
+			owned := task11WaitForSingleEnvArtifact(t, server.serviceEnvDir(serviceName))
+			task11SetExactSandboxPolicy(t, server, serviceName, tt.policy)
+			concurrent := testService(t, server, serviceName).Clone()
+			var replacement serviceIdentityPathProof
+			if tt.replacement {
+				replacementSource := filepath.Join(t.TempDir(), "replacement")
+				if err := os.WriteFile(replacementSource, []byte("OPERATOR=value\n"), 0o600); err != nil {
+					t.Fatalf("write replacement: %v", err)
+				}
+				if err := os.Rename(replacementSource, owned.Path); err != nil {
+					t.Fatalf("replace moved env artifact: %v", err)
+				}
+				replacement = task11PathProof(t, owned.Path)
+				if replacement.Dev == owned.Dev && replacement.Ino == owned.Ino {
+					t.Fatal("replacement reused owned env artifact inode")
+				}
+			}
+			releaseAllocation()
+			released = true
+
+			err = <-closeResult
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Errorf("Close error = %v, want %q", err, tt.wantErrSub)
+			}
+			if after := testService(t, server, serviceName); !reflect.DeepEqual(after, concurrent) {
+				t.Fatalf("late staging failure changed concurrent service state:\nafter=%#v\nconcurrent=%#v", after, concurrent)
+			}
+			if afterUnit := task11PathProof(t, beforeUnit.Path); !reflect.DeepEqual(afterUnit, beforeUnit) {
+				t.Fatalf("late staging failure changed active unit:\nafter=%#v\nbefore=%#v", afterUnit, beforeUnit)
+			}
+			if runtimeCalls != 0 {
+				t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+			}
+			if tt.replacement {
+				if !strings.Contains(err.Error(), "changed from its durable provenance") {
+					t.Fatalf("Close error = %v, want divergent replacement provenance diagnostic", err)
+				}
+				if after := task11PathProof(t, replacement.Path); !reflect.DeepEqual(after, replacement) {
+					t.Fatalf("cleanup changed divergent replacement:\nafter=%#v\nreplacement=%#v", after, replacement)
+				}
+				return
+			}
+			if afterEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName)); !reflect.DeepEqual(afterEnv, beforeEnv) {
+				t.Fatalf("late staging failure left owned env artifact:\nafter=%#v\nbefore=%#v", afterEnv, beforeEnv)
+			}
+		})
+	}
+}
+
+func TestTask11EnvFileClosePreservesReplacementAfterCleanupQuarantineRename(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "env-sandbox-cleanup-race"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		EnvFile:      true,
+		StageOnly:    true,
+		Network:      NetworkOpts{Modes: []string{"svc"}},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	wantPath := filepath.Join(server.serviceEnvDir(serviceName), "env-"+installer.version())
+
+	const replacement = "OPERATOR=after-quarantine\n"
+	var hookErr error
+	hookCalled := false
+	oldAfterRename := afterServiceSandboxMutationCleanupRename
+	t.Cleanup(func() { afterServiceSandboxMutationCleanupRename = oldAfterRename })
+	afterServiceSandboxMutationCleanupRename = func(original, quarantine string) {
+		hookCalled = true
+		if original != wantPath || filepath.Dir(quarantine) == filepath.Dir(wantPath) {
+			hookErr = fmt.Errorf("cleanup rename = %q -> %q, want env artifact into private quarantine", original, quarantine)
+			return
+		}
+		hookErr = os.WriteFile(original, []byte(replacement), 0o600)
+	}
+
+	releaseAllocation := server.serviceOperationLocks.Lock(regularServiceNetworkAllocationLockName)
+	released := false
+	defer func() {
+		if !released {
+			releaseAllocation()
+		}
+	}()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- installer.Close() }()
+	owned := task11WaitForSingleEnvArtifact(t, server.serviceEnvDir(serviceName))
+	if owned.Path != wantPath {
+		releaseAllocation()
+		released = true
+		t.Fatalf("moved env artifact = %q, want %q", owned.Path, wantPath)
+	}
+	task11SetExactSandboxPolicy(t, server, serviceName, &db.ServiceSandboxPolicy{State: "bogus"})
+	concurrent := testService(t, server, serviceName).Clone()
+	releaseAllocation()
+	released = true
+
+	err = <-closeResult
+	if hookErr != nil {
+		t.Fatalf("cleanup quarantine hook: %v", hookErr)
+	}
+	if !hookCalled {
+		t.Error("env cleanup did not atomically quarantine the owned artifact")
+	}
+	if err == nil || !strings.Contains(err.Error(), `sandbox state "bogus" is invalid`) || !strings.Contains(err.Error(), "durable provenance") {
+		t.Errorf("Close error = %v, want staging failure plus replacement provenance diagnostic", err)
+	}
+	if after := testService(t, server, serviceName); !reflect.DeepEqual(after, concurrent) {
+		t.Fatalf("cleanup race changed concurrent service state:\nafter=%#v\nconcurrent=%#v", after, concurrent)
+	}
+	raw, readErr := os.ReadFile(wantPath)
+	if readErr != nil || string(raw) != replacement {
+		t.Fatalf("external replacement = %q, %v, want preserved %q", raw, readErr, replacement)
+	}
+	if artifacts := task11EnvCleanupQuarantineDirs(t, wantPath); len(artifacts) != 0 {
+		t.Fatalf("env cleanup quarantine artifacts = %q, want none", artifacts)
+	}
+}
+
+func TestTask11EnvFileCloseSameVersionCollisionPreservesActiveArtifact(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "env-sandbox-version-collision"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+	active := task11SeedActiveEnvArtifact(t, server, serviceName, "collision", "ACTIVE=value\n")
+	runtimeCalls := 0
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		EnvFile:      true,
+		StageOnly:    true,
+		NewCmd: func(string, ...string) *exec.Cmd {
+			runtimeCalls++
+			return exec.Command("false")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.ver = "collision"
+	if _, err := installer.Write([]byte("STAGED=value\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	before := testService(t, server, serviceName).Clone()
+	beforeUnit := task11PathProof(t, before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(before.Generation)])
+	wantStagedPath := active.Path + ".1"
+
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	after := testService(t, server, serviceName)
+	want := before.Clone()
+	want.Artifacts[db.ArtifactEnvFile].Refs["staged"] = wantStagedPath
+	want.Sandbox.Refs["staged"] = &db.ServiceSandboxPolicy{State: "off"}
+	if !reflect.DeepEqual(after, want) {
+		t.Errorf("valid collision staged unexpected service state:\nafter=%#v\nwant=%#v", after, want)
+	}
+	if got := task11PathProof(t, active.Path); !reflect.DeepEqual(got, active) {
+		t.Errorf("valid collision mutated active env artifact:\nafter=%#v\nbefore=%#v", got, active)
+	}
+	staged := task11PathProof(t, wantStagedPath)
+	if !staged.Present {
+		t.Errorf("collision-free staged env artifact is absent: %#v", staged)
+	} else if staged.Dev == active.Dev && staged.Ino == active.Ino {
+		t.Fatal("collision-free staged env artifact aliases active inode")
+	}
+	if raw, readErr := os.ReadFile(wantStagedPath); readErr != nil || string(raw) != "STAGED=value\n" {
+		t.Errorf("staged env artifact = %q, %v, want uploaded bytes", raw, readErr)
+	}
+	if afterUnit := task11PathProof(t, beforeUnit.Path); !reflect.DeepEqual(afterUnit, beforeUnit) {
+		t.Fatalf("valid collision changed active unit:\nafter=%#v\nbefore=%#v", afterUnit, beforeUnit)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+	if artifacts := task11EnvCleanupQuarantineDirs(t, active.Path); len(artifacts) != 0 {
+		t.Fatalf("active collision cleanup artifacts = %q, want none", artifacts)
+	}
+	if artifacts := task11EnvCleanupQuarantineDirs(t, wantStagedPath); len(artifacts) != 0 {
+		t.Fatalf("staged collision cleanup artifacts = %q, want none", artifacts)
+	}
+}
+
+func TestTask11EnvFileCloseLateInvalidSameVersionCollisionPreservesActiveArtifact(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "env-sandbox-invalid-version-collision"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+	active := task11SeedActiveEnvArtifact(t, server, serviceName, "collision", "ACTIVE=value\n")
+	runtimeCalls := 0
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		EnvFile:      true,
+		StageOnly:    true,
+		Network:      NetworkOpts{Modes: []string{"svc"}},
+		NewCmd: func(string, ...string) *exec.Cmd {
+			runtimeCalls++
+			return exec.Command("false")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.ver = "collision"
+	if _, err := installer.Write([]byte("STAGED=value\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	before := testService(t, server, serviceName).Clone()
+	beforeEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName))
+	beforeUnit := task11PathProof(t, before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(before.Generation)])
+	wantStagedPath := active.Path + ".1"
+
+	releaseAllocation := server.serviceOperationLocks.Lock(regularServiceNetworkAllocationLockName)
+	released := false
+	defer func() {
+		if !released {
+			releaseAllocation()
+		}
+	}()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- installer.Close() }()
+	task11WaitForEnvCollisionPublish(t, server.serviceEnvDir(serviceName), active)
+	task11SetExactSandboxPolicy(t, server, serviceName, &db.ServiceSandboxPolicy{State: "bogus"})
+	concurrent := testService(t, server, serviceName).Clone()
+	releaseAllocation()
+	released = true
+
+	err = <-closeResult
+	if err == nil || !strings.Contains(err.Error(), `sandbox state "bogus" is invalid`) {
+		t.Fatalf("Close error = %v, want late invalid sandbox policy", err)
+	}
+	if after := testService(t, server, serviceName); !reflect.DeepEqual(after, concurrent) {
+		t.Fatalf("invalid collision changed concurrent service state:\nafter=%#v\nconcurrent=%#v", after, concurrent)
+	}
+	if got := task11PathProof(t, active.Path); !reflect.DeepEqual(got, active) {
+		t.Errorf("invalid collision changed active env artifact:\nafter=%#v\nbefore=%#v", got, active)
+	}
+	if afterEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName)); !reflect.DeepEqual(afterEnv, beforeEnv) {
+		t.Errorf("invalid collision changed env directory:\nafter=%#v\nbefore=%#v", afterEnv, beforeEnv)
+	}
+	if staged := task11PathProof(t, wantStagedPath); staged.Present {
+		t.Fatalf("invalid collision left staged env artifact: %#v", staged)
+	}
+	if afterUnit := task11PathProof(t, beforeUnit.Path); !reflect.DeepEqual(afterUnit, beforeUnit) {
+		t.Fatalf("invalid collision changed active unit:\nafter=%#v\nbefore=%#v", afterUnit, beforeUnit)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+	if artifacts := task11EnvCleanupQuarantineDirs(t, active.Path); len(artifacts) != 0 {
+		t.Fatalf("active collision cleanup artifacts = %q, want none", artifacts)
+	}
+	if artifacts := task11EnvCleanupQuarantineDirs(t, wantStagedPath); len(artifacts) != 0 {
+		t.Fatalf("staged collision cleanup artifacts = %q, want none", artifacts)
+	}
+}
+
+func TestTask11EnvFileCloseCleansOwnedArtifactWhenStagingLockPlanningFails(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "env-sandbox-lock-plan"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		EnvFile:      true,
+		StageOnly:    true,
+		Network:      NetworkOpts{Modes: []string{"invalid"}},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	before := testService(t, server, serviceName).Clone()
+	beforeEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName))
+
+	err = installer.Close()
+	if err == nil || !strings.Contains(err.Error(), `unsupported network mode "invalid"`) {
+		t.Fatalf("Close error = %v, want unsupported invalid network mode", err)
+	}
+	if after := testService(t, server, serviceName); !reflect.DeepEqual(after, before) {
+		t.Fatalf("staging lock planning failure changed service:\nafter=%#v\nbefore=%#v", after, before)
+	}
+	if afterEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName)); !reflect.DeepEqual(afterEnv, beforeEnv) {
+		t.Fatalf("staging lock planning failure left owned env artifact:\nafter=%#v\nbefore=%#v", afterEnv, beforeEnv)
+	}
+}
+
+func TestTask11EnvFileCloseRejectsNonNotFoundReloadErrorBeforeMove(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "env-sandbox-reload-error"
+	runtimeCalls := 0
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		EnvFile:      true,
+		StageOnly:    true,
+		NewCmd: func(string, ...string) *exec.Cmd {
+			runtimeCalls++
+			return exec.Command("false")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if _, err := installer.Write([]byte("KEY=value\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	beforeEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName))
+	originalDB := server.cfg.DB
+	badDBPath := filepath.Join(t.TempDir(), "db-directory")
+	if err := os.Mkdir(badDBPath, 0o700); err != nil {
+		t.Fatalf("Mkdir bad DB path: %v", err)
+	}
+	server.cfg.DB = db.NewStore(badDBPath, server.cfg.ServicesRoot)
+	defer func() { server.cfg.DB = originalDB }()
+
+	err = installer.Close()
+	if err == nil || !strings.Contains(err.Error(), "reload env-file service before artifact move") || errors.Is(err, errServiceNotFound) {
+		t.Fatalf("Close error = %v, want non-not-found reload error", err)
+	}
+	if afterEnv := task11DirectoryProofs(t, server.serviceEnvDir(serviceName)); !reflect.DeepEqual(afterEnv, beforeEnv) {
+		t.Fatalf("reload error moved env artifact:\nafter=%#v\nbefore=%#v", afterEnv, beforeEnv)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+}
+
+func task11SetExactSandboxPolicy(t *testing.T, server *Server, serviceName string, policy *db.ServiceSandboxPolicy) {
+	t.Helper()
+	task11ReplaceExactSandboxPolicy(t, server, serviceName, true, policy)
+}
+
+func task11ReplaceExactSandboxPolicy(t *testing.T, server *Server, serviceName string, present bool, policy *db.ServiceSandboxPolicy) {
+	t.Helper()
+	_, _, err := server.cfg.DB.MutateService(serviceName, func(_ *db.Data, service *db.Service) error {
+		if !present {
+			if service.Sandbox != nil {
+				delete(service.Sandbox.Refs, db.Gen(service.Generation))
+			}
+			return nil
+		}
+		if service.Sandbox == nil {
+			service.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{}}
+		}
+		if service.Sandbox.Refs == nil {
+			service.Sandbox.Refs = map[db.ArtifactRef]*db.ServiceSandboxPolicy{}
+		}
+		service.Sandbox.Refs[db.Gen(service.Generation)] = policy.Clone()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("MutateService sandbox fixture: %v", err)
+	}
+}
+
+func task11PathProof(t *testing.T, path string) serviceIdentityPathProof {
+	t.Helper()
+	proof, err := captureServiceIdentityPathProof(path)
+	if err != nil {
+		t.Fatalf("capture path proof for %q: %v", path, err)
+	}
+	return proof
+}
+
+func task11DirectoryProofs(t *testing.T, path string) []serviceIdentityPathProof {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", path, err)
+	}
+	proofs := make([]serviceIdentityPathProof, len(entries))
+	for index, entry := range entries {
+		proofs[index] = task11PathProof(t, filepath.Join(path, entry.Name()))
+	}
+	return proofs
+}
+
+func task11WaitForSingleEnvArtifact(t *testing.T, path string) serviceIdentityPathProof {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		proofs := task11DirectoryProofs(t, path)
+		if len(proofs) == 1 {
+			return proofs[0]
+		}
+		if len(proofs) > 1 {
+			t.Fatalf("env directory %q contains %d artifacts, want one", path, len(proofs))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for moved env artifact in %q", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func task11SeedActiveEnvArtifact(t *testing.T, server *Server, serviceName, version, contents string) serviceIdentityPathProof {
+	t.Helper()
+	path := filepath.Join(server.serviceEnvDir(serviceName), "env-"+version)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write active env artifact: %v", err)
+	}
+	_, _, err := server.cfg.DB.MutateService(serviceName, func(_ *db.Data, service *db.Service) error {
+		service.Artifacts[db.ArtifactEnvFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+			db.Gen(service.Generation): path,
+			"latest":                   path,
+		}}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stage active env artifact fixture: %v", err)
+	}
+	return task11PathProof(t, path)
+}
+
+func task11WaitForEnvCollisionPublish(t *testing.T, dir string, active serviceIdentityPathProof) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		proofs := task11DirectoryProofs(t, dir)
+		current, err := captureServiceIdentityPathProof(active.Path)
+		if len(proofs) > 1 || err != nil || !reflect.DeepEqual(current, active) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for env collision publication in %q", dir)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func task11EnvCleanupQuarantineDirs(t *testing.T, path string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".sandbox-cleanup-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
+}
+
+func task11DirectoryNames(t *testing.T, path string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", path, err)
+	}
+	names := make([]string, len(entries))
+	for index, entry := range entries {
+		names[index] = entry.Name()
+	}
+	return names
+}
+
+func task6EAssertStagedSandboxPolicy(t *testing.T, service *db.Service, want *db.ServiceSandboxPolicy) {
+	t.Helper()
+	if want == nil {
+		if service.Sandbox != nil {
+			if got := service.Sandbox.Refs["staged"]; got != nil {
+				t.Fatalf("legacy env stage policy = %#v, want absent", got)
+			}
+		}
+		return
+	}
+	active := service.Sandbox.Refs[db.Gen(service.Generation)]
+	staged := service.Sandbox.Refs["staged"]
+	if !reflect.DeepEqual(staged, want) {
+		t.Fatalf("env-file staged sandbox = %#v, want exact active %#v", staged, want)
+	}
+	if staged == active {
+		t.Fatal("env-file staged sandbox aliases active generation policy")
+	}
+}
+
+func task6EAssertCommittedSandboxPolicy(t *testing.T, service *db.Service, want *db.ServiceSandboxPolicy) {
+	t.Helper()
+	if service.Generation != 2 {
+		t.Fatalf("committed generation = %d, want 2", service.Generation)
+	}
+	if want == nil {
+		task6EAssertLegacyCommittedSandbox(t, service)
+		return
+	}
+	staged := service.Sandbox.Refs["staged"]
+	latest := service.Sandbox.Refs["latest"]
+	generation := service.Sandbox.Refs[db.Gen(2)]
+	if !reflect.DeepEqual(latest, want) || !reflect.DeepEqual(generation, want) {
+		t.Fatalf("committed sandbox latest=%#v generation=%#v, want %#v", latest, generation, want)
+	}
+	if staged == latest || staged == generation || latest == generation {
+		t.Fatal("staged, latest, and committed generation sandbox policies alias")
+	}
+	staged.State = "mutated"
+	if latest.State != want.State || generation.State != want.State {
+		t.Fatalf("mutating staged sandbox changed committed refs: latest=%#v generation=%#v", latest, generation)
+	}
+}
+
+func task6EAssertLegacyCommittedSandbox(t *testing.T, service *db.Service) {
+	t.Helper()
+	if service.Sandbox == nil {
+		return
+	}
+	if got := service.Sandbox.Refs[db.Gen(2)]; got != nil {
+		t.Fatalf("legacy committed sandbox = %#v, want absent", got)
+	}
+}
+
+func TestTask6EEnvFileSandboxCarrierRejects(t *testing.T) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, task6FileInstallerCfgWithSandbox(t, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "env-carrier"},
+		EnvFile:      true,
+		StageOnly:    true,
+	}, cli.SandboxOptions{State: "on", StateSet: true}))
+	if installer != nil {
+		installer.Fail()
+		_ = installer.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "native binaries, scripts, and scheduled jobs") {
+		t.Fatalf("NewFileInstaller error = %v, want impossible env sandbox carrier rejection", err)
+	}
+	if _, viewErr := server.serviceView("env-carrier"); !errors.Is(viewErr, errServiceNotFound) {
+		t.Fatalf("env sandbox carrier created service: %v", viewErr)
+	}
+}
+
+func TestTask6ENonNativeNoBinarySandboxRejectsBeforeStaging(t *testing.T) {
+	server := newTestServer(t)
+	compose := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(compose, []byte("services:\n  app:\n    image: busybox\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	addTestServices(t, server, db.Service{
+		Name:        "compose-carrier",
+		ServiceType: db.ServiceTypeDockerCompose,
+		Generation:  1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): compose, "latest": compose}},
+		},
+	})
+	before := testService(t, server, "compose-carrier").Clone()
+	installer, err := NewFileInstaller(server, task6FileInstallerCfgWithSandbox(t, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "compose-carrier"},
+		NoBinary:     true,
+		StageOnly:    true,
+		Network:      NetworkOpts{Interfaces: "svc"},
+	}, cli.SandboxOptions{State: "on", StateSet: true}))
+	if err == nil {
+		err = installer.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "native binaries, scripts, and scheduled jobs") {
+		t.Fatalf("non-native NoBinary error = %v, want sandbox carrier rejection", err)
+	}
+	if after := testService(t, server, "compose-carrier"); !reflect.DeepEqual(after, before) {
+		t.Fatalf("non-native NoBinary sandbox request staged state:\nafter=%#v\nbefore=%#v", after, before)
+	}
+}
+
+func TestTask6FNativeISOPreflightFailuresRollBackExactReservation(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		for _, failAt := range []string{"validate", "render", "probe", "verify"} {
+			name := "fresh/" + failAt
+			if existing {
+				name = "existing/" + failAt
+			}
+			t.Run(name, func(t *testing.T) {
+				h := task6FNewISOFailureHarness(t, existing, failAt)
+				h.run()
+				h.assertRolledBack()
+			})
+		}
+	}
+}
+
+func TestTask6FNativeISOPreflightRollbackConflictTombstonesCurrentReservation(t *testing.T) {
+	h := task6FNewISOFailureHarness(t, true, "validate")
+	h.mutateReserved = func(reserved *db.Service) {
+		if _, _, err := h.server.cfg.DB.MutateService(h.serviceName, func(_ *db.Data, service *db.Service) error {
+			if !reflect.DeepEqual(service, reserved) {
+				return errors.New("reservation changed before injected conflict")
+			}
+			service.LatestGeneration = 73
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := h.run()
+	if err == nil || !strings.Contains(err.Error(), "changed while rolling back native ISO sandbox preflight") {
+		t.Fatalf("Close error = %v, want exact rollback conflict", err)
+	}
+	current := testService(t, h.server, h.serviceName)
+	if current.LatestGeneration != 73 {
+		t.Fatalf("rollback overwrote concurrent generation: %#v", current)
+	}
+	if current.ISO == nil || current.ISO.State != string(iso.StateTombstoned) {
+		t.Fatalf("rollback conflict ISO = %#v, want fail-closed tombstone", current.ISO)
+	}
+}
+
+type task6FISOFailureHarness struct {
+	t               *testing.T
+	server          *Server
+	installer       *FileInstaller
+	serviceName     string
+	failAt          string
+	failure         error
+	before          *db.Service
+	beforeArtifacts map[db.ArtifactName]string
+	reserved        *db.Service
+	stagedPaths     []string
+	mutateReserved  func(*db.Service)
+}
+
+func task6FNewISOFailureHarness(t *testing.T, existing bool, failAt string) *task6FISOFailureHarness {
+	t.Helper()
+	h := &task6FISOFailureHarness{
+		t: t, server: newTestServer(t), serviceName: "iso-preflight-rollback", failAt: failAt,
+		failure: errors.New("injected native ISO sandbox " + failAt + " failure"),
+	}
+	task6FConfigureISOPool(t, h.server)
+	if existing {
+		seedTask6NativeSandboxService(t, h.server, h.serviceName, &db.ServiceSandboxPolicy{State: "on"})
+		if _, _, err := h.server.cfg.DB.MutateService(h.serviceName, func(_ *db.Data, service *db.Service) error {
+			service.Network = &db.ServiceNetworkConfig{Modes: []string{"iso"}}
+			service.ISO = newDBISOAllocation(h.serviceName, isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}}, netip.MustParsePrefix("172.30.4.0/30"))
+			service.ISO.State = string(iso.StateReady)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h.before = testService(t, h.server, h.serviceName).Clone()
+	}
+	cfg := FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: h.serviceName},
+		Network:      NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true},
+		StageOnly:    true,
+		PayloadName:  "run",
+	}
+	if !existing {
+		cfg.RunAs = "70000:70001"
+		cfg.RunAsSet = true
+	}
+	installer, err := NewFileInstaller(h.server, cfg)
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	h.installer = installer
+	h.installFailureSeams()
+	return h
+}
+
+func task6FConfigureISOPool(t *testing.T, server *Server) {
+	t.Helper()
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{
+			Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *task6FISOFailureHarness) installFailureSeams() {
+	h.installer.ensureBubblewrapFunc = func(context.Context) error {
+		h.beforeArtifacts = task6FCloneArtifacts(h.installer.artifacts)
+		return nil
+	}
+	h.installer.validateServiceSandboxPolicyFunc = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+		h.captureReservedState()
+		if h.failAt == "validate" {
+			return serviceSandboxPolicy{}, h.failure
+		}
+		return normalizeServiceSandboxPolicy(req.Policy)
+	}
+	h.installer.renderNativeSandboxUnitFunc = func(raw string, req nativeSandboxUnitRequest, plan *serviceSandboxPlan) (string, *serviceSandboxPlan, error) {
+		h.captureReservedState()
+		if h.failAt == "render" {
+			return "", nil, h.failure
+		}
+		return renderNativeSandboxUnitWithPlan(raw, req, plan)
+	}
+	h.installer.probeServiceSandboxFunc = func(context.Context, serviceSandboxPlan, uint32, uint32) error {
+		h.captureReservedState()
+		if h.failAt == "probe" {
+			return h.failure
+		}
+		return nil
+	}
+	h.installer.verifyGeneratedSystemdUnitFunc = func(context.Context, string) error {
+		h.captureReservedState()
+		if h.failAt == "verify" {
+			return h.failure
+		}
+		return nil
+	}
+}
+
+func (h *task6FISOFailureHarness) captureReservedState() {
+	h.t.Helper()
+	current := testService(h.t, h.server, h.serviceName)
+	if current.ISO == nil || current.ISO.State != string(iso.StateReserved) {
+		h.t.Fatalf("preflight phase observed ISO record %#v, want reserved", current.ISO)
+	}
+	h.reserved = current.Clone()
+	for name, path := range h.installer.artifacts {
+		if name == db.ArtifactBinary || h.beforeArtifacts[name] == path || slices.Contains(h.stagedPaths, path) {
+			continue
+		}
+		h.stagedPaths = append(h.stagedPaths, path)
+	}
+	if h.mutateReserved != nil {
+		mutate := h.mutateReserved
+		h.mutateReserved = nil
+		mutate(h.reserved.Clone())
+	}
+}
+
+func (h *task6FISOFailureHarness) run() error {
+	h.t.Helper()
+	if _, err := h.installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		h.t.Fatal(err)
+	}
+	err := h.installer.Close()
+	if err == nil || !errors.Is(err, h.failure) {
+		h.t.Fatalf("Close error = %v, want %v", err, h.failure)
+	}
+	if h.reserved == nil {
+		h.t.Fatal("failure seam did not observe exact reserved service record")
+	}
+	return err
+}
+
+func (h *task6FISOFailureHarness) assertRolledBack() {
+	h.t.Helper()
+	h.assertServiceRolledBack()
+	h.assertInstallerStateRolledBack()
+	h.assertStagedArtifactsRemoved()
+	h.assertExistingPayloadPreserved()
+}
+
+func (h *task6FISOFailureHarness) assertServiceRolledBack() {
+	h.t.Helper()
+	if h.before == nil {
+		if _, err := h.server.serviceView(h.serviceName); !errors.Is(err, errServiceNotFound) {
+			h.t.Fatalf("fresh failed preflight retained service: %v", err)
+		}
+	} else if current := testService(h.t, h.server, h.serviceName); !reflect.DeepEqual(current, h.before) {
+		h.t.Fatalf("existing failed preflight record changed:\ncurrent=%#v\nbefore=%#v\nreserved=%#v", current, h.before, h.reserved)
+	}
+}
+
+func (h *task6FISOFailureHarness) assertInstallerStateRolledBack() {
+	h.t.Helper()
+	if h.installer.isoAllocation != nil {
+		h.t.Fatalf("installer ISO allocation after rollback = %#v, want nil", h.installer.isoAllocation)
+	}
+	if !reflect.DeepEqual(h.installer.artifacts, h.beforeArtifacts) {
+		h.t.Fatalf("installer artifacts after rollback = %#v, want %#v", h.installer.artifacts, h.beforeArtifacts)
+	}
+}
+
+func (h *task6FISOFailureHarness) assertStagedArtifactsRemoved() {
+	h.t.Helper()
+	for _, path := range h.stagedPaths {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			h.t.Fatalf("new staged ISO artifact remains at %q: %v", path, err)
+		}
+	}
+}
+
+func (h *task6FISOFailureHarness) assertExistingPayloadPreserved() {
+	h.t.Helper()
+	if payload := h.beforeArtifacts[db.ArtifactBinary]; payload == "" {
+		h.t.Fatal("immutable payload was absent before ISO reservation")
+	} else if h.before != nil {
+		if _, err := os.Stat(payload); err != nil {
+			h.t.Fatalf("immutable payload removed during ISO rollback: %v", err)
+		}
+	}
+}
+
+func task6FCloneArtifacts(artifacts map[db.ArtifactName]string) map[db.ArtifactName]string {
+	cloned := make(map[db.ArtifactName]string, len(artifacts))
+	for name, path := range artifacts {
+		cloned[name] = path
+	}
+	return cloned
+}
+
+func TestTask6DNoBinaryExistingOnStaysSandboxedAndPreservesPayloadArgs(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "no-binary-on"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "on"})
+	payload := task6DWriteActiveSandboxUnit(t, server, serviceName)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		NoBinary:     true,
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	task6StubNativeSandboxPreflight(installer)
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6DAssertNoBinarySandbox(t, testService(t, server, serviceName), payload)
+}
+
+func task6DWriteActiveSandboxUnit(t *testing.T, server *Server, serviceName string) string {
+	t.Helper()
+	service := testService(t, server, serviceName)
+	payload := service.Artifacts[db.ArtifactBinary].Refs[db.Gen(service.Generation)]
+	unitPath := service.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(service.Generation)]
+	execStart, err := svc.RenderSystemdExecStart([]string{bubblewrapPath, "--unshare-user", "--", payload, "--old", "two words"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "[Service]\nExecStart=" + execStart + "\nWorkingDirectory=/\nEnvironment=HOME=" + server.serviceDataDir(serviceName) + " USER=70000 LOGNAME=70000 SHELL=/bin/sh\nUser=70000\nGroup=70001\n"
+	if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func task6DAssertNoBinarySandbox(t *testing.T, after *db.Service, payload string) {
+	t.Helper()
+	policy := after.Sandbox.Refs[db.ArtifactRef("staged")]
+	if policy == nil || policy.State != "on" {
+		t.Fatalf("staged policy = %#v, want on", policy)
+	}
+	stagedUnit := after.Artifacts[db.ArtifactSystemdUnit].Refs[db.ArtifactRef("staged")]
+	raw, err := os.ReadFile(stagedUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := task6BExecStart(t, string(raw))
+	if len(argv) == 0 || argv[0] != bubblewrapPath || task6BCount(argv, "--") != 1 {
+		t.Fatalf("NoBinary on ExecStart = %#v, want one sandbox separator", argv)
+	}
+	separator := slices.Index(argv, "--")
+	wantPayloadArgv := []string{payload, "--old", "two words"}
+	if separator < 0 || !reflect.DeepEqual(argv[separator+1:], wantPayloadArgv) {
+		t.Fatalf("NoBinary payload argv = %#v, want %#v", argv[separator+1:], wantPayloadArgv)
+	}
+}
+
+func TestTask6DNativeISOUsesBubblewrapResolverAndHelpersRemainDirect(t *testing.T) {
+	t.Run("fresh native ISO", task6DRunNativeISO)
+
+	for _, serviceName := range []string{CatchService, SystemService} {
+		t.Run("helper "+serviceName, func(t *testing.T) { task6DRunHelper(t, serviceName) })
+	}
+}
+
+func task6DRunNativeISO(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "sandbox-native-iso"}, Network: NetworkOpts{Interfaces: "iso"},
+		RunAs: "70000:70001", RunAsSet: true, StageOnly: true, PayloadName: "run.sh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task6StubNativeSandboxPreflight(installer)
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6DAssertNativeISO(t, testService(t, server, "sandbox-native-iso"))
+}
+
+func task6DAssertNativeISO(t *testing.T, service *db.Service) {
+	t.Helper()
+	unitRaw, err := os.ReadFile(service.Artifacts[db.ArtifactSystemdUnit].Refs["staged"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := task6BExecStart(t, string(unitRaw))
+	resolver := service.Artifacts[db.ArtifactNetNSResolv].Refs["staged"]
+	if len(argv) == 0 || argv[0] != bubblewrapPath || task6BCount(argv, "--") != 1 {
+		t.Fatalf("native ISO ExecStart = %#v", argv)
+	}
+	if !slices.Contains(argv, resolver) || strings.Contains(string(unitRaw), "BindReadOnlyPaths="+resolver+":/etc/resolv.conf") {
+		t.Fatalf("native ISO resolver was not moved into Bubblewrap argv:\n%s\nargv=%#v", unitRaw, argv)
+	}
+}
+
+func task6DRunHelper(t *testing.T, serviceName string) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: serviceName}, StageOnly: true, PayloadName: "run.sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer.ensureManagedServiceAccount = task6SandboxIdentity
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6DAssertHelperDirect(t, testService(t, server, serviceName))
+}
+
+func task6DAssertHelperDirect(t *testing.T, service *db.Service) {
+	t.Helper()
+	if service.Sandbox != nil {
+		t.Fatalf("helper sandbox = %#v, want absent", service.Sandbox)
+	}
+	unitArtifact := service.Artifacts[db.ArtifactSystemdUnit]
+	if unitArtifact == nil {
+		return
+	}
+	unitPath, ok := unitArtifact.Refs["staged"]
+	if !ok {
+		return
+	}
+	unitRaw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unitRaw), bubblewrapPath) {
+		t.Fatalf("helper unit uses Bubblewrap:\n%s", unitRaw)
+	}
+}
+
+func task6CAssertImmutablePayload(t *testing.T, installer *FileInstaller, want string) {
+	t.Helper()
+	path := installer.artifacts[db.ArtifactBinary]
+	if path == "" || strings.HasSuffix(path, ".tmp") {
+		t.Fatalf("preflight payload path = %q, want immutable generation artifact", path)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("preflight payload does not exist at %q: %v", path, err)
+	}
+	if string(got) != want {
+		t.Fatalf("preflight payload bytes = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("preflight payload mode = %#o, want executable", info.Mode().Perm())
+	}
+}
+
+func task6CAssertUnitNotPrepared(t *testing.T, installer *FileInstaller, phase string) {
+	t.Helper()
+	if path := installer.artifacts[db.ArtifactSystemdUnit]; path != "" {
+		t.Fatalf("systemd unit path at %s = %q, want absent until dependency and policy validation succeed", phase, path)
+	}
+}
+
+func task6CAssertServiceEqual(t *testing.T, server *Server, name string, want *db.Service, phase string) {
+	t.Helper()
+	got := testService(t, server, name)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("service changed %s:\n got: %#v\nwant: %#v", phase, got, want)
+	}
+}
+
+func seedTask6CTimer(t *testing.T, server *Server, name string) {
+	t.Helper()
+	timerPath := filepath.Join(server.serviceBinDir(name), name+"-1.timer")
+	if err := os.WriteFile(timerPath, []byte("[Timer]\nOnCalendar=hourly\nPersistent=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		service.Artifacts[db.ArtifactSystemdTimerFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{"latest": timerPath, db.Gen(1): timerPath}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1093,6 +2654,7 @@ func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {
 			RequestedUser: "1000", RequestedGroup: "1000", UID: 1000, GID: 1000,
 		}}, nil
 	}
+	task6StubNativeSandboxPreflight(installer)
 	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
 		t.Fatalf("Write returned error: %v", err)
 	}
@@ -1610,6 +3172,7 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 			RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001,
 		}}, nil
 	}
+	task6StubNativeSandboxPreflight(installer)
 	if _, err := installer.Write([]byte("#!/bin/sh\necho hi\n")); err != nil {
 		t.Fatalf("Write returned error: %v", err)
 	}
@@ -1638,8 +3201,8 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 	}
 	unit := string(unitRaw)
 	for _, want := range []string{
-		fmt.Sprintf("ExecStart=%s --flag\n", binaryPath),
-		fmt.Sprintf("WorkingDirectory=%s\n", server.serviceDataDir("script-svc")),
+		"ExecStart=" + bubblewrapPath + " ",
+		"WorkingDirectory=/\n",
 		fmt.Sprintf("EnvironmentFile=-%s\n", filepath.Join(server.serviceEnvDir("script-svc"), "env")),
 		"User=70000\n",
 		"Group=70001\n",
@@ -1648,6 +3211,367 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
 		}
 	}
+}
+
+func TestTask6AFreshNativeSandboxDefaultsAndDormantOff(t *testing.T) {
+	tests := []task6AFreshCase{
+		{name: "binary defaults on", want: &db.ServiceSandboxPolicy{State: "on"}},
+		{name: "script exposure defaults on", options: cli.SandboxOptions{ReadOnly: []cli.SandboxExposure{{Source: "/srv/input", Destination: "/input"}}, ReadOnlySet: true}, want: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}}}},
+		{name: "timer defaults on", timer: &svc.TimerConfig{OnCalendar: "hourly", Persistent: true}, want: &db.ServiceSandboxPolicy{State: "on"}},
+		{name: "explicit off preserves dormant lists", options: cli.SandboxOptions{State: "off", StateSet: true, ReadOnly: []cli.SandboxExposure{{Source: "/missing/input", Destination: "/input"}}, ReadOnlySet: true, Writable: []cli.SandboxExposure{{Source: "/missing/cache", Destination: "/cache"}}, WritableSet: true}, want: &db.ServiceSandboxPolicy{State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/missing/input", Destination: "/input"}}, Writable: []db.ServiceSandboxExposure{{Source: "/missing/cache", Destination: "/cache"}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { task6ARunFreshSandbox(t, tt) })
+	}
+}
+
+type task6AFreshCase struct {
+	name    string
+	options cli.SandboxOptions
+	timer   *svc.TimerConfig
+	want    *db.ServiceSandboxPolicy
+}
+
+func task6ARunFreshSandbox(t *testing.T, tt task6AFreshCase) {
+	t.Helper()
+	options, want := task6AMaterializeFreshSources(t, tt.options, tt.want.Clone())
+	server := newTestServer(t)
+	cfg := task6FileInstallerCfgWithSandbox(t, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "fresh-sandbox", Timer: tt.timer}, StageOnly: true, PayloadName: "payload.sh",
+	}, options)
+	installer, err := NewFileInstaller(server, cfg)
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.ensureManagedServiceAccount = task6SandboxIdentity
+	task6StubNativeSandboxPreflight(installer)
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	service := testService(t, server, "fresh-sandbox")
+	if service.Sandbox == nil {
+		t.Fatalf("staged sandbox = nil, want %#v", want)
+	}
+	if got := service.Sandbox.Refs[db.ArtifactRef("staged")]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged sandbox = %#v, want %#v", got, want)
+	}
+}
+
+func task6AMaterializeFreshSources(t *testing.T, options cli.SandboxOptions, want *db.ServiceSandboxPolicy) (cli.SandboxOptions, *db.ServiceSandboxPolicy) {
+	t.Helper()
+	if want.State != "on" {
+		return options, want
+	}
+	for index := range want.ReadOnly {
+		source := filepath.Join(t.TempDir(), strings.TrimPrefix(want.ReadOnly[index].Destination, "/"))
+		if err := os.MkdirAll(source, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		want.ReadOnly[index].Source = source
+		task6AReplaceCLISource(&options, want.ReadOnly[index].Destination, source)
+	}
+	return options, want
+}
+
+func task6AReplaceCLISource(options *cli.SandboxOptions, destination, source string) {
+	for index := range options.ReadOnly {
+		if options.ReadOnly[index].Destination == destination {
+			options.ReadOnly[index].Source = source
+		}
+	}
+}
+
+func TestTask6AExistingRunPreservesOnlyExactActiveSandboxPolicy(t *testing.T) {
+	tests := []task6AExistingCase{
+		{name: "legacy omitted"},
+		{name: "on omitted", active: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}}}, wantPolicy: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}}}},
+		{name: "off omitted", active: &db.ServiceSandboxPolicy{State: "off", Writable: []db.ServiceSandboxExposure{{Source: "/missing/cache", Destination: "/cache"}}}, wantPolicy: &db.ServiceSandboxPolicy{State: "off", Writable: []db.ServiceSandboxExposure{{Source: "/missing/cache", Destination: "/cache"}}}},
+		{name: "explicit normalized equality", active: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/b", Destination: "/b"}, {Source: "/srv/a", Destination: "/a"}}}, options: cli.SandboxOptions{State: "on", StateSet: true, ReadOnly: []cli.SandboxExposure{{Source: "/srv/a", Destination: "/a"}, {Source: "/srv/b", Destination: "/b"}}, ReadOnlySet: true}, wantPolicy: &db.ServiceSandboxPolicy{State: "on", ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/a", Destination: "/a"}, {Source: "/srv/b", Destination: "/b"}}}},
+		{name: "state drift", active: &db.ServiceSandboxPolicy{State: "on"}, options: cli.SandboxOptions{State: "off", StateSet: true}, wantErr: true},
+		{name: "list drift", active: &db.ServiceSandboxPolicy{State: "off", ReadOnly: []db.ServiceSandboxExposure{{Source: "/old", Destination: "/old"}}}, options: cli.SandboxOptions{State: "off", StateSet: true, ReadOnly: []cli.SandboxExposure{{Source: "/new", Destination: "/new"}}, ReadOnlySet: true, ReadOnlyReset: true}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { task6ARunExistingSandbox(t, tt) })
+	}
+}
+
+func TestTask11ExistingNativeRunRejectsNilExactSandboxPolicyBeforeSideEffects(t *testing.T) {
+	server := newTestServer(t)
+	const serviceName = "nil-sandbox-policy"
+	seedTask6NativeSandboxService(t, server, serviceName, &db.ServiceSandboxPolicy{State: "off"})
+	if _, _, err := server.cfg.DB.MutateService(serviceName, func(_ *db.Data, service *db.Service) error {
+		service.Sandbox.Refs[db.Gen(service.Generation)] = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("seed nil exact sandbox policy: %v", err)
+	}
+
+	before := testService(t, server, serviceName).Clone()
+	binDir := server.serviceBinDir(serviceName)
+	entriesBefore, err := os.ReadDir(binDir)
+	if err != nil {
+		t.Fatalf("read service bin directory before run: %v", err)
+	}
+	unitPath := before.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(before.Generation)]
+	unitBefore, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read active unit before run: %v", err)
+	}
+	runtimeCalls := 0
+
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName},
+		StageOnly:    true,
+		PayloadName:  "payload.sh",
+		NewCmd: func(name string, args ...string) *exec.Cmd {
+			runtimeCalls++
+			return exec.Command(name, args...)
+		},
+	})
+	if installer != nil {
+		t.Fatalf("NewFileInstaller returned installer %#v, want nil", installer)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nil exact sandbox policy") {
+		t.Fatalf("NewFileInstaller error = %v, want nil exact sandbox policy rejection", err)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime command calls = %d, want zero", runtimeCalls)
+	}
+	if after := testService(t, server, serviceName); !reflect.DeepEqual(after, before) {
+		t.Fatalf("service changed after rejected run:\n got %#v\nwant %#v", after, before)
+	}
+	entriesAfter, err := os.ReadDir(binDir)
+	if err != nil {
+		t.Fatalf("read service bin directory after run: %v", err)
+	}
+	if !reflect.DeepEqual(entriesAfter, entriesBefore) {
+		t.Fatalf("service bin entries changed after rejected run: got %#v, want %#v", entriesAfter, entriesBefore)
+	}
+	if unitAfter, readErr := os.ReadFile(unitPath); readErr != nil || !bytes.Equal(unitAfter, unitBefore) {
+		t.Fatalf("active unit changed after rejected run: %v\n%s", readErr, unitAfter)
+	}
+}
+
+type task6AExistingCase struct {
+	name       string
+	active     *db.ServiceSandboxPolicy
+	options    cli.SandboxOptions
+	wantPolicy *db.ServiceSandboxPolicy
+	wantErr    bool
+}
+
+func task6ARunExistingSandbox(t *testing.T, tt task6AExistingCase) {
+	t.Helper()
+	active, options, wantPolicy := task6AMaterializeExistingSources(t, tt.active.Clone(), tt.options, tt.wantPolicy.Clone())
+	server := newTestServer(t)
+	const serviceName = "api;printf-pwned"
+	seedTask6NativeSandboxService(t, server, serviceName, active)
+	cfg := task6FileInstallerCfgWithSandbox(t, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: serviceName}, StageOnly: true, PayloadName: "payload.sh",
+	}, options)
+	installer, err := NewFileInstaller(server, cfg)
+	if tt.wantErr {
+		task6AAssertExistingDrift(t, err)
+		return
+	}
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.ensureManagedServiceAccount = task6SandboxIdentity
+	task6StubNativeSandboxPreflight(installer)
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	task6AAssertExistingPolicy(t, testService(t, server, serviceName), wantPolicy)
+}
+
+func task6AMaterializeExistingSources(t *testing.T, active *db.ServiceSandboxPolicy, options cli.SandboxOptions, want *db.ServiceSandboxPolicy) (*db.ServiceSandboxPolicy, cli.SandboxOptions, *db.ServiceSandboxPolicy) {
+	t.Helper()
+	if active == nil || active.State != "on" {
+		return active, options, want
+	}
+	for index := range active.ReadOnly {
+		destination := active.ReadOnly[index].Destination
+		source := filepath.Join(t.TempDir(), strings.TrimPrefix(destination, "/"))
+		if err := os.MkdirAll(source, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		active.ReadOnly[index].Source = source
+		task6AReplaceDBSource(want, destination, source)
+		task6AReplaceCLISource(&options, destination, source)
+	}
+	return active, options, want
+}
+
+func task6AReplaceDBSource(policy *db.ServiceSandboxPolicy, destination, source string) {
+	if policy == nil {
+		return
+	}
+	for index := range policy.ReadOnly {
+		if policy.ReadOnly[index].Destination == destination {
+			policy.ReadOnly[index].Source = source
+		}
+	}
+}
+
+func task6AAssertExistingDrift(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "yeet service set 'api;printf-pwned'") {
+		t.Fatalf("NewFileInstaller error = %v, want shell-safe service-set guidance", err)
+	}
+}
+
+func task6AAssertExistingPolicy(t *testing.T, service *db.Service, want *db.ServiceSandboxPolicy) {
+	t.Helper()
+	if want == nil {
+		if service.Sandbox != nil {
+			if _, ok := service.Sandbox.Refs[db.ArtifactRef("staged")]; ok {
+				t.Fatalf("legacy install persisted staged policy: %#v", service.Sandbox)
+			}
+		}
+		return
+	}
+	if got := service.Sandbox.Refs[db.ArtifactRef("staged")]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged policy = %#v, want %#v", got, want)
+	}
+}
+
+func TestTask6ASandboxRefsCommitDeeplyIndependentGenerations(t *testing.T) {
+	policy := &db.ServiceSandboxPolicy{
+		State:    "on",
+		ReadOnly: []db.ServiceSandboxExposure{{Source: "/srv/input", Destination: "/input"}},
+	}
+	service := &db.Service{
+		Name: "api",
+		Sandbox: &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			"staged": policy,
+		}},
+	}
+	commitGeneratedServiceRefs(nil, service, service.Name, generatedServiceCommitForGen(0, 0))
+	latest := service.Sandbox.Refs["latest"]
+	generation := service.Sandbox.Refs[db.Gen(1)]
+	if latest == nil || generation == nil || !reflect.DeepEqual(latest, policy) || !reflect.DeepEqual(generation, policy) {
+		t.Fatalf("committed sandbox refs = %#v", service.Sandbox.Refs)
+	}
+	if latest == policy || generation == policy || latest == generation {
+		t.Fatal("staged, latest, and generation policies alias each other")
+	}
+	latest.ReadOnly[0].Destination = "/mutated-latest"
+	generation.ReadOnly[0].Destination = "/mutated-generation"
+	if policy.ReadOnly[0].Destination != "/input" {
+		t.Fatalf("staged policy mutated through committed refs: %#v", policy)
+	}
+}
+
+func TestTask6AContainerPayloadSandboxFlagsRejectAfterDetectionWithoutSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		payloadName string
+		payload     string
+	}{
+		{name: "compose", payloadName: "compose.yml", payload: "services:\n  app:\n    image: busybox\n"},
+		{name: "python", payloadName: "main.py", payload: "print('hello')\n"},
+		{name: "typescript", payloadName: "main.ts", payload: "console.log('hello')\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			cfg := task6FileInstallerCfgWithSandbox(t, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "container-sandbox"},
+				StageOnly:    true,
+				PayloadName:  tt.payloadName,
+			}, cli.SandboxOptions{State: "on", StateSet: true})
+			installer, err := NewFileInstaller(server, cfg)
+			if err != nil {
+				t.Fatalf("NewFileInstaller: %v", err)
+			}
+			if _, err := installer.Write([]byte(tt.payload)); err != nil {
+				t.Fatal(err)
+			}
+			err = installer.Close()
+			if err == nil || !strings.Contains(err.Error(), "native binaries, scripts, and scheduled jobs") {
+				t.Fatalf("Close error = %v, want native-only sandbox guidance", err)
+			}
+			if _, viewErr := server.serviceView("container-sandbox"); !errors.Is(viewErr, errServiceNotFound) {
+				t.Fatalf("service after rejected container payload = %v, want absent", viewErr)
+			}
+		})
+	}
+}
+
+func task6FileInstallerCfgWithSandbox(t *testing.T, cfg FileInstallerCfg, options cli.SandboxOptions) FileInstallerCfg {
+	t.Helper()
+	value := reflect.ValueOf(&cfg).Elem().FieldByName("Sandbox")
+	if !value.IsValid() {
+		t.Fatal("FileInstallerCfg has no Sandbox field")
+	}
+	value.Set(reflect.ValueOf(options))
+	return cfg
+}
+
+func task6SandboxIdentity() (resolvedServiceIdentity, error) {
+	return resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+		RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001,
+	}}, nil
+}
+
+func task6StubNativeSandboxPreflight(installer *FileInstaller) {
+	installer.ensureBubblewrapFunc = func(context.Context) error { return nil }
+	installer.validateServiceSandboxPolicyFunc = func(req serviceSandboxPlanRequest, _ bool) (serviceSandboxPolicy, error) {
+		return normalizeServiceSandboxPolicy(req.Policy)
+	}
+	installer.probeServiceSandboxFunc = func(context.Context, serviceSandboxPlan, uint32, uint32) error { return nil }
+	installer.verifyGeneratedSystemdUnitFunc = func(context.Context, string) error { return nil }
+}
+
+func seedTask6NativeSandboxService(t *testing.T, server *Server, name string, policy *db.ServiceSandboxPolicy) {
+	t.Helper()
+	root := server.defaultServiceRootDir(name)
+	if err := ensureDirsForRoot(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(server.serviceBinDir(name), name+"-1")
+	unit := filepath.Join(server.serviceBinDir(name), name+"-1.service")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{payload, "--old"}
+	workingDirectory := server.serviceDataDir(name)
+	if policy != nil && policy.State == "on" {
+		argv = []string{bubblewrapPath, "--unshare-user", "--", payload, "--old"}
+		workingDirectory = "/"
+	}
+	execStart, err := svc.RenderSystemdExecStart(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte("[Service]\nExecStart="+execStart+"\nWorkingDirectory="+workingDirectory+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := db.Service{
+		Name:             name,
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       1,
+		LatestGeneration: 1,
+		Identity:         &db.ServiceIdentity{RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001},
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{"latest": payload, db.Gen(1): payload}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"latest": unit, db.Gen(1): unit, "staged": unit}},
+		},
+	}
+	if policy != nil {
+		service.Sandbox = &db.ServiceSandboxStore{Refs: map[db.ArtifactRef]*db.ServiceSandboxPolicy{
+			"latest": policy.Clone(), db.Gen(1): policy.Clone(),
+		}}
+	}
+	addTestServices(t, server, service)
 }
 
 func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) {
@@ -1681,6 +3605,7 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
+			task6StubNativeSandboxPreflight(installer)
 			if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
 				t.Fatal(err)
 			}
@@ -1704,13 +3629,18 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 				"NetworkNamespacePath=/var/run/netns/" + service.ISO.NetNS + "\n",
 				"Requires=yeet-" + service.Name + "-ns.service\n",
 				"After=yeet-" + service.Name + "-ns.service\n",
-				"BindReadOnlyPaths=" + stagedArtifactPath(t, service, db.ArtifactNetNSResolv) + ":/etc/resolv.conf\n",
+				"WorkingDirectory=/\n",
 			} {
 				if !strings.Contains(unit, want) {
 					t.Errorf("native ISO unit missing %q:\n%s", want, unit)
 				}
 			}
-			for _, forbidden := range []string{"NoNewPrivileges=", "CapabilityBoundingSet=", "AmbientCapabilities=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
+			argv := task6BExecStart(t, unit)
+			resolver := stagedArtifactPath(t, service, db.ArtifactNetNSResolv)
+			if len(argv) == 0 || argv[0] != bubblewrapPath || task6BCount(argv, "--") != 1 || !slices.Contains(argv, resolver) {
+				t.Errorf("native ISO sandbox argv = %#v, want Bubblewrap with resolver %q", argv, resolver)
+			}
+			for _, forbidden := range []string{"BindReadOnlyPaths=" + resolver + ":/etc/resolv.conf", "NoNewPrivileges=", "CapabilityBoundingSet=", "AmbientCapabilities=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
 				if strings.Contains(unit, forbidden) {
 					t.Errorf("native ISO networking added privilege policy %q:\n%s", forbidden, unit)
 				}

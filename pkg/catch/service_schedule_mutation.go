@@ -389,6 +389,15 @@ func cloneActiveServiceGeneration(previous *db.Service, stagedTimer string) (*db
 			artifact.Refs[db.ArtifactRef("staged")] = path
 		}
 	}
+	if target.Sandbox != nil {
+		delete(target.Sandbox.Refs, db.ArtifactRef("staged"))
+		if policy, ok := target.Sandbox.Refs[db.Gen(previous.Generation)]; ok {
+			if policy == nil {
+				return nil, fmt.Errorf("active schedule generation has a nil exact sandbox policy")
+			}
+			target.Sandbox.Refs[db.ArtifactRef("staged")] = policy.Clone()
+		}
+	}
 	timer := target.Artifacts[db.ArtifactSystemdTimerFile]
 	if timer == nil || timer.Refs == nil {
 		return nil, errors.New(scheduledServiceSetOnlyMessage)

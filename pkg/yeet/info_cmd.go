@@ -362,7 +362,7 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 		renderServiceSection(service, host, client, server),
 		renderVMSection(server),
 		renderClientSection(client, server),
-		renderServerSection(server),
+		renderServerSectionForService(service, server),
 		renderNetworkSection(server),
 		renderRuntimeSection(service, server),
 		renderImagesSection(server),
@@ -840,6 +840,10 @@ func clientEntryMetadataRows(entry *clientServiceEntry) []infoRow {
 }
 
 func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
+	return renderServerSectionForService("SERVICE", server)
+}
+
+func renderServerSectionForService(service string, server catchrpc.ServiceInfoResponse) infoSection {
 	rows := []infoRow{}
 	if !server.Found {
 		msg := server.Message
@@ -865,10 +869,52 @@ func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
 			rows = append(rows, infoRow{Label: "Identity warning", Value: info.Identity.Mismatch})
 		}
 	}
+	rows = append(rows, serviceSandboxInfoRows(service, info.Sandbox)...)
 	if info.Paths.Root != "" {
 		rows = append(rows, infoRow{Label: "Root dir", Value: info.Paths.Root})
 	}
 	return infoSection{Title: "Server (catch)", Rows: rows}
+}
+
+func serviceSandboxInfoRows(service string, sandbox *catchrpc.ServiceSandbox) []infoRow {
+	if sandbox == nil || strings.TrimSpace(sandbox.State) == "" {
+		return nil
+	}
+	state := strings.TrimSpace(sandbox.State)
+	rows := []infoRow{{Label: "Sandbox", Value: state}}
+	if values := formatInfoSandboxExposures(sandbox.ReadOnly); values != "" {
+		rows = append(rows, infoRow{Label: "Sandbox read-only", Value: values})
+	}
+	if values := formatInfoSandboxExposures(sandbox.Writable); values != "" {
+		rows = append(rows, infoRow{Label: "Sandbox writable", Value: values})
+	}
+	if state == "legacy" {
+		service = strings.TrimSpace(service)
+		if service == "" {
+			service = "SERVICE"
+		}
+		command := shellJoin([]string{"yeet", "service", "set", service, "--sandbox=on"})
+		rows = append(rows, infoRow{Label: "Sandbox migration", Value: command + "  (or --sandbox=off)"})
+	}
+	return rows
+}
+
+func formatInfoSandboxExposures(exposures []catchrpc.ServiceSandboxExposure) string {
+	values := make([]string, 0, len(exposures))
+	for _, exposure := range exposures {
+		source := strings.TrimSpace(exposure.Source)
+		destination := strings.TrimSpace(exposure.Destination)
+		if source == "" || destination == "" {
+			continue
+		}
+		value := source
+		if destination != source {
+			value += ":" + destination
+		}
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return strings.Join(values, ", ")
 }
 
 func formatServiceIdentityInfo(identity *catchrpc.ServiceIdentity) string {
