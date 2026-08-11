@@ -179,9 +179,15 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Update `website/docs/changelog.mdx` with a new date section and 1-3
   user-facing bullets for the release. The latest release entry must stand
   alone for someone installing or upgrading.
-- Scope release notes to the commits between the previous published release tag
-  and the tag being prepared. Do not summarize the entire minor series unless
-  the user explicitly asks for a roll-up release note.
+- For a feature release, lead with the capability and its user benefit. Explain
+  what Yeet now does by default, what happens to existing services, and any
+  command or choice needed to adopt or configure the feature. Do not lead with
+  the final compatibility fix, host-policy detail, or other implementation
+  work that made the feature possible.
+- Scope patch release notes to the commits between the previous published tag
+  and the tag being prepared. A minor or major release that launches a feature
+  should explain the complete user-facing feature even when preparatory work
+  appeared in earlier patch tags; do not pull in unrelated prior changes.
 - Before writing release notes, inspect the actual commit range (for example,
   `git log <previous-tag>..HEAD`) and translate only user-visible behavior,
   compatibility, migration, reliability, or operational changes from that range.
@@ -241,6 +247,9 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - The latest version section must make sense if it is the only section a user
   sees. It should answer "what changed for me?" without requiring them to read
   the previous version.
+- Treat release notes as the announcement and explanation of a shipped feature,
+  not a list of implementation hurdles. Name the feature first, then describe
+  its defaults, controls, compatibility, migration, or required user action.
 - Use plain, user-facing language focused on behavior changes, new capabilities,
   reliability fixes, compatibility notes, and required user action. Avoid
   internal refactors, tests, implementation details, commit chronology, and
