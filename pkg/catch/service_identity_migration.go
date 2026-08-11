@@ -3849,10 +3849,42 @@ func verifyServiceIdentityUnitDirectives(check serviceIdentityMigrationVerificat
 	if directives["User"] != check.Identity.RequestedUser || directives["Group"] != check.Identity.RequestedGroup {
 		return fmt.Errorf("installed unit identity is %s:%s, want %s:%s", directives["User"], directives["Group"], check.Identity.RequestedUser, check.Identity.RequestedGroup)
 	}
-	if filepath.Clean(directives["WorkingDirectory"]) != filepath.Clean(serviceDataDirForRoot(check.Root)) {
+	if !serviceIdentityUnitUsesExpectedWorkingDirectory(directives, serviceDataDirForRoot(check.Root)) {
 		return fmt.Errorf("installed unit working directory is %q, want %q", directives["WorkingDirectory"], serviceDataDirForRoot(check.Root))
 	}
 	return nil
+}
+
+func serviceIdentityUnitUsesExpectedWorkingDirectory(directives map[string]string, expected string) bool {
+	if filepath.Clean(directives["WorkingDirectory"]) == filepath.Clean(expected) {
+		return true
+	}
+	if filepath.Clean(directives["WorkingDirectory"]) != "/" {
+		return false
+	}
+	argv, err := svc.ParseSystemdExecStart(directives["ExecStart"])
+	if err != nil || len(argv) == 0 || argv[0] != bubblewrapPath {
+		return false
+	}
+	chdir, ok := serviceIdentitySandboxChdir(argv[1:])
+	return ok && filepath.Clean(chdir) == filepath.Clean(expected)
+}
+
+func serviceIdentitySandboxChdir(arguments []string) (string, bool) {
+	chdir := ""
+	for index := 0; index < len(arguments); index++ {
+		switch arguments[index] {
+		case "--":
+			return chdir, chdir != ""
+		case "--chdir":
+			if chdir != "" || index+1 >= len(arguments) || arguments[index+1] == "--" {
+				return "", false
+			}
+			chdir = arguments[index+1]
+			index++
+		}
+	}
+	return chdir, chdir != ""
 }
 
 func serviceIdentityUsesTimer(service *db.Service) bool {

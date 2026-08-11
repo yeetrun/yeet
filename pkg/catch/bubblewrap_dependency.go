@@ -23,6 +23,8 @@ const (
 	bubblewrapPath     = "/usr/bin/bwrap"
 	bubblewrapLockPath = "/run/yeet/bubblewrap.ensure.lock"
 	aptGetPath         = "/usr/bin/apt-get"
+	bubblewrapProbeUID = 65534
+	bubblewrapProbeGID = 65534
 
 	bubblewrapLockDir          = "/run/yeet"
 	bubblewrapLockPollInterval = 10 * time.Millisecond
@@ -56,16 +58,16 @@ func (f bubblewrapOSFile) Stat() (bubblewrapFileStat, error) {
 }
 
 type bubblewrapDependencyDeps struct {
-	lstat         func(string) (bubblewrapFileStat, error)
-	open          func(string, int, os.FileMode) (bubblewrapDependencyFile, error)
-	mkdir         func(string, os.FileMode) error
-	flock         func(int, int) error
-	run           func(context.Context, string, []string, []string) ([]byte, error)
-	geteuid       func() int
-	getegid       func() int
-	pathPresent   func(string) bool
-	readOSRelease func() (string, error)
-	environ       func() []string
+	lstat                  func(string) (bubblewrapFileStat, error)
+	open                   func(string, int, os.FileMode) (bubblewrapDependencyFile, error)
+	mkdir                  func(string, os.FileMode) error
+	flock                  func(int, int) error
+	run                    func(context.Context, string, []string, []string) ([]byte, error)
+	runAs                  serviceSandboxCommandRunner
+	pathPresent            func(string) bool
+	readOSRelease          func() (string, error)
+	environ                func() []string
+	ensureRestrictedUserNS func(context.Context, error) error
 }
 
 // EnsureBubblewrap makes the fixed host Bubblewrap binary ready for native
@@ -102,14 +104,14 @@ func defaultBubblewrapDependencyDeps() bubblewrapDependencyDeps {
 			err := command.Run()
 			return stderr.Bytes(), err
 		},
-		geteuid: os.Geteuid,
-		getegid: os.Getegid,
+		runAs: runServiceSandboxCommand,
 		pathPresent: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
 		},
-		readOSRelease: readBubblewrapOSRelease,
-		environ:       os.Environ,
+		readOSRelease:          readBubblewrapOSRelease,
+		environ:                os.Environ,
+		ensureRestrictedUserNS: ensureRestrictedBubblewrapAppArmor,
 	}
 }
 
@@ -141,7 +143,11 @@ func ensureBubblewrapWith(ctx context.Context, deps bubblewrapDependencyDeps) (e
 			return fmt.Errorf("trusted Bubblewrap package installation completed without providing /usr/bin/bwrap")
 		}
 	}
-	return probeBubblewrap(ctx, deps)
+	probeErr := probeBubblewrap(ctx, deps)
+	if probeErr == nil {
+		return nil
+	}
+	return deps.ensureRestrictedUserNS(ctx, probeErr)
 }
 
 func acquireBubblewrapDependencyLock(ctx context.Context, deps bubblewrapDependencyDeps) (func() error, error) {
@@ -451,8 +457,12 @@ func bubblewrapAPTSupported(osRelease string) bool {
 }
 
 func probeBubblewrap(ctx context.Context, deps bubblewrapDependencyDeps) error {
-	args := bubblewrapProbeArgs(deps.geteuid(), deps.getegid(), deps.pathPresent)
-	output, err := deps.run(ctx, bubblewrapPath, args, nil)
+	args := bubblewrapProbeArgs(bubblewrapProbeUID, bubblewrapProbeGID, deps.pathPresent)
+	output, err := deps.runAs(ctx, serviceSandboxCommand{
+		Path:       bubblewrapPath,
+		Arguments:  args,
+		Credential: &syscall.Credential{Uid: bubblewrapProbeUID, Gid: bubblewrapProbeGID},
+	})
 	if err == nil {
 		return nil
 	}
@@ -495,7 +505,7 @@ func bubblewrapFixedRuntimeMountArgs(pathPresent func(string) bool) []string {
 }
 
 func bubblewrapManualInstallGuidance(deps bubblewrapDependencyDeps) string {
-	command := append([]string{bubblewrapPath}, bubblewrapProbeArgs(deps.geteuid(), deps.getegid(), deps.pathPresent)...)
+	command := append([]string{bubblewrapPath}, bubblewrapProbeArgs(bubblewrapProbeUID, bubblewrapProbeGID, deps.pathPresent)...)
 	return "Install the bubblewrap package at /usr/bin/bwrap manually, then verify host user-namespace and AppArmor policy with: " + strings.Join(command, " ")
 }
 

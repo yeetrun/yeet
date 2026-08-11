@@ -319,11 +319,18 @@ filesystem and process visibility, but it is not VM isolation. A root workload
 still shares the host kernel, so an escape has host-root consequences.
 
 Catch installs and probes Bubblewrap for a fresh Catch installation and when a
-new or changed native service results in sandbox state `on`. Ordinary Yeet or
-Catch upgrades and services that remain `legacy` or explicitly remain `off` do
-not install it. An exposure-only edit of an `off` service results in `on` and
-therefore installs and probes Bubblewrap; include `--sandbox=off` in that edit
-to keep the exposures dormant. See the
+new or changed native service results in sandbox state `on`. On compatible
+Ubuntu hosts where AppArmor restricts unprivileged user namespaces, Catch also
+installs and loads the exact Yeet-owned profile at
+`/etc/apparmor.d/yeet-bwrap`, then repeats the non-root probe. Debian and hosts
+without that restriction use only the Bubblewrap package. Catch never disables
+AppArmor or changes a host-wide user-namespace sysctl. A divergent file at the
+managed path is preserved and blocks activation with recovery guidance.
+
+Ordinary Yeet or Catch upgrades and services that remain `legacy` or
+explicitly remain `off` do not install the dependency. An exposure-only edit
+of an `off` service results in `on` and therefore runs dependency readiness;
+include `--sandbox=off` in that edit to keep the exposures dormant. See the
 [native sandboxing guide](https://yeetrun.com/docs/concepts/native-sandboxing)
 for the complete policy and troubleshooting steps.
 

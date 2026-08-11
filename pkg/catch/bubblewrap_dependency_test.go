@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,9 +19,10 @@ import (
 )
 
 type bubblewrapTestCommand struct {
-	path string
-	args []string
-	env  []string
+	path       string
+	args       []string
+	env        []string
+	credential *syscall.Credential
 }
 
 type bubblewrapTestStatResult struct {
@@ -240,20 +242,32 @@ func (h *bubblewrapTestHost) deps() bubblewrapDependencyDeps {
 			}
 			return nil, errors.New("unexpected command")
 		},
-		geteuid: func() int { return 123 },
-		getegid: func() int { return 456 },
+		runAs: func(_ context.Context, command serviceSandboxCommand) ([]byte, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.commands = append(h.commands, bubblewrapTestCommand{
+				path:       command.Path,
+				args:       append([]string(nil), command.Arguments...),
+				credential: command.Credential,
+			})
+			if command.Path == bubblewrapPath {
+				return []byte(h.probeOutput), h.probeErr
+			}
+			return nil, errors.New("unexpected credentialed command")
+		},
 		pathPresent: func(path string) bool {
 			return path == "/bin" || path == "/lib64"
 		},
-		readOSRelease: func() (string, error) { return h.osRelease, h.osReleaseErr },
-		environ:       func() []string { return []string{"PATH=/trusted"} },
+		readOSRelease:          func() (string, error) { return h.osRelease, h.osReleaseErr },
+		environ:                func() []string { return []string{"PATH=/trusted"} },
+		ensureRestrictedUserNS: func(_ context.Context, initial error) error { return initial },
 	}
 }
 
 func expectedBubblewrapProbeArgs() []string {
 	return []string{
 		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--disable-userns",
-		"--uid", "123", "--gid", "456",
+		"--uid", "65534", "--gid", "65534",
 		"--hostname", "yeet-bwrap-probe",
 		"--new-session", "--die-with-parent",
 		"--ro-bind", "/usr", "/usr",
@@ -281,6 +295,42 @@ func TestEnsureBubblewrapTrustedBinarySkipsAptAndRunsExactProbe(t *testing.T) {
 		if containsBubblewrapArg(command.args, forbidden) {
 			t.Fatalf("probe contains forbidden argument %q: %#v", forbidden, command.args)
 		}
+	}
+}
+
+func TestEnsureBubblewrapRunsReadinessProbeAsFixedNonRootCredential(t *testing.T) {
+	host := newBubblewrapTestHost()
+	if err := ensureBubblewrapWith(context.Background(), host.deps()); err != nil {
+		t.Fatalf("ensureBubblewrapWith: %v", err)
+	}
+
+	if len(host.commands) != 1 {
+		t.Fatalf("commands = %#v, want one Bubblewrap probe", host.commands)
+	}
+	credential := host.commands[0].credential
+	if credential == nil || credential.Uid != 65534 || credential.Gid != 65534 {
+		t.Fatalf("credential = %#v, want UID 65534 GID 65534", credential)
+	}
+}
+
+func TestEnsureBubblewrapRepairsOnlyFailedNonRootProbe(t *testing.T) {
+	host := newBubblewrapTestHost()
+	host.probeErr = errors.New("uid map denied")
+	deps := host.deps()
+	repairCalls := 0
+	deps.ensureRestrictedUserNS = func(_ context.Context, initial error) error {
+		repairCalls++
+		if !errors.Is(initial, host.probeErr) {
+			t.Fatalf("initial error = %v, want wrapped %v", initial, host.probeErr)
+		}
+		return nil
+	}
+
+	if err := ensureBubblewrapWith(context.Background(), deps); err != nil {
+		t.Fatalf("ensureBubblewrapWith: %v", err)
+	}
+	if repairCalls != 1 {
+		t.Fatalf("restricted-userns repair calls = %d, want 1", repairCalls)
 	}
 }
 
@@ -414,7 +464,7 @@ func TestEnsureBubblewrapMissingBinaryInstallsThenReinspectsAndProbes(t *testing
 	want := []bubblewrapTestCommand{
 		{path: "/usr/bin/apt-get", args: []string{"update"}},
 		{path: "/usr/bin/apt-get", args: []string{"install", "-y", "bubblewrap"}, env: []string{"PATH=/trusted", "DEBIAN_FRONTEND=noninteractive"}},
-		{path: "/usr/bin/bwrap", args: expectedBubblewrapProbeArgs()},
+		{path: "/usr/bin/bwrap", args: expectedBubblewrapProbeArgs(), credential: &syscall.Credential{Uid: 65534, Gid: 65534}},
 	}
 	if !reflect.DeepEqual(host.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", host.commands, want)
@@ -564,7 +614,7 @@ func TestEnsureBubblewrapRejectsUntrustedBinaryWithoutAptOrProbe(t *testing.T) {
 }
 
 func TestEnsureBubblewrapMissingBinaryReturnsExactManualGuidance(t *testing.T) {
-	const probe = "/usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts --disable-userns --uid 123 --gid 456 --hostname yeet-bwrap-probe --new-session --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run -- /usr/bin/true"
+	const probe = "/usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts --disable-userns --uid 65534 --gid 65534 --hostname yeet-bwrap-probe --new-session --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run -- /usr/bin/true"
 	for _, test := range []struct {
 		name      string
 		osRelease string
@@ -666,9 +716,9 @@ func TestEnsureBubblewrapSerializesAndRechecksAfterLock(t *testing.T) {
 	releaseFirstProbe := make(chan struct{})
 	var probeMu sync.Mutex
 	probeCalls := 0
-	originalRun := deps.run
-	deps.run = func(ctx context.Context, path string, args, env []string) ([]byte, error) {
-		if path == bubblewrapPath {
+	originalRunAs := deps.runAs
+	deps.runAs = func(ctx context.Context, command serviceSandboxCommand) ([]byte, error) {
+		if command.Path == bubblewrapPath {
 			probeMu.Lock()
 			probeCalls++
 			call := probeCalls
@@ -682,7 +732,7 @@ func TestEnsureBubblewrapSerializesAndRechecksAfterLock(t *testing.T) {
 				}
 			}
 		}
-		return originalRun(ctx, path, args, env)
+		return originalRunAs(ctx, command)
 	}
 
 	errCh := make(chan error, 2)

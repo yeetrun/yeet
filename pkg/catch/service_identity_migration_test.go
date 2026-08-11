@@ -2899,6 +2899,66 @@ func TestRewriteServiceIdentityUnitPreservesSandboxHomeAndWorkingDirectory(t *te
 	}
 }
 
+func TestVerifyServiceIdentityUnitDirectivesAcceptsOnlyExactSandboxWorkingDirectory(t *testing.T) {
+	root := "/srv/api"
+	dataDir := serviceDataDirForRoot(root)
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1001, GID: 1002}
+	renderExecStart := func(t *testing.T, argv []string) string {
+		t.Helper()
+		rendered, err := svc.RenderSystemdExecStart(argv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rendered
+	}
+	tests := []struct {
+		name      string
+		execStart string
+		wantErr   bool
+	}{
+		{
+			name: "sandbox chdir",
+			execStart: renderExecStart(t, []string{
+				bubblewrapPath, "--ro-bind", root + "/bin/api", root + "/bin/api",
+				"--chdir", dataDir, "--", root + "/bin/api",
+			}),
+		},
+		{
+			name:      "direct unit",
+			execStart: renderExecStart(t, []string{root + "/bin/api"}),
+			wantErr:   true,
+		},
+		{
+			name: "sandbox wrong chdir",
+			execStart: renderExecStart(t, []string{
+				bubblewrapPath, "--chdir", "/srv/other/data", "--", root + "/bin/api",
+			}),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unitPath := filepath.Join(t.TempDir(), "api.service")
+			unit := "[Service]\nExecStart=" + tt.execStart + "\nUser=app\nGroup=workers\nWorkingDirectory=/\n"
+			if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := verifyServiceIdentityUnitDirectives(serviceIdentityMigrationVerification{
+				UnitPath: unitPath, Identity: identity, Root: root,
+			})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "installed unit working directory") {
+					t.Fatalf("verify error = %v, want working-directory rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify sandbox working directory: %v", err)
+			}
+		})
+	}
+}
+
 func TestRewriteServiceIdentityUnitRecognizesSandboxLayoutIndependentOfDirectiveOrder(t *testing.T) {
 	root := "/srv/api"
 	dataDir := root + "/data"
