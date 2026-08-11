@@ -927,6 +927,77 @@ func TestServiceSandboxMutationBuildsIndependentActiveGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceSandboxMutationCanonicalizesLegacyRuntimePathsBeforeSandboxRender(t *testing.T) {
+	server, service := newServiceSandboxMutationFixture(t, serviceSandboxPolicy{State: "legacy"})
+	root := server.defaultServiceRootDir(service.Name)
+	runDir := serviceRunDirForRoot(root)
+	payload := filepath.Join(serviceBinDirForRoot(root), "api-v1")
+	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := filepath.Join(root, "env", "env-v1")
+	if err := os.MkdirAll(filepath.Dir(env), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env, []byte("KEY=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unit := service.Artifacts[db.ArtifactSystemdUnit].Refs[db.Gen(service.Generation)]
+	legacyPayload := filepath.Join(runDir, service.Name)
+	legacyEnv := filepath.Join(runDir, "env")
+	raw := "[Unit]\nConditionFileIsExecutable=" + legacyPayload + "\n" +
+		"[Service]\nExecStart=" + legacyPayload + " --serve\n" +
+		"WorkingDirectory=" + serviceDataDirForRoot(root) + "\n" +
+		"EnvironmentFile=" + legacyEnv + "\nUser=legacy\nGroup=legacy\n"
+	if err := os.WriteFile(unit, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service.Artifacts[db.ArtifactBinary].Refs[db.Gen(service.Generation)] = payload
+	service.Artifacts[db.ArtifactBinary].Refs["latest"] = payload
+	service.Artifacts[db.ArtifactEnvFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(service.Generation): env,
+		"latest":                   env,
+	}}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{service.Name: service.Clone()}}); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := installServiceSandboxMutationTestDeps(t)
+	defer restore()
+	ensureBubblewrapForServiceSandboxMutation = func(context.Context) error { return nil }
+	probeServiceSandboxForMutation = func(context.Context, serviceSandboxPlan, uint32, uint32) error { return nil }
+	verifyGeneratedSystemdUnitForSandboxMutation = func(context.Context, string) error { return nil }
+
+	plan, err := server.planServiceSandboxMutation(context.Background(), service.Name, cli.SandboxOptions{State: "on", StateSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := os.ReadFile(plan.stagedUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedEnv := filepath.Join(root, "env", "env")
+	for _, want := range []string{bubblewrapPath, payload, "EnvironmentFile=" + installedEnv, "User=root", "Group=root"} {
+		if !strings.Contains(string(rendered), want) {
+			t.Fatalf("rendered sandbox unit missing %q:\n%s", want, rendered)
+		}
+	}
+	for _, stale := range []string{
+		"ConditionFileIsExecutable=" + legacyPayload,
+		"ExecStart=" + legacyPayload,
+		"EnvironmentFile=" + legacyEnv,
+		"User=legacy",
+		"Group=legacy",
+	} {
+		if strings.Contains(string(rendered), stale) {
+			t.Fatalf("rendered sandbox unit retains legacy directive %q:\n%s", stale, rendered)
+		}
+	}
+}
+
 func TestServiceSandboxMutationPreflightOrderCleanupAndCancellation(t *testing.T) {
 	t.Run("ordered success", func(t *testing.T) {
 		server, service := newServiceSandboxMutationFixture(t, serviceSandboxPolicy{State: "off"})
@@ -1324,9 +1395,11 @@ func newServiceSandboxMutationFixture(t *testing.T, policy serviceSandboxPolicy)
 	server := newTestServer(t)
 	root := server.defaultServiceRootDir("api")
 	dataDir := serviceDataDirForRoot(root)
-	binDir := serviceRunDirForRoot(root)
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatal(err)
+	binDir := serviceBinDirForRoot(root)
+	for _, dir := range []string{dataDir, serviceRunDirForRoot(root)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	payload := filepath.Join(binDir, "api-v1")
 	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {

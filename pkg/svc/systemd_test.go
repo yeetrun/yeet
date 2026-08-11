@@ -1733,6 +1733,40 @@ func TestNewISONetworkUnitGatesServiceOnVerifiedBoundary(t *testing.T) {
 	}
 }
 
+func TestSystemdServiceRenderRewritesISONetworkGateToStableCatchRunner(t *testing.T) {
+	service, err := NewSystemdService(
+		nil,
+		(&db.Service{Name: "app", Generation: 1}).View(),
+		"/srv/app/run",
+		WithTailscaleGuardRunner("/srv/catch/run/catch"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldRunner = "/srv/catch/bin/catch-old"
+	raw := "[Unit]\nDescription=yeet ISO network gate for app\n" +
+		"ConditionFileIsExecutable=" + oldRunner + "\n\n" +
+		"[Service]\nExecStart=" + oldRunner + " -data-dir /srv/yeet iso-network-ensure app\n" +
+		"ExecStop=" + oldRunner + " -data-dir /srv/yeet iso-network-clean app\n"
+
+	rendered, err := service.renderSystemdUnitContent(installStep{artifact: db.ArtifactNetNSService}, []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ConditionFileIsExecutable=/srv/catch/run/catch",
+		"ExecStart=/srv/catch/run/catch -data-dir /srv/yeet iso-network-ensure app",
+		"ExecStop=/srv/catch/run/catch -data-dir /srv/yeet iso-network-clean app",
+	} {
+		if !strings.Contains(string(rendered), want) {
+			t.Fatalf("rendered ISO gate missing %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(string(rendered), oldRunner) {
+		t.Fatalf("rendered ISO gate retained old Catch runner:\n%s", rendered)
+	}
+}
+
 func TestNewISONetworkUnitRejectsAmbiguousArguments(t *testing.T) {
 	for _, test := range []struct{ service, catchBin, dataDir string }{
 		{service: "", catchBin: "/usr/bin/catch", dataDir: "/var/lib/yeet"},

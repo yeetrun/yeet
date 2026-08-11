@@ -564,6 +564,9 @@ func (s *SystemdService) renderSystemdUnitArtifact(step installStep, srcPath str
 }
 
 func (s *SystemdService) renderSystemdUnitContent(step installStep, raw []byte) ([]byte, error) {
+	if step.artifact == db.ArtifactNetNSService {
+		raw = []byte(s.rewriteISONetworkGateRunner(string(raw)))
+	}
 	raw = []byte(s.rewriteLegacyRuntimePaths(string(raw)))
 	identity := s.cfg.Identity()
 	if step.artifact == db.ArtifactSystemdUnit && identity.Valid() {
@@ -574,6 +577,31 @@ func (s *SystemdService) renderSystemdUnitContent(step installStep, raw []byte) 
 		raw = []byte(rewritten)
 	}
 	return raw, nil
+}
+
+func (s *SystemdService) rewriteISONetworkGateRunner(raw string) string {
+	runner := strings.TrimSpace(s.tailscaleGuardRunner)
+	if runner == "" {
+		return raw
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		command, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart=")
+		if !ok {
+			continue
+		}
+		arguments := strings.Fields(command)
+		for index := 1; index+1 < len(arguments); index++ {
+			if arguments[index] != "iso-network-ensure" || arguments[index+1] != s.Name() {
+				continue
+			}
+			oldRunner := arguments[0]
+			if !filepath.IsAbs(oldRunner) || oldRunner == runner {
+				return raw
+			}
+			return strings.ReplaceAll(raw, oldRunner, runner)
+		}
+	}
+	return raw
 }
 
 func (s *SystemdService) rewriteLegacyRuntimePaths(raw string) string {

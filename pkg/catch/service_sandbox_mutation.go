@@ -17,6 +17,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 var (
@@ -119,6 +120,19 @@ func (s *Server) preflightServiceSandboxMutation(
 	if err != nil {
 		return nil, fmt.Errorf("read active sandbox unit: %w", err)
 	}
+	systemdService, err := svc.NewSystemdService(
+		s.cfg.DB,
+		sv,
+		serviceRunDirForRoot(serviceRootFromConfig(s.cfg, *previous)),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load service %q for sandbox unit rendering: %w", previous.Name, err)
+	}
+	canonicalUnit, err := systemdService.RenderPrimaryUnit(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize service %q active sandbox unit: %w", previous.Name, err)
+	}
 	identity := effectiveServiceIdentity(sv)
 	resolver := serviceSandboxMutationResolver(sv)
 	request := serviceSandboxPlanRequest{
@@ -135,7 +149,7 @@ func (s *Server) preflightServiceSandboxMutation(
 		CurrentPolicy: current, TargetPolicy: targetPolicy, Identity: identity.Persisted,
 		Payload: payload, DataDir: request.DataDir, Resolver: resolver, Hostname: previous.Name,
 	}
-	rendered, sandboxPlan, err := renderNativeSandboxUnitForServiceSandboxMutation(string(raw), unitRequest, validatedPlan)
+	rendered, sandboxPlan, err := renderNativeSandboxUnitForServiceSandboxMutation(canonicalUnit, unitRequest, validatedPlan)
 	if err != nil {
 		return nil, fmt.Errorf("render service %q sandbox unit: %w", previous.Name, err)
 	}
