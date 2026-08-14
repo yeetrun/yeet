@@ -175,13 +175,43 @@ func TestInstallISONativeOrdersActivationInspectionAndReady(t *testing.T) {
 	}
 }
 
+func TestMarkNativeISOReadyExactAcceptsOwnedWorkloadGateTransition(t *testing.T) {
+	server := newTestServer(t)
+	expected := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+		ISO: testISONativeRuntimeAllocation("api", iso.StateReserved),
+	}
+	current := expected.Clone()
+	current.ISO.State = string(iso.StateReady)
+	if err := server.cfg.DB.Set(&db.Data{
+		ISOPool:  &db.ISOPool{AggregateRouteState: "ready"},
+		Services: map[string]*db.Service{"api": current},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := &db.ServiceNetworkConfig{Modes: []string{"iso"}}
+
+	if err := server.markNativeISOReadyExact(expected, desired); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := server.serviceView("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ISO().State() != string(iso.StateReady) || !reflect.DeepEqual(got.Network().AsStruct(), desired) {
+		t.Fatalf("ready service = %#v, want owned gate transition with desired network", got.AsStruct())
+	}
+}
+
 func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *testing.T) {
 	cause := errors.New("activation failed")
 	for _, tt := range []struct {
-		name       string
-		concurrent func(*db.Service)
-		wantStop   bool
-		wantState  iso.AllocationState
+		name         string
+		mutate       func(*db.Service)
+		wantConflict bool
+		wantStop     bool
+		wantState    iso.AllocationState
 	}{
 		{
 			name:      "attributable record is quarantined then stopped",
@@ -189,16 +219,25 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 			wantState: iso.StateQuarantined,
 		},
 		{
+			name: "owned workload gate transition is quarantined then stopped",
+			mutate: func(service *db.Service) {
+				service.ISO.State = string(iso.StateReady)
+			},
+			wantStop:  true,
+			wantState: iso.StateQuarantined,
+		},
+		{
 			name: "concurrent replacement is neither changed nor stopped",
-			concurrent: func(service *db.Service) {
+			mutate: func(service *db.Service) {
 				service.Network = &db.ServiceNetworkConfig{Modes: []string{"host"}}
 				service.ISO = nil
 			},
-			wantState: iso.StateReserved,
+			wantConflict: true,
+			wantState:    iso.StateReserved,
 		},
 		{
 			name: "concurrent Compose replacement is neither changed nor stopped",
-			concurrent: func(service *db.Service) {
+			mutate: func(service *db.Service) {
 				service.ServiceType = db.ServiceTypeDockerCompose
 				service.Network = &db.ServiceNetworkConfig{Modes: []string{"host"}}
 				service.ISO = nil
@@ -206,7 +245,8 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 					"latest": "/unused/compose.yml",
 				}}}
 			},
-			wantState: iso.StateReserved,
+			wantConflict: true,
+			wantState:    iso.StateReserved,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,9 +263,9 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 				t.Fatal(err)
 			}
 			expected := record.Clone()
-			if tt.concurrent != nil {
+			if tt.mutate != nil {
 				if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
-					tt.concurrent(service)
+					tt.mutate(service)
 					return nil
 				}); err != nil {
 					t.Fatal(err)
@@ -259,10 +299,10 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 
 			steps := &isoNativeSystemdInstallSteps{si: &Installer{s: server}, record: expected}
 			err = steps.Quarantine(context.Background(), cause)
-			if tt.concurrent == nil && err != nil {
+			if !tt.wantConflict && err != nil {
 				t.Fatal(err)
 			}
-			if tt.concurrent != nil && (err == nil || !strings.Contains(err.Error(), "changed")) {
+			if tt.wantConflict && (err == nil || !strings.Contains(err.Error(), "changed")) {
 				t.Fatalf("Quarantine error = %v, want exact-record conflict", err)
 			}
 			if got := stopCalls > 0; got != tt.wantStop {
@@ -275,7 +315,7 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tt.concurrent != nil {
+			if tt.wantConflict {
 				if !reflect.DeepEqual(after.AsStruct(), before.AsStruct()) {
 					t.Fatalf("concurrent record changed: got %#v, want %#v", after.AsStruct(), before.AsStruct())
 				}
@@ -945,6 +985,54 @@ func TestInstallerPruneMutatesRefsAndInstallDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(server.serviceEnvDir("api"), "old.bin")); !os.IsNotExist(err) {
 		t.Fatalf("old env stat err = %v, want not exist", err)
+	}
+}
+
+func TestInstallerPruneCommittedGenerationReturnsExactPublishedRecord(t *testing.T) {
+	server := newTestServer(t)
+	service := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+		Generation: 15, LatestGeneration: 15,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{
+				"latest": "/srv/api/bin/api-15",
+				"gen-4":  "/srv/api/bin/api-4",
+				"gen-15": "/srv/api/bin/api-15",
+			}},
+		},
+		ISO: testISONativeRuntimeAllocation("api", iso.StateReserved),
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		ISOPool:  &db.ISOPool{AggregateRouteState: "ready"},
+		Services: map[string]*db.Service{"api": service},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
+	expected, err := inst.pruneCommittedGeneration(15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := expected.Artifacts[db.ArtifactBinary].Refs["gen-4"]; ok {
+		t.Fatalf("returned service retained pruned generation: %#v", expected.Artifacts)
+	}
+	if err := server.markNativeISOReadyExact(expected, nil); err != nil {
+		t.Fatalf("mark ready with post-prune record: %v", err)
+	}
+}
+
+func TestInstallerPruneCommittedGenerationRejectsConcurrentGeneration(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"api": {Name: "api", Generation: 16, LatestGeneration: 16, Artifacts: db.ArtifactStore{}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
+	if _, err := inst.pruneCommittedGeneration(15); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("pruneCommittedGeneration error = %v, want generation conflict", err)
 	}
 }
 

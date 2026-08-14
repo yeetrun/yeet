@@ -232,6 +232,37 @@ func TestDockerComposeInstallWithPullDisabledSkipsPrePull(t *testing.T) {
 	}
 }
 
+func TestDockerComposeInstallStopsSystemdBeforeReplacingArtifacts(t *testing.T) {
+	calls := []cmdCall{}
+	events := []string{}
+	sd := &fakeDockerSystemdService{events: &events}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	if err := svc.InstallWithPull(false); err != nil {
+		t.Fatalf("InstallWithPull(false) returned error: %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"stop", "install"}, events); diff != "" {
+		t.Fatalf("systemd lifecycle mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDockerComposeInstallDoesNotReplaceArtifactsAfterSystemdStopFailure(t *testing.T) {
+	stopErr := errors.New("stop auxiliary units failed")
+	sd := &fakeDockerSystemdService{stopErr: stopErr}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc.sd = sd
+
+	err := svc.InstallWithPull(false)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("InstallWithPull(false) error = %v, want %v", err, stopErr)
+	}
+	if sd.installCalls != 0 {
+		t.Fatalf("systemd Install called %d times after stop failure, want 0", sd.installCalls)
+	}
+}
+
 func TestDockerComposeInstallWrapsPrePullError(t *testing.T) {
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 	delete(svc.cfg.Artifacts, db.ArtifactDockerComposeFile)
@@ -841,6 +872,7 @@ type fakeDockerSystemdService struct {
 	installErr   error
 	startAuxErr  error
 	artifacts    map[db.ArtifactName]bool
+	events       *[]string
 
 	installCalls   int
 	stopCalls      int
@@ -850,11 +882,17 @@ type fakeDockerSystemdService struct {
 
 func (f *fakeDockerSystemdService) Install() error {
 	f.installCalls++
+	if f.events != nil {
+		*f.events = append(*f.events, "install")
+	}
 	return f.installErr
 }
 
 func (f *fakeDockerSystemdService) Stop() error {
 	f.stopCalls++
+	if f.events != nil {
+		*f.events = append(*f.events, "stop")
+	}
 	return f.stopErr
 }
 

@@ -198,6 +198,11 @@ func (s *DockerComposeService) InstallWithPull(pull bool) error {
 	if err := s.Down(); err != nil {
 		return fmt.Errorf("failed to stop service: %v", err)
 	}
+	// Auxiliary binaries are installed with atomic replacement. Stop their
+	// units first so a later systemctl start cannot retain the old executable.
+	if err := s.stopSystemdService(); err != nil {
+		return err
+	}
 	return s.sd.Install()
 }
 

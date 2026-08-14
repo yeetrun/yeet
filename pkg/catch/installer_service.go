@@ -68,7 +68,7 @@ func (s *Server) markNativeISOReadyExact(expected *db.Service, desired *db.Servi
 	}
 	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[expected.Name]
-		if !reflect.DeepEqual(current, expected) {
+		if !nativeISOActivationRecordsEqual(current, expected) {
 			return fmt.Errorf("service %q record changed before native ISO ready commit", expected.Name)
 		}
 		if data.ISOPool == nil {
@@ -94,6 +94,22 @@ func (s *Server) markNativeISOReadyExact(expected *db.Service, desired *db.Servi
 		return nil
 	})
 	return err
+}
+
+// The workload gate is allowed to publish the same allocation as ready while
+// its parent installer is still verifying activation. No other service-record
+// change is attributable to that gate.
+func nativeISOActivationRecordsEqual(current, expected *db.Service) bool {
+	if serviceNetworkRecordsEqual(current, expected) {
+		return true
+	}
+	if current == nil || current.ISO == nil || expected == nil || expected.ISO == nil || current.ISO.State != string(iso.StateReady) {
+		return false
+	}
+	normalized := current.Clone()
+	normalized.ISO.State = expected.ISO.State
+	normalized.ISO.LastError = expected.ISO.LastError
+	return serviceNetworkRecordsEqual(normalized, expected)
 }
 
 // persistInitialDesiredNetwork publishes desired intent only after the first
@@ -389,19 +405,32 @@ func parseGenRef(ref db.ArtifactRef) (int, bool) {
 
 // Prune removes old configurations from the database.
 func (si *Installer) prune() {
+	if _, err := si.pruneWithExpectedGeneration(nil); err != nil {
+		log.Printf("failed to mutate service: %v", err)
+	}
+}
+
+func (si *Installer) pruneCommittedGeneration(expected int) (*db.Service, error) {
+	return si.pruneWithExpectedGeneration(&expected)
+}
+
+func (si *Installer) pruneWithExpectedGeneration(expected *int) (*db.Service, error) {
 	knownBins := defaultKnownInstallFiles(si.icfg.ServiceName)
 	serviceRoot := si.s.defaultServiceRootDir(si.icfg.ServiceName)
-	_, _, err := si.mutateService(func(d *db.Data, s *db.Service) error {
+	_, service, err := si.mutateService(func(d *db.Data, s *db.Service) error {
+		if expected != nil && s.Generation != *expected {
+			return fmt.Errorf("service generation changed from committed %d to %d before pruning", *expected, s.Generation)
+		}
 		serviceRoot = si.s.serviceRootFromView(s.View())
 		pruneServiceArtifacts(s, knownBins)
 		return nil
 	})
 	if err != nil {
-		log.Printf("failed to mutate service: %v", err)
-		return
+		return nil, err
 	}
 
 	si.pruneInstallDirectories(serviceRoot, knownBins)
+	return service, nil
 }
 
 func defaultKnownInstallFiles(serviceName string) set.Set[string] {
@@ -525,19 +554,21 @@ func (si *Installer) installGenWithExpected(gen int, expected *int) error {
 	}
 
 	operation := func() error {
-		var d *db.Data
 		var s *db.Service
 		if expected == nil {
-			d, s, err = si.commitGen(gen)
+			_, s, err = si.commitGen(gen)
 		} else {
-			d, s, err = si.commitGenIfCurrent(*expected, gen)
+			_, s, err = si.commitGenIfCurrent(*expected, gen)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to commit gen: %v", err)
 		}
 		si.committedGeneration = s.Generation
-		si.prune()
-		return si.doInstall(d, s)
+		s, err = si.pruneCommittedGeneration(si.committedGeneration)
+		if err != nil {
+			return fmt.Errorf("failed to prune committed generation: %v", err)
+		}
+		return si.doInstall(nil, s)
 	}
 	if preService == nil {
 		return operation()
@@ -837,7 +868,7 @@ func (s *Server) quarantineNativeISORecordExact(ctx context.Context, expected *d
 	if s == nil || expected == nil {
 		return errors.New("quarantine native ISO without an exact expected service record")
 	}
-	if err := s.markISOStateExact(expected.Name, expected, string(iso.StateQuarantined), cause, operation); err != nil {
+	if err := s.markNativeISOStateExact(expected, string(iso.StateQuarantined), cause, operation); err != nil {
 		return err
 	}
 	steps := &isoConcreteReconcileSteps{server: s}
@@ -845,6 +876,25 @@ func (s *Server) quarantineNativeISORecordExact(ctx context.Context, expected *d
 	stopErr := steps.StopUntrusted(stopCtx, expected.Name)
 	stopCancel()
 	return stopErr
+}
+
+func (s *Server) markNativeISOStateExact(expected *db.Service, state string, cause error, operation string) error {
+	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
+		current := data.Services[expected.Name]
+		if !nativeISOActivationRecordsEqual(current, expected) {
+			return fmt.Errorf("service %q changed while %s", expected.Name, operation)
+		}
+		if current.ISO == nil {
+			return fmt.Errorf("service %q has no ISO allocation while %s", expected.Name, operation)
+		}
+		current.ISO.State = state
+		current.ISO.LastError = ""
+		if cause != nil {
+			current.ISO.LastError = cause.Error()
+		}
+		return nil
+	})
+	return err
 }
 
 func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
