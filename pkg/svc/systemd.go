@@ -630,9 +630,31 @@ func (s *SystemdService) rewriteLegacyRuntimePaths(raw string) string {
 	add(db.ArtifactBinary, s.Name(), true)
 	sort.Slice(replacements, func(i, j int) bool { return len(replacements[i].old) > len(replacements[j].old) })
 	for _, replacement := range replacements {
-		raw = strings.ReplaceAll(raw, replacement.old, replacement.new)
+		raw = replaceManagedUnitPath(raw, replacement.old, replacement.new)
 	}
 	return raw
+}
+
+func replaceManagedUnitPath(raw, oldPath, newPath string) string {
+	var out strings.Builder
+	for {
+		before, after, found := strings.Cut(raw, oldPath)
+		if !found {
+			out.WriteString(raw)
+			return out.String()
+		}
+		out.WriteString(before)
+		if after == "" || isManagedUnitPathBoundary(after[0]) {
+			out.WriteString(newPath)
+		} else {
+			out.WriteString(oldPath)
+		}
+		raw = after
+	}
+}
+
+func isManagedUnitPathBoundary(next byte) bool {
+	return strings.ContainsRune(" \t\r\n\"':,;)]}", rune(next))
 }
 
 // RenderedPrimaryUnit returns the exact primary unit content that installation

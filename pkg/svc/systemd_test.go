@@ -1224,6 +1224,45 @@ func TestSystemdServiceStageInstallEnforcesPersistedIdentityOnStaleUnitArtifact(
 	}
 }
 
+func TestSystemdServiceRenderPreservesTailscaleSocketRuntimePath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "service")
+	runDir := filepath.Join(root, "run")
+	legacyDaemon := filepath.Join(runDir, "tailscaled")
+	legacyEnv := filepath.Join(runDir, "tailscaled.env")
+	legacyConfig := filepath.Join(runDir, "tailscaled.json")
+	socket := filepath.Join(runDir, "tailscaled.sock")
+	cfg := db.Service{
+		Name: "demo", Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService: artifactAt(1, filepath.Join(root, "bin", "tailscaled.service")),
+			db.ArtifactTSBinary:  artifactAt(1, filepath.Join(root, "bin", "tailscaled-v1")),
+			db.ArtifactTSEnv:     artifactAt(1, filepath.Join(root, "tailscale", "tailscaled-v1.env")),
+			db.ArtifactTSConfig:  artifactAt(1, filepath.Join(root, "tailscale", "tailscaled-v1.json")),
+		},
+	}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir}
+	raw := "[Service]\nExecStart=" + legacyDaemon + " --statedir=. --socket=" + socket + " --config=" + legacyConfig + " --tun=ts0\n" +
+		"EnvironmentFile=" + legacyEnv + "\n"
+
+	rendered, err := service.renderSystemdUnitContent(installStep{artifact: db.ArtifactTSService}, []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ExecStart=" + filepath.Join(root, "bin", "tailscaled") + " ",
+		"--socket=" + socket + " ",
+		"--config=" + filepath.Join(root, "env", "tailscaled.json") + " ",
+		"EnvironmentFile=" + filepath.Join(root, "env", "tailscaled.env") + "\n",
+	} {
+		if !strings.Contains(string(rendered), want) {
+			t.Fatalf("rendered Tailscale unit missing %q:\n%s", want, rendered)
+		}
+	}
+	if corrupted := filepath.Join(root, "bin", "tailscaled.sock"); strings.Contains(string(rendered), corrupted) {
+		t.Fatalf("rendered Tailscale unit corrupted socket path %q:\n%s", corrupted, rendered)
+	}
+}
+
 func TestSystemdServiceLifecycleUsesConfiguredSystemdDir(t *testing.T) {
 	tmp := t.TempDir()
 	systemdDir := filepath.Join(tmp, "systemd")
