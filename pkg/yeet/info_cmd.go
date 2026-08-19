@@ -22,6 +22,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 type infoOutput struct {
@@ -398,11 +399,12 @@ func renderHostInfoISOSection(info *serverInfo) infoSection {
 }
 
 func renderInfoSections(w io.Writer, sections []infoSection) error {
+	styles := outputStyles(w)
 	for _, section := range sections {
 		if len(section.Rows) == 0 {
 			continue
 		}
-		if _, err := fmt.Fprintln(w, section.Title); err != nil {
+		if _, err := fmt.Fprintln(w, styles.Render(tui.RoleHeading, section.Title)); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)

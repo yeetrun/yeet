@@ -18,8 +18,8 @@ type Spinner struct {
 	frames     []string
 	interval   time.Duration
 	hideCursor bool
-	color      Colorizer
-	frameColor string
+	styles     Styles
+	role       Role
 
 	mu      sync.Mutex
 	msg     string
@@ -55,10 +55,10 @@ func WithHideCursor(hide bool) SpinnerOption {
 	}
 }
 
-func WithColor(colorizer Colorizer, frameColor string) SpinnerOption {
+func WithStyle(styles Styles, role Role) SpinnerOption {
 	return func(s *Spinner) {
-		s.color = colorizer
-		s.frameColor = frameColor
+		s.styles = styles
+		s.role = role
 	}
 }
 
@@ -162,7 +162,7 @@ func (s *Spinner) renderFrame(idx int, msg string) {
 		return
 	}
 	frame := s.frames[idx%len(s.frames)]
-	line := s.color.Wrap(s.frameColor, frame)
+	line := s.styles.Render(s.role, frame)
 	if msg != "" {
 		line = line + " " + msg
 	}

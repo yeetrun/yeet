@@ -135,3 +135,40 @@ func TestRenderStatusTablesTruncatesContainers(t *testing.T) {
 		t.Fatalf("expected truncated containers list, got %q", output)
 	}
 }
+
+func TestRenderStatusTablesStylesTTYHeadingsOnly(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() { isTerminalFn = oldIsTerminal })
+	isTerminalFn = func(fd int) bool { return fd == 42 }
+
+	out := &fdBuffer{fd: 42}
+	results := []hostStatusData{{
+		Host: "host-a",
+		Services: []statusService{{
+			ServiceName: "svc-a",
+			ServiceType: "binary",
+			Components:  []statusComponent{{Name: "svc-a", Status: "running"}},
+		}},
+	}}
+	if err := renderStatusTables(out, results, false); err != nil {
+		t.Fatalf("renderStatusTables error: %v", err)
+	}
+
+	text := out.String()
+	for _, heading := range []string{"SERVICE", "HOST", "TYPE", "CONTAINER", "STATUS"} {
+		styled := "\x1b[1;36m" + heading + "\x1b[m"
+		if !strings.Contains(text, styled) {
+			t.Fatalf("status output missing styled heading %q:\n%s", heading, text)
+		}
+		text = strings.ReplaceAll(text, styled, heading)
+	}
+	if strings.Contains(text, "\x1b[") {
+		t.Fatalf("status output styled more than its headings:\n%s", out.String())
+	}
+	if !strings.Contains(text, "svc-a") || !strings.Contains(text, "host-a") || !strings.Contains(text, "running") {
+		t.Fatalf("status row changed:\n%s", out.String())
+	}
+}

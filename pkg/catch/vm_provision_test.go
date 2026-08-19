@@ -389,6 +389,8 @@ func TestRunVMProvisionPersistsAndRendersDefaultBalloon(t *testing.T) {
 			t.Fatalf("firecracker config missing %q:\n%s", want, raw)
 		}
 	}
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
 	output := new(bytes.Buffer)
 	ui := &vmProvisionUI{ui: newRunUI(output, true, false, "run", "devbox")}
 	ui.PrintSuccess(vmProvisionPlan{Service: "devbox", Shape: svcVMShape(svc), Image: vmImageAsset{Manifest: vmImageManifest{Name: "Ubuntu"}}}, testUbuntuVMPayload, vmGuestReadyReport{}, false)

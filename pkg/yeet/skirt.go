@@ -9,28 +9,30 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/fatih/color"
+	"charm.land/lipgloss/v2"
 	"github.com/hugomd/ascii-live/frames"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 func HandleSkirt(ctx context.Context, _ []string) error {
-	colors := []*color.Color{
-		color.New(color.FgRed),
-		color.New(color.FgGreen),
-		color.New(color.FgYellow),
-		color.New(color.FgBlue),
-		color.New(color.FgMagenta),
-		color.New(color.FgCyan),
-		color.New(color.FgWhite),
+	styles := []lipgloss.Style{
+		lipgloss.NewStyle().Foreground(lipgloss.Red),
+		lipgloss.NewStyle().Foreground(lipgloss.Green),
+		lipgloss.NewStyle().Foreground(lipgloss.Yellow),
+		lipgloss.NewStyle().Foreground(lipgloss.Blue),
+		lipgloss.NewStyle().Foreground(lipgloss.Magenta),
+		lipgloss.NewStyle().Foreground(lipgloss.Cyan),
+		lipgloss.NewStyle().Foreground(lipgloss.White),
 	}
+	colorPolicy := tui.NewStyles(true)
 	p := frames.Parrot
 	x := 0
 	for {
 		fmt.Print("\033[H\033[2J")
 		x++
 		i := x % p.GetLength()
-		c := colors[x%len(colors)]
-		_, _ = c.Println(p.GetFrame(i))
+		style := styles[x%len(styles)]
+		fmt.Println(renderSkirtFrame(colorPolicy, style, p.GetFrame(i)))
 		select {
 		case <-ctx.Done():
 			return nil
@@ -38,4 +40,11 @@ func HandleSkirt(ctx context.Context, _ []string) error {
 			continue
 		}
 	}
+}
+
+func renderSkirtFrame(colorPolicy tui.Styles, style lipgloss.Style, frame string) string {
+	if !colorPolicy.Enabled() {
+		return frame
+	}
+	return style.Render(frame)
 }

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/shayne/yargs"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 var archMap = map[string]string{
@@ -405,7 +405,8 @@ func shouldUseSudoForInit(userAtRemote string) bool {
 	if user, _, ok := strings.Cut(userAtRemote, "@"); ok && user == "root" {
 		return false
 	}
-	fmt.Fprint(os.Stderr, color.RedString("Warning: root is required to install catch on the remote host.\nsudo will be used which may require a password.\n\n"))
+	const warning = "Warning: root is required to install catch on the remote host.\nsudo will be used which may require a password."
+	fmt.Fprint(os.Stderr, outputStyles(os.Stderr).Render(tui.RoleError, warning)+"\n\n")
 	return true
 }
 

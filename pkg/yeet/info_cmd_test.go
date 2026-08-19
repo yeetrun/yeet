@@ -60,6 +60,35 @@ func TestRenderInfoPlainReportsTabwriterFlushError(t *testing.T) {
 	}
 }
 
+func TestRenderInfoSectionsStylesTTYTitlesOnly(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() { isTerminalFn = oldIsTerminal })
+	isTerminalFn = func(fd int) bool { return fd == 42 }
+
+	out := &fdBuffer{fd: 42}
+	if err := renderInfoSections(out, []infoSection{{
+		Title: "Service",
+		Rows:  []infoRow{{Label: "Name", Value: "svc-a"}},
+	}}); err != nil {
+		t.Fatalf("renderInfoSections error: %v", err)
+	}
+
+	const styledTitle = "\x1b[1;36mService\x1b[m"
+	if !strings.Contains(out.String(), styledTitle) {
+		t.Fatalf("info output missing styled title:\n%s", out.String())
+	}
+	plain := strings.ReplaceAll(out.String(), styledTitle, "Service")
+	if strings.Contains(plain, "\x1b[") {
+		t.Fatalf("info output styled more than its titles:\n%s", out.String())
+	}
+	if !strings.Contains(plain, "Name:") || !strings.Contains(plain, "svc-a") {
+		t.Fatalf("info row changed:\n%s", out.String())
+	}
+}
+
 func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	server := catchrpc.ServiceInfoResponse{
 		Found: true,

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 func TestPlainRunUIOutputsKeyValueLines(t *testing.T) {
@@ -44,6 +46,9 @@ func TestRunUIDockerPlainOutputRemainsStructured(t *testing.T) {
 	ui.DoneStep("")
 	ui.Stop()
 
+	if got := buf.String(); strings.Contains(got, "\x1b[") {
+		t.Fatalf("plain docker output contains escape bytes: %q", got)
+	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	want := []string{
 		`action=run service=api@yeet-lab status=running step="Upload payload"`,
@@ -222,12 +227,17 @@ func TestRunUIQuietSuppressesOutput(t *testing.T) {
 	ui.Suspend()
 	ui.Stop()
 
-	if got := buf.String(); got != "" {
+	if got := buf.String(); strings.Contains(got, "\x1b[") {
+		t.Fatalf("quiet UI output contains escape bytes: %q", got)
+	} else if got != "" {
 		t.Fatalf("quiet UI output = %q, want empty", got)
 	}
 }
 
 func TestRunUIPrintBlockTTYWritesHumanLines(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newRunUI(&buf, true, false, "run", "devbox@yeet-lab")
 
@@ -280,8 +290,15 @@ func TestRunUIPrintBlockQuietSuppressesOutput(t *testing.T) {
 }
 
 func TestRunUIStartTimedStepTTYWritesElapsedUpdate(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newRunUI(&buf, true, false, "run", "devbox@yeet-lab")
+	styles := tui.NewStyles(true)
+	if ui.styles != styles {
+		t.Fatalf("UI styles = %#v, want %#v", ui.styles, styles)
+	}
 
 	ui.StartTimedStep("Wait for guest readiness")
 	ui.UpdateDetail("ssh")
@@ -290,9 +307,8 @@ func TestRunUIStartTimedStepTTYWritesElapsedUpdate(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"Wait for guest readiness ssh",
-		"✔ Wait for guest readiness",
-		"ready",
+		styles.Render(tui.RoleWarning, tui.DefaultFrames[0]) + " Wait for guest readiness ssh",
+		styles.Render(tui.RoleSuccess, "✔") + " Wait for guest readiness (" + styles.Render(tui.RoleMuted, "ready") + ")",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("timed step output missing %q in %q", want, got)
@@ -301,6 +317,9 @@ func TestRunUIStartTimedStepTTYWritesElapsedUpdate(t *testing.T) {
 }
 
 func TestRunUIStopTimedStepKeepsDetailUntilUpdaterStops(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newRunUI(&buf, true, false, "run", "devbox@yeet-lab")
 	stop := make(chan struct{})
@@ -351,6 +370,9 @@ func TestRunUIStopTimedStepKeepsDetailUntilUpdaterStops(t *testing.T) {
 }
 
 func TestRunUIStartStepStopsPreviousTimedStep(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newRunUI(&buf, true, false, "run", "devbox@yeet-lab")
 

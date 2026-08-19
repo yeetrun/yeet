@@ -22,6 +22,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 func TestParseInitArgs(t *testing.T) {
@@ -403,6 +404,65 @@ func TestShouldUseSudoForInit(t *testing.T) {
 	}
 }
 
+func TestRootInstallWarningUsesWriterAwareTerminalPolicy(t *testing.T) {
+	const warning = "Warning: root is required to install catch on the remote host.\nsudo will be used which may require a password.\n\n"
+	oldIsTerminal := isTerminalFn
+	oldStderr := os.Stderr
+	t.Cleanup(func() {
+		isTerminalFn = oldIsTerminal
+		os.Stderr = oldStderr
+	})
+
+	t.Run("pipe is plain", func(t *testing.T) {
+		t.Setenv("NO_COLOR", "")
+		t.Setenv("TERM", "xterm-256color")
+		isTerminalFn = func(int) bool { return false }
+
+		got := captureInitStderr(t, func() {
+			if !shouldUseSudoForInit("admin@example.com") {
+				t.Fatal("non-root install should require sudo")
+			}
+		})
+		if got != warning {
+			t.Fatalf("root warning = %q, want exact text %q", got, warning)
+		}
+		if strings.Contains(got, "\x1b[") {
+			t.Fatalf("root warning = %q, want no ANSI styling", got)
+		}
+	})
+
+	t.Run("terminal is styled", func(t *testing.T) {
+		t.Setenv("NO_COLOR", "")
+		t.Setenv("TERM", "xterm-256color")
+		isTerminalFn = func(int) bool { return true }
+
+		got := captureInitStderr(t, func() {
+			if !shouldUseSudoForInit("admin@example.com") {
+				t.Fatal("non-root install should require sudo")
+			}
+		})
+		want := tui.NewStyles(true).Render(tui.RoleError, strings.TrimSuffix(warning, "\n\n")) + "\n\n"
+		if got != want {
+			t.Fatalf("root warning = %q, want RoleError styling %q", got, want)
+		}
+	})
+
+	t.Run("no color is plain", func(t *testing.T) {
+		t.Setenv("NO_COLOR", "1")
+		t.Setenv("TERM", "xterm-256color")
+		isTerminalFn = func(int) bool { return true }
+
+		got := captureInitStderr(t, func() {
+			if !shouldUseSudoForInit("admin@example.com") {
+				t.Fatal("non-root install should require sudo")
+			}
+		})
+		if got != warning {
+			t.Fatalf("root warning = %q, want exact text %q", got, warning)
+		}
+	})
+}
+
 func TestRemoteDockerInstalledUsesBashProbe(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ssh.log")
 	fakeSSHInPath(t, `
@@ -659,6 +719,8 @@ func TestPrepareInitVMToolsInstallMarksNonVMCapableHostUnavailableWithoutWarning
 		}, nil
 	}
 	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
 	var out bytes.Buffer
 	ui := newInitUI(&out, true, false, "catch", "root@example.com", catchServiceName)
 
@@ -671,7 +733,8 @@ func TestPrepareInitVMToolsInstallMarksNonVMCapableHostUnavailableWithoutWarning
 		t.Fatal("installVMTools = true for non-VM-capable host")
 	}
 	got := out.String()
-	if !strings.Contains(got, "Check VM tools (not available)") {
+	wantStatus := "Check VM tools (" + tui.NewStyles(true).Render(tui.RoleMuted, "not available") + ")"
+	if !strings.Contains(got, wantStatus) {
 		t.Fatalf("output = %q, want unavailable VM-tools status", got)
 	}
 	if strings.Contains(got, "/dev/kvm is missing") {
@@ -697,6 +760,8 @@ func TestInitVMWarningsAppearOnceAcrossPreflightAndInstaller(t *testing.T) {
 		}, nil
 	}
 	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
 	var out bytes.Buffer
 	ui := newInitUI(&out, true, false, "catch", "root@example.com", catchServiceName)
 
@@ -720,7 +785,8 @@ func TestInitVMWarningsAppearOnceAcrossPreflightAndInstaller(t *testing.T) {
 	ui.Stop()
 
 	got := out.String()
-	if !strings.Contains(got, "Check VM tools (not available)") {
+	wantStatus := "Check VM tools (" + tui.NewStyles(true).Render(tui.RoleMuted, "not available") + ")"
+	if !strings.Contains(got, wantStatus) {
 		t.Fatalf("output = %q, want unavailable VM-tools status", got)
 	}
 	for text, wantCount := range map[string]int{

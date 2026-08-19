@@ -38,8 +38,8 @@ type initUI struct {
 	remote  string
 	service string
 
-	plain *plainInitUI
-	color tui.Colorizer
+	plain  *plainInitUI
+	styles tui.Styles
 
 	mu        sync.Mutex
 	stopped   bool
@@ -57,7 +57,7 @@ func newInitUI(out io.Writer, enabled bool, quiet bool, host, remote, service st
 		remote:  remote,
 		service: service,
 		plain:   newPlainInitUI(out, host, remote, service),
-		color:   tui.NewColorizer(enabled),
+		styles:  tui.NewStyles(enabled),
 	}
 }
 
@@ -217,7 +217,7 @@ func (u *initUI) Warn(msg string) {
 	}
 	u.stopSpinner(true)
 	if u.enabled {
-		_, _ = fmt.Fprintln(u.out, u.color.Wrap(tui.ColorYellow, msg))
+		_, _ = fmt.Fprintln(u.out, u.styles.Render(tui.RoleWarning, msg))
 		return
 	}
 	u.plain.Warn(msg)
@@ -240,7 +240,7 @@ func (u *initUI) newSpinner(text string) *tui.Spinner {
 	sp := tui.NewSpinner(u.out,
 		tui.WithFrames(tui.DefaultFrames),
 		tui.WithInterval(120*time.Millisecond),
-		tui.WithColor(u.color, tui.ColorYellow),
+		tui.WithStyle(u.styles, tui.RoleWarning),
 		tui.WithHideCursor(true),
 	)
 	sp.Start(text)
@@ -263,13 +263,13 @@ func (u *initUI) printStatus(status, name, detail string) {
 	label := status
 	switch status {
 	case "OK":
-		label = u.color.Wrap(tui.ColorGreen, "✔")
+		label = u.styles.Render(tui.RoleSuccess, "✔")
 	case "ERR":
-		label = u.color.Wrap(tui.ColorRed, "✖")
+		label = u.styles.Render(tui.RoleError, "✖")
 	}
 	line := fmt.Sprintf("%s %s", label, name)
 	if detail != "" {
-		line = fmt.Sprintf("%s (%s)", line, detail)
+		line = fmt.Sprintf("%s (%s)", line, u.styles.Render(tui.RoleMuted, detail))
 	}
 	_, _ = fmt.Fprintln(u.out, line)
 }

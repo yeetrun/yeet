@@ -40,8 +40,8 @@ type runUI struct {
 	action  string
 	service string
 
-	plain *plainRunUI
-	color tui.Colorizer
+	plain  *plainRunUI
+	styles tui.Styles
 
 	mu        sync.Mutex
 	stopped   bool
@@ -63,7 +63,7 @@ func newRunUI(out io.Writer, enabled bool, quiet bool, action, service string) *
 		action:  action,
 		service: service,
 		plain:   newPlainRunUI(out, action, service),
-		color:   tui.NewColorizer(enabled),
+		styles:  tui.NewStyles(enabled),
 	}
 }
 
@@ -403,7 +403,7 @@ func (u *runUI) newSpinner(text string) *tui.Spinner {
 	sp := tui.NewSpinner(u.out,
 		tui.WithFrames(tui.DefaultFrames),
 		tui.WithInterval(120*time.Millisecond),
-		tui.WithColor(u.color, tui.ColorYellow),
+		tui.WithStyle(u.styles, tui.RoleWarning),
 		tui.WithHideCursor(true),
 	)
 	sp.Start(text)
@@ -426,13 +426,13 @@ func (u *runUI) printStatus(status, name, detail string) {
 	label := status
 	switch status {
 	case "OK":
-		label = u.color.Wrap(tui.ColorGreen, "✔")
+		label = u.styles.Render(tui.RoleSuccess, "✔")
 	case "ERR":
-		label = u.color.Wrap(tui.ColorRed, "✖")
+		label = u.styles.Render(tui.RoleError, "✖")
 	}
 	line := fmt.Sprintf("%s %s", label, name)
 	if detail != "" {
-		line = fmt.Sprintf("%s (%s)", line, detail)
+		line = fmt.Sprintf("%s (%s)", line, u.styles.Render(tui.RoleMuted, detail))
 	}
 	_, _ = fmt.Fprintln(u.out, line)
 }

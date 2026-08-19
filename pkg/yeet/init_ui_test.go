@@ -10,9 +10,13 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 func TestInitUIUpdateDetailWritesSpinnerMessage(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newInitUI(&buf, true, false, "catch", "root@example.com", catchServiceName)
 
@@ -67,6 +71,9 @@ func TestInitUIPlainMessagesAndSteps(t *testing.T) {
 	ui.FailStep("install failed")
 
 	out := buf.String()
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("plain output contains escape bytes: %q", out)
+	}
 	for _, want := range []string{
 		`status=info`,
 		`detail=installed`,
@@ -83,8 +90,15 @@ func TestInitUIPlainMessagesAndSteps(t *testing.T) {
 }
 
 func TestInitUISpinnerModeDirectStatusAndMessages(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var buf bytes.Buffer
 	ui := newInitUI(&buf, true, false, "catch", "root@example.com", catchServiceName)
+	styles := tui.NewStyles(true)
+	if ui.styles != styles {
+		t.Fatalf("UI styles = %#v, want %#v", ui.styles, styles)
+	}
 
 	ui.Start()
 	ui.Info(" connected ")
@@ -106,11 +120,10 @@ func TestInitUISpinnerModeDirectStatusAndMessages(t *testing.T) {
 	for _, want := range []string{
 		"[+] yeet init root@example.com (host=catch)",
 		"connected",
-		"warning",
-		"Check local",
-		"ok",
-		"Install catch",
-		"failed",
+		styles.Render(tui.RoleWarning, "warning"),
+		styles.Render(tui.RoleSuccess, "✔") + " Check local (" + styles.Render(tui.RoleMuted, "ok") + ")",
+		styles.Render(tui.RoleError, "✖") + " Install catch",
+		styles.Render(tui.RoleError, "✖") + " Install catch (" + styles.Render(tui.RoleMuted, "failed") + ")",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -132,8 +145,10 @@ func TestInitUIQuietSkipsMessagesAndSteps(t *testing.T) {
 	ui.FailStep("err")
 	ui.Stop()
 
-	if buf.Len() != 0 {
-		t.Fatalf("quiet output = %q, want empty", buf.String())
+	if got := buf.String(); strings.Contains(got, "\x1b[") {
+		t.Fatalf("quiet output contains escape bytes: %q", got)
+	} else if got != "" {
+		t.Fatalf("quiet output = %q, want empty", got)
 	}
 }
 

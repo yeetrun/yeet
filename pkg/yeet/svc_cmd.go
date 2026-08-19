@@ -24,6 +24,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 var remoteRegistry = cli.RemoteCommandRegistry()
@@ -2315,12 +2316,19 @@ func buildStatusRowsForService(host string, status statusService, aggregateConta
 
 func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContainers bool) error {
 	rows := buildStatusRows(results, aggregateContainers)
-	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', tabwriter.StripEscape)
+	styles := outputStyles(w)
 	header := "CONTAINER"
 	if aggregateContainers {
 		header = "CONTAINERS"
 	}
-	if _, err := fmt.Fprintf(tw, "SERVICE\tHOST\tTYPE\t%s\tSTATUS\t\n", header); err != nil {
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n",
+		tabwriterStyled(styles.Render(tui.RoleHeading, "SERVICE")),
+		tabwriterStyled(styles.Render(tui.RoleHeading, "HOST")),
+		tabwriterStyled(styles.Render(tui.RoleHeading, "TYPE")),
+		tabwriterStyled(styles.Render(tui.RoleHeading, header)),
+		tabwriterStyled(styles.Render(tui.RoleHeading, "STATUS")),
+	); err != nil {
 		return err
 	}
 	for _, row := range rows {

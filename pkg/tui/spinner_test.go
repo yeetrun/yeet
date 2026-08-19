@@ -13,13 +13,17 @@ import (
 )
 
 func TestSpinnerStartUpdateStopClear(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
 	var out bytes.Buffer
+	styles := NewStyles(true)
 	spinner := NewSpinner(
 		&out,
 		WithFrames([]string{"-"}),
 		WithHideCursor(true),
 		WithInterval(time.Hour),
-		WithColor(Colorizer{Enabled: true}, ColorGreen),
+		WithStyle(styles, RoleSuccess),
 	)
 
 	spinner.Start("starting")
@@ -27,9 +31,12 @@ func TestSpinnerStartUpdateStopClear(t *testing.T) {
 	spinner.Stop(true)
 
 	got := out.String()
+	wantPrefix := "\x1b[?25l\r\033[K" + styles.Render(RoleSuccess, "-")
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("spinner output = %q, want prefix %q", got, wantPrefix)
+	}
 	for _, want := range []string{
 		"\x1b[?25l",
-		"\r\033[K" + ColorGreen + "-",
 		"starting",
 		"running",
 		"\r\033[K",
@@ -47,9 +54,14 @@ func TestSpinnerStopWithoutClearPrintsNewline(t *testing.T) {
 
 	spinner.Start("running")
 	spinner.Stop(false)
+	spinner.Stop(false)
 
-	if got := out.String(); !strings.HasSuffix(got, "\n") {
+	got := out.String()
+	if !strings.HasSuffix(got, "\n") {
 		t.Fatalf("spinner output = %q, want trailing newline", got)
+	}
+	if count := strings.Count(got, "\n"); count != 1 {
+		t.Fatalf("spinner output = %q, want one newline after repeated stop", got)
 	}
 }
 
@@ -71,10 +83,16 @@ func TestSpinnerStartWhileRunningUpdatesMessage(t *testing.T) {
 
 	spinner.Start("first")
 	spinner.Start("second")
+	spinner.mu.Lock()
+	message := spinner.msg
+	spinner.mu.Unlock()
 	spinner.Stop(true)
 
 	if got := out.String(); !strings.Contains(got, "first") {
 		t.Fatalf("spinner output = %q, want first render", got)
+	}
+	if message != "second" {
+		t.Fatalf("spinner message = %q, want repeated start to update it", message)
 	}
 }
 

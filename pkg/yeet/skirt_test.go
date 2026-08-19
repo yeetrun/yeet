@@ -9,21 +9,30 @@ import (
 	"os"
 	"testing"
 
-	"github.com/fatih/color"
+	"charm.land/lipgloss/v2"
+	"github.com/yeetrun/yeet/pkg/tui"
 )
+
+func TestRenderSkirtFrameDisabledIsExact(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	const frame = "parrot"
+	style := lipgloss.NewStyle().Foreground(lipgloss.Red)
+	if got := renderSkirtFrame(tui.NewStyles(false), style, frame); got != frame {
+		t.Fatalf("renderSkirtFrame() = %q, want exact frame %q", got, frame)
+	}
+}
 
 func TestSkirtStopsWhenContextCancelled(t *testing.T) {
 	oldStdout := os.Stdout
-	oldColorOutput := color.Output
 	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("OpenFile devnull error: %v", err)
 	}
 	os.Stdout = devNull
-	color.Output = devNull
 	t.Cleanup(func() {
 		os.Stdout = oldStdout
-		color.Output = oldColorOutput
 		_ = devNull.Close()
 	})
 
