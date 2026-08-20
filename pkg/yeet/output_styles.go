@@ -6,7 +6,6 @@ package yeet
 
 import (
 	"io"
-	"text/tabwriter"
 
 	"github.com/yeetrun/yeet/pkg/tui"
 )
@@ -18,9 +17,4 @@ type fdWriter interface {
 func outputStyles(w io.Writer) tui.Styles {
 	fd, ok := w.(fdWriter)
 	return tui.NewStyles(ok && isTerminalFn(int(fd.Fd())))
-}
-
-func tabwriterStyled(text string) string {
-	escape := string([]byte{tabwriter.Escape})
-	return escape + text + escape
 }

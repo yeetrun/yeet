@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"text/tabwriter"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/svc"
@@ -325,22 +324,11 @@ func fetchDockerOutdatedForHost(ctx context.Context, host string, service string
 
 func renderDockerOutdatedTables(w io.Writer, results []dockerOutdatedHostData) error {
 	rows := flattenDockerOutdatedRows(results)
-	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "SERVICE\tHOST\tCONTAINER\tIMAGE\tUPDATE"); err != nil {
-		return err
-	}
+	tableRows := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			row.Service,
-			row.Host,
-			row.Container,
-			row.Image,
-			row.Update,
-		); err != nil {
-			return err
-		}
+		tableRows = append(tableRows, []string{row.Service, row.Host, row.Container, row.Image, row.Update})
 	}
-	return tw.Flush()
+	return renderOutputTable(w, []string{"SERVICE", "HOST", "CONTAINER", "IMAGE", "UPDATE"}, tableRows)
 }
 
 func flattenDockerOutdatedRows(results []dockerOutdatedHostData) []dockerOutdatedRenderRow {

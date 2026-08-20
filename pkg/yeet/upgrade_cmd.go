@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/buildinfo"
@@ -59,23 +58,16 @@ func handleUpgrade(ctx context.Context, args []string, stdout io.Writer, stderr 
 }
 
 func renderUpgradeReport(w io.Writer, report upgradeReport) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	versionHeader := "LATEST"
 	if upgradeReportUsesTarget(report) {
 		versionHeader = "TARGET"
 	}
-	if _, err := fmt.Fprintf(tw, "COMPONENT\tCURRENT\t%s\tSTATUS\n", versionHeader); err != nil {
-		return err
-	}
-	if err := renderUpgradeRow(tw, report.Local); err != nil {
-		return err
-	}
+	rows := make([][]string, 0, len(report.Catch)+1)
+	rows = append(rows, upgradeTableRow(report.Local))
 	for _, row := range report.Catch {
-		if err := renderUpgradeRow(tw, row); err != nil {
-			return err
-		}
+		rows = append(rows, upgradeTableRow(row))
 	}
-	return tw.Flush()
+	return renderOutputTable(w, []string{"COMPONENT", "CURRENT", versionHeader, "STATUS"}, rows)
 }
 
 func upgradeReportUsesTarget(report upgradeReport) bool {
@@ -93,7 +85,7 @@ func upgradeReportReleaseVersion(report upgradeReport) string {
 	return report.Latest.Tag
 }
 
-func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
+func upgradeTableRow(row upgradeComponent) []string {
 	component := row.Name
 	if row.Host != "" {
 		component += "@" + row.Host
@@ -110,8 +102,7 @@ func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
 	if row.Reason != "" && row.Status != upgradeStatusDev {
 		status += ": " + row.Reason
 	}
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", component, current, latest, status)
-	return err
+	return []string{component, current, latest, status}
 }
 
 func runUpgrade(ctx context.Context, stdout io.Writer, stderr io.Writer, flags cli.UpgradeFlags, report upgradeReport) error {

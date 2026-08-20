@@ -118,6 +118,52 @@ func TestRenderDockerOutdatedTables(t *testing.T) {
 	}
 }
 
+func TestRenderDockerOutdatedTablesStylesTTYHeading(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() { isTerminalFn = oldIsTerminal })
+	isTerminalFn = func(fd int) bool { return fd == 42 }
+
+	out := &fdBuffer{fd: 42}
+	results := []dockerOutdatedHostData{{
+		Host: "host-a",
+		Rows: []dockerOutdatedRow{{
+			ServiceName:   "long-service-name-for-alignment",
+			ContainerName: "app",
+			Image:         "ghcr.io/acme/app:latest",
+			Status:        "current",
+		}},
+	}}
+	if err := renderDockerOutdatedTables(out, results); err != nil {
+		t.Fatalf("renderDockerOutdatedTables error: %v", err)
+	}
+
+	rendered := out.String()
+	lines := strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("docker outdated output lines = %d, want 2:\n%s", len(lines), rendered)
+	}
+	if !strings.HasPrefix(lines[0], "\x1b[1;36m") || !strings.HasSuffix(lines[0], "\x1b[m") {
+		t.Fatalf("docker outdated header row is not styled as a heading:\n%s", rendered)
+	}
+	if strings.Contains(lines[1], "\x1b[") {
+		t.Fatalf("docker outdated data row is styled:\n%s", rendered)
+	}
+
+	plainLines := strings.Split(strings.TrimSuffix(stripHeadingANSI(rendered), "\n"), "\n")
+	headings := []string{"SERVICE", "HOST", "CONTAINER", "IMAGE", "UPDATE"}
+	values := []string{"long-service-name-for-alignment", "host-a", "app", "acme/app:latest", "current"}
+	for i := range headings {
+		headingColumn := strings.Index(plainLines[0], headings[i])
+		valueColumn := strings.Index(plainLines[1], values[i])
+		if headingColumn != valueColumn {
+			t.Errorf("%s column starts at %d, row value %q starts at %d:\n%s", headings[i], headingColumn, values[i], valueColumn, stripHeadingANSI(rendered))
+		}
+	}
+}
+
 func TestDockerOutdatedMultiHostReturnsFetchError(t *testing.T) {
 	preserveDockerOutdatedGlobals(t)
 	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {

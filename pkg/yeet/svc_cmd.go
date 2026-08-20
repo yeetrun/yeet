@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/shayne/yargs"
@@ -24,7 +23,6 @@ import (
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
-	"github.com/yeetrun/yeet/pkg/tui"
 )
 
 var remoteRegistry = cli.RemoteCommandRegistry()
@@ -2316,27 +2314,15 @@ func buildStatusRowsForService(host string, status statusService, aggregateConta
 
 func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContainers bool) error {
 	rows := buildStatusRows(results, aggregateContainers)
-	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', tabwriter.StripEscape)
-	styles := outputStyles(w)
 	header := "CONTAINER"
 	if aggregateContainers {
 		header = "CONTAINERS"
 	}
-	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n",
-		tabwriterStyled(styles.Render(tui.RoleHeading, "SERVICE")),
-		tabwriterStyled(styles.Render(tui.RoleHeading, "HOST")),
-		tabwriterStyled(styles.Render(tui.RoleHeading, "TYPE")),
-		tabwriterStyled(styles.Render(tui.RoleHeading, header)),
-		tabwriterStyled(styles.Render(tui.RoleHeading, "STATUS")),
-	); err != nil {
-		return err
-	}
+	tableRows := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", row.Service, row.Host, row.Type, row.Containers, row.Status); err != nil {
-			return err
-		}
+		tableRows = append(tableRows, []string{row.Service, row.Host, row.Type, row.Containers, row.Status})
 	}
-	return tw.Flush()
+	return renderOutputTable(w, []string{"SERVICE", "HOST", "TYPE", header, "STATUS"}, tableRows)
 }
 
 func dockerAggregateStatus(components []statusComponent) string {

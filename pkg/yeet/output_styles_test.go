@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +16,10 @@ type fdBuffer struct {
 }
 
 func (w *fdBuffer) Fd() uintptr { return w.fd }
+
+func stripHeadingANSI(text string) string {
+	return strings.NewReplacer("\x1b[1;36m", "", "\x1b[m", "").Replace(text)
+}
 
 func TestOutputStylesWriterPolicy(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
@@ -43,14 +48,5 @@ func TestOutputStylesWriterPolicy(t *testing.T) {
 				t.Fatalf("outputStyles().Enabled() = %v, want %v", got, tc.wantEnable)
 			}
 		})
-	}
-}
-
-func TestTabwriterStyledProtectsANSIWidth(t *testing.T) {
-	const styled = "\x1b[1;36mSERVICE\x1b[m"
-	want := string([]byte{0xff}) + styled + string([]byte{0xff})
-
-	if got := tabwriterStyled(styled); got != want {
-		t.Fatalf("tabwriterStyled() = %q, want %q", got, want)
 	}
 }

@@ -145,30 +145,56 @@ func TestRenderStatusTablesStylesTTYHeadingsOnly(t *testing.T) {
 	isTerminalFn = func(fd int) bool { return fd == 42 }
 
 	out := &fdBuffer{fd: 42}
+	const service = "long-service-name-for-alignment"
 	results := []hostStatusData{{
 		Host: "host-a",
 		Services: []statusService{{
-			ServiceName: "svc-a",
+			ServiceName: service,
 			ServiceType: "binary",
-			Components:  []statusComponent{{Name: "svc-a", Status: "running"}},
+			Components:  []statusComponent{{Name: service, Status: "running"}},
 		}},
 	}}
 	if err := renderStatusTables(out, results, false); err != nil {
 		t.Fatalf("renderStatusTables error: %v", err)
 	}
 
-	text := out.String()
+	rendered := out.String()
+	lines := strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("status output lines = %d, want 2:\n%s", len(lines), rendered)
+	}
+	if !strings.HasPrefix(lines[0], "\x1b[1;36m") || !strings.HasSuffix(lines[0], "\x1b[m") {
+		t.Fatalf("status header row is not styled as a heading:\n%s", rendered)
+	}
+	if strings.Contains(lines[1], "\x1b[") {
+		t.Fatalf("status data row is styled:\n%s", rendered)
+	}
+
+	text := stripHeadingANSI(rendered)
 	for _, heading := range []string{"SERVICE", "HOST", "TYPE", "CONTAINER", "STATUS"} {
-		styled := "\x1b[1;36m" + heading + "\x1b[m"
-		if !strings.Contains(text, styled) {
+		if !strings.Contains(text, heading) {
 			t.Fatalf("status output missing styled heading %q:\n%s", heading, text)
 		}
-		text = strings.ReplaceAll(text, styled, heading)
 	}
 	if strings.Contains(text, "\x1b[") {
 		t.Fatalf("status output styled more than its headings:\n%s", out.String())
 	}
-	if !strings.Contains(text, "svc-a") || !strings.Contains(text, "host-a") || !strings.Contains(text, "running") {
+	if !strings.Contains(text, service) || !strings.Contains(text, "host-a") || !strings.Contains(text, "running") {
 		t.Fatalf("status row changed:\n%s", out.String())
+	}
+
+	plainLines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	headings := []string{"SERVICE", "HOST", "TYPE", "CONTAINER", "STATUS"}
+	values := []string{service, "host-a", "binary", "-", "running"}
+	headingCursor := 0
+	valueCursor := 0
+	for i := range headings {
+		headingColumn := headingCursor + strings.Index(plainLines[0][headingCursor:], headings[i])
+		valueColumn := valueCursor + strings.Index(plainLines[1][valueCursor:], values[i])
+		if headingColumn != valueColumn {
+			t.Errorf("%s column starts at %d, row value %q starts at %d:\n%s", headings[i], headingColumn, values[i], valueColumn, text)
+		}
+		headingCursor = headingColumn + len(headings[i])
+		valueCursor = valueColumn + len(values[i])
 	}
 }

@@ -6,13 +6,11 @@ package yeet
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"slices"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"tailscale.com/client/local"
@@ -85,14 +83,9 @@ type listHostRow struct {
 }
 
 func renderListHosts(out io.Writer, rows []listHostRow) error {
-	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(w, "HOST\tVERSION\tTAGS"); err != nil {
-		return err
-	}
+	tableRows := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", row.Host, row.Version, strings.Join(row.Tags, ",")); err != nil {
-			return err
-		}
+		tableRows = append(tableRows, []string{row.Host, row.Version, strings.Join(row.Tags, ",")})
 	}
-	return w.Flush()
+	return renderOutputTable(out, []string{"HOST", "VERSION", "TAGS"}, tableRows)
 }
