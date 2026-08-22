@@ -109,6 +109,24 @@ func TestVMKernelBootArgsIncludesGuestSystemInit(t *testing.T) {
 	}
 }
 
+func TestVMKernelBootArgsIncludesSerialConsoleDimensions(t *testing.T) {
+	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+
+	got, err := vmKernelBootArgs("devbox", network, vmImageManifest{})
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
+
+	for _, want := range []string{
+		"systemd.tty.rows.console=24",
+		"systemd.tty.columns.console=80",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("boot args missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestVMKernelBootArgsOmitsGuestSystemInitWhenManifestDoesNotDeclareIt(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 

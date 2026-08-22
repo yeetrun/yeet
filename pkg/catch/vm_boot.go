@@ -10,8 +10,12 @@ import (
 	"strings"
 )
 
-const vmGuestInitPath = "/usr/local/lib/yeet-vm/yeet-init"
-const vmLegacyKernelBootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+const (
+	vmGuestInitPath            = "/usr/local/lib/yeet-vm/yeet-init"
+	vmLegacyKernelBootArgs     = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+	vmSystemdConsoleRowsArg    = "systemd.tty.rows.console=24"
+	vmSystemdConsoleColumnsArg = "systemd.tty.columns.console=80"
+)
 
 func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageManifest) (string, error) {
 	if err := validateVMKernelBootHostname(service); err != nil {
@@ -19,6 +23,8 @@ func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageMan
 	}
 	args := []string{
 		"console=ttyS0",
+		vmSystemdConsoleRowsArg,
+		vmSystemdConsoleColumnsArg,
 		"quiet",
 		"loglevel=4",
 		"reboot=k",
