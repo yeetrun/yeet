@@ -8,6 +8,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod early_sshd;
+
 pub const DEFAULT_INTERFACE: &str = "eth0";
 pub const DEFAULT_SYSTEMD: &str = "/usr/lib/systemd/systemd";
 pub const PROC_CMDLINE: &str = "/proc/cmdline";
@@ -19,6 +21,7 @@ pub struct BootConfig {
     pub hostname: Option<String>,
     pub interface: String,
     pub system_init: String,
+    pub early_ssh: bool,
 }
 
 impl BootConfig {
@@ -35,6 +38,7 @@ impl BootConfig {
                 .filter(|value| value.starts_with('/') && !value.contains('\0'))
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_SYSTEMD.to_string()),
+            early_ssh: args.get("yeet.early_ssh").is_some_and(|value| value == "1"),
         }
     }
 }
@@ -191,10 +195,59 @@ pub fn exec_system_init(path: &str) -> io::Error {
 pub fn run() -> io::Result<()> {
     let cmdline = read_cmdline_or_empty(Path::new(PROC_CMDLINE), Path::new(SERIAL_TTY));
     let cfg = BootConfig::from_cmdline(&cmdline);
+    let early_ssh_enabled = if cfg.early_ssh {
+        match early_sshd::prepare_runtime() {
+            Ok(()) => true,
+            Err(err) => {
+                let _ = write_serial(
+                    Path::new(SERIAL_TTY),
+                    &format!("yeet-init-error prepare early sshd: {err}\n"),
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let early_sshd = match early_sshd::start_early_sshd(early_ssh_enabled) {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = write_serial(
+                Path::new(SERIAL_TTY),
+                &format!("yeet-init-error early sshd: {err}\n"),
+            );
+            None
+        }
+    };
+    if early_sshd.is_some() {
+        let _ = write_serial(Path::new(SERIAL_TTY), "yeet-early-ssh\n");
+    }
     if let Err(err) = run_before_systemd(&cmdline) {
         let _ = write_serial(Path::new(SERIAL_TTY), &format!("yeet-init-error {err}\n"));
     }
-    Err(exec_system_init(&cfg.system_init))
+    Err(exec_system_init_with_early_sshd(
+        &cfg.system_init,
+        early_sshd,
+        exec_system_init,
+        early_sshd::stop_early_sshd,
+    ))
+}
+
+fn exec_system_init_with_early_sshd<Child, Exec, Stop>(
+    path: &str,
+    mut early_sshd: Option<Child>,
+    exec: Exec,
+    mut stop: Stop,
+) -> io::Error
+where
+    Exec: FnOnce(&str) -> io::Error,
+    Stop: FnMut(&mut Child) -> io::Result<()>,
+{
+    let err = exec(path);
+    if let Some(child) = early_sshd.as_mut() {
+        let _ = stop(child);
+    }
+    err
 }
 
 fn read_cmdline_or_empty(cmdline_path: &Path, serial_path: &Path) -> String {
@@ -296,6 +349,7 @@ mod tests {
         let cfg = BootConfig::from_cmdline("console=ttyS0 yeet.hostname=devbox");
         assert_eq!(cfg.hostname.as_deref(), Some("devbox"));
         assert_eq!(cfg.interface, "eth0");
+        assert!(!cfg.early_ssh);
     }
 
     #[test]
@@ -330,6 +384,30 @@ mod tests {
         let cfg = BootConfig::from_cmdline("yeet.hostname=devbox yeet.iface=eth1");
         assert_eq!(cfg.hostname.as_deref(), Some("devbox"));
         assert_eq!(cfg.interface, "eth1");
+    }
+
+    #[test]
+    fn enables_early_ssh_only_for_explicit_flag() {
+        assert!(BootConfig::from_cmdline("yeet.early_ssh=1").early_ssh);
+        assert!(!BootConfig::from_cmdline("yeet.early_ssh=0").early_ssh);
+        assert!(!BootConfig::from_cmdline("yeet.early_ssh").early_ssh);
+    }
+
+    #[test]
+    fn init_failure_stops_early_sshd() {
+        let stopped = RefCell::new(Vec::new());
+        let err = exec_system_init_with_early_sshd(
+            "/systemd",
+            Some(42),
+            |path| io::Error::other(format!("exec failed: {path}")),
+            |child| {
+                stopped.borrow_mut().push(*child);
+                Ok(())
+            },
+        );
+
+        assert!(err.to_string().contains("exec failed: /systemd"));
+        assert_eq!(stopped.into_inner(), [42]);
     }
 
     #[test]

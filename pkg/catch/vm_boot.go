@@ -30,6 +30,8 @@ func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageMan
 			return "", err
 		}
 		args = append(args, "yeet.system_init="+systemInit)
+	} else {
+		args = append(args, "yeet.early_ssh=1")
 	}
 	if ipArg := vmKernelIPArg(service, network); ipArg != "" {
 		args = append(args, ipArg)

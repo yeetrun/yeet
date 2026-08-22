@@ -331,7 +331,11 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "etc", "sudoers.d", "90-yeet-vm-ubuntu"), "ubuntu ALL=(ALL) NOPASSWD:ALL")
 	assertFileContains(t, filepath.Join(root, "etc", "sysctl.d", "90-yeet-vm.conf"), "net.ipv4.ping_group_range = 0 2147483647")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"), "ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"), "ExecStartPre=/usr/local/lib/yeet-vm/handoff-early-sshd")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"), "Restart=always")
+	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "handoff-early-sshd"), "readlink -f \"/proc/$pid/exe\"")
+	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "handoff-early-sshd"), "kill -TERM \"$pid\"")
+	assertFileMode(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "handoff-early-sshd"), 0o755)
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "yeet-ready")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "After=yeet-sshd.service")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "Wants=yeet-sshd.service")
@@ -364,6 +368,17 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(root, "etc", "systemd", "system", "systemd-networkd-wait-online.service")); err != nil || target != "/dev/null" {
 		t.Fatalf("systemd-networkd-wait-online mask = %q, %v; want /dev/null", target, err)
+	}
+}
+
+func TestWriteVMGuestFastBootUnitsReportsFilesystemErrors(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root-file")
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write root file: %v", err)
+	}
+
+	if err := writeVMGuestFastBootUnits(root); err == nil {
+		t.Fatal("writeVMGuestFastBootUnits succeeded with a file as its root")
 	}
 }
 

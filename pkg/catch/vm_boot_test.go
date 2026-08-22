@@ -24,6 +24,7 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 		"reboot=k",
 		"panic=1",
 		"init=/usr/local/lib/yeet-vm/yeet-init",
+		"yeet.early_ssh=1",
 		"ip=dhcp",
 		"yeet.hostname=devbox",
 		"yeet.iface=eth0",
@@ -32,7 +33,7 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 			t.Fatalf("boot args missing %q: %s", want, got)
 		}
 	}
-	for _, wantOnce := range []string{"quiet", "loglevel=4"} {
+	for _, wantOnce := range []string{"quiet", "loglevel=4", "yeet.early_ssh=1"} {
 		if count := strings.Count(got, wantOnce); count != 1 {
 			t.Fatalf("boot args contain %q %d times, want exactly once: %s", wantOnce, count, got)
 		}
@@ -102,6 +103,9 @@ func TestVMKernelBootArgsIncludesGuestSystemInit(t *testing.T) {
 	}
 	if !strings.Contains(got, "yeet.system_init=/run/current-system/init") {
 		t.Fatalf("boot args missing NixOS system init: %s", got)
+	}
+	if strings.Contains(got, "yeet.early_ssh") {
+		t.Fatalf("NixOS boot args enable Ubuntu-only early SSH handoff: %s", got)
 	}
 }
 

@@ -735,6 +735,13 @@ func writeVMGuestReadyUnit(root string, fastBoot bool) error {
 		}
 		return writeVMGuestSystemdSymlink(root, "multi-user.target.wants/ssh.service", "/usr/lib/systemd/system/ssh.service")
 	}
+	return writeVMGuestFastBootUnits(root)
+}
+
+func writeVMGuestFastBootUnits(root string) error {
+	if err := writeVMGuestFile(root, "usr/local/lib/yeet-vm/handoff-early-sshd", []byte(vmGuestSSHDHandoffScript), 0o755); err != nil {
+		return err
+	}
 	if err := writeVMGuestFile(root, "etc/systemd/system/yeet-sshd.service", []byte(vmGuestSSHDService), 0o644); err != nil {
 		return err
 	}
@@ -802,6 +809,7 @@ ConditionPathExists=/usr/sbin/sshd
 [Service]
 Type=exec
 RuntimeDirectory=sshd
+ExecStartPre=/usr/local/lib/yeet-vm/handoff-early-sshd
 ExecStartPre=/usr/sbin/sshd -t
 ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
 Restart=always
@@ -809,6 +817,36 @@ RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
+`
+
+const vmGuestSSHDHandoffScript = `#!/bin/sh
+set -eu
+
+pid_file=/run/yeet-vm/early-sshd.pid
+[ -s "$pid_file" ] || exit 0
+pid="$(cat "$pid_file")"
+case "$pid" in
+	''|*[!0-9]*) echo "invalid early sshd pid" >&2; exit 1 ;;
+esac
+if ! kill -0 "$pid" 2>/dev/null; then
+	rm -f "$pid_file"
+	exit 0
+fi
+if [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" != /usr/sbin/sshd ]; then
+	echo "early sshd pid does not identify /usr/sbin/sshd" >&2
+	exit 1
+fi
+
+kill -TERM "$pid"
+for _ in $(seq 1 100); do
+	if ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$pid_file"
+		exit 0
+	fi
+	sleep 0.01
+done
+kill -KILL "$pid" 2>/dev/null || true
+rm -f "$pid_file"
 `
 
 const vmGuestReadyScript = `#!/bin/sh
