@@ -1,0 +1,4 @@
+{"__MONOTONIC_TIMESTAMP":"1000000","MESSAGE":"Running Firecracker"}
+{"__MONOTONIC_TIMESTAMP":"1050000","MESSAGE":"Successfully started microvm that was configured from one single json"}
+{"__MONOTONIC_TIMESTAMP":"1100000","MESSAGE":"[    0.000000] Linux version test"}
+{"__MONOTONIC_TIMESTAMP":"1850000","MESSAGE":"[    0.750000] Run /usr/local/lib/yeet-vm/yeet-init as init process"}
