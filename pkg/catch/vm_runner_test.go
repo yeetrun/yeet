@@ -40,6 +40,7 @@ func TestVMRunnerSystemctlCommands(t *testing.T) {
 	want := [][]string{
 		{"systemctl", "start", "yeet-vm-devbox.service"},
 		{"systemctl", "stop", "yeet-vm-devbox.service"},
+		{"systemctl", "reset-failed", "yeet-vm-devbox.service"},
 		{"systemctl", "restart", "yeet-vm-devbox.service"},
 		{"systemctl", "enable", "yeet-vm-devbox.service"},
 		{"systemctl", "disable", "yeet-vm-devbox.service"},
@@ -49,6 +50,23 @@ func TestVMRunnerSystemctlCommands(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %#v, want %#v", *calls, want)
+	}
+}
+
+func TestVMRunnerStopPreservesFailedStateWhenStopFails(t *testing.T) {
+	var calls [][]string
+	runner := &vmRunner{name: "devbox"}
+	runner.SetNewCmd(func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("sh", "-c", "exit 1")
+	})
+
+	if err := runner.Stop(); err == nil {
+		t.Fatal("Stop returned nil, want systemctl failure")
+	}
+	want := [][]string{{"systemctl", "stop", "yeet-vm-devbox.service"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
 	}
 }
 

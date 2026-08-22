@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/shayne/yargs"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/copyutil"
@@ -165,6 +166,9 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 	"remove": func(ctx context.Context, req svcCommandRequest) error {
 		return handleSvcRemove(ctx, req)
 	},
+	"stop": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcStop(ctx, req)
+	},
 	"copy": func(_ context.Context, req svcCommandRequest) error {
 		return handleSvcCopy(req)
 	},
@@ -195,6 +199,80 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 	"vm": func(ctx context.Context, req svcCommandRequest) error {
 		return handleSvcVM(ctx, req)
 	},
+}
+
+const (
+	vmGuestStopTimeout      = 10 * time.Second
+	vmGuestStopPollInterval = 100 * time.Millisecond
+)
+
+func handleSvcStop(ctx context.Context, req svcCommandRequest) error {
+	if err := gracefullyStopVMGuest(ctx, Host(), req.Service); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: VM guest did not shut down cleanly; forcing stop: %v\n", err)
+	}
+	return handleSvcRemote(ctx, req)
+}
+
+func gracefullyStopVMGuest(ctx context.Context, host, service string) error {
+	resp, err := fetchSSHServiceInfoFunc(ctx, host, service)
+	if err != nil {
+		return fmt.Errorf("inspect service before stop: %w", err)
+	}
+	if !runningVMService(resp) {
+		return nil
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, vmGuestStopTimeout)
+	defer cancel()
+	sshErr := requestVMGuestShutdown(shutdownCtx, host, service)
+	return waitForVMGuestShutdown(shutdownCtx, host, service, sshErr)
+}
+
+func runningVMService(resp catchrpc.ServiceInfoResponse) bool {
+	return resp.Found && resp.Info.ServiceType == serviceTypeVM && serviceInfoIsRunning(resp)
+}
+
+func requestVMGuestShutdown(ctx context.Context, host, service string) error {
+	plan, err := serviceSSHExecutionPlan(ctx, host, sshInvocation{
+		Options: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=3"},
+		Service: service,
+		Command: []string{"sudo", "-n", "systemctl", "poweroff", "--no-wall"},
+	})
+	if err != nil {
+		return fmt.Errorf("prepare VM guest shutdown: %w", err)
+	}
+	return runSSHPlan(ctx, plan, nil, io.Discard, io.Discard)
+}
+
+func waitForVMGuestShutdown(ctx context.Context, host, service string, sshErr error) error {
+	ticker := time.NewTicker(vmGuestStopPollInterval)
+	defer ticker.Stop()
+	for {
+		resp, infoErr := fetchSSHServiceInfoFunc(ctx, host, service)
+		if infoErr == nil && (!resp.Found || !serviceInfoIsRunning(resp)) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if infoErr != nil {
+				return fmt.Errorf("wait for VM guest shutdown: %w", infoErr)
+			}
+			if sshErr != nil {
+				return fmt.Errorf("request VM guest shutdown: %w", sshErr)
+			}
+			return fmt.Errorf("VM guest remained running after %s", vmGuestStopTimeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func serviceInfoIsRunning(resp catchrpc.ServiceInfoResponse) bool {
+	for _, component := range resp.Info.Status.Components {
+		if component.Status == "running" {
+			return true
+		}
+	}
+	return false
 }
 
 func HandleSvcCmd(args []string) error {

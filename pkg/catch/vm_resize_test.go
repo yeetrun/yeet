@@ -297,6 +297,47 @@ func TestVMSetReplacesNetworkAndMetadata(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
 }
 
+func TestVMSetPreservesExistingLANIdentityWhenFlagsAreOmitted(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+
+	const originalMAC = "02:fc:00:00:00:44"
+	lan := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{
+		LANParent:         "vmbr0",
+		LANParentIsBridge: true,
+		LANMAC:            originalMAC,
+	})
+	_, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		service := data.Services["devbox"]
+		service.SvcNetwork = nil
+		service.VM.Networks = lan.DBNetworks()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withServiceSetVMNetworkRunner(t, func([]string) error { return nil })
+	withServiceSetVMMetadataInjector(t, func(context.Context, string, vmMetadataConfig) error { return nil })
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+	}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+
+	service := getTestService(t, server, "devbox")
+	if len(service.VM.Networks) != 1 {
+		t.Fatalf("networks = %#v, want one LAN network", service.VM.Networks)
+	}
+	got := service.VM.Networks[0]
+	if got.Mode != "lan" || got.Parent != "vmbr0" || got.MAC != originalMAC {
+		t.Fatalf("LAN network = %#v, want parent vmbr0 and MAC %s", got, originalMAC)
+	}
+}
+
 func TestVMSetMigratesStoppedVMToISOBehindVerifiedPolicy(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

@@ -115,6 +115,73 @@ func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	}
 }
 
+func TestHandleSvcStopGracefullyPowersOffVMBeforeRemoteStop(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	oldFetchServerInfo := fetchSSHServerInfoFunc
+	oldFetchServiceInfo := fetchSSHServiceInfoFunc
+	oldRunSSH := runSSHCommandFunc
+	t.Cleanup(func() {
+		fetchSSHServerInfoFunc = oldFetchServerInfo
+		fetchSSHServiceInfoFunc = oldFetchServiceInfo
+		runSSHCommandFunc = oldRunSSH
+	})
+
+	SetHostOverride("host-a")
+	fetchSSHServerInfoFunc = func(context.Context, string) (serverInfo, error) {
+		return serverInfo{}, nil
+	}
+	infoCalls := 0
+	fetchSSHServiceInfoFunc = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "host-a" || service != "devbox" {
+			t.Fatalf("service info target = %s/%s, want host-a/devbox", host, service)
+		}
+		infoCalls++
+		status := "running"
+		if infoCalls >= 3 {
+			status = "stopped"
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Status: catchrpc.ServiceStatus{Components: []catchrpc.ServiceComponentStatus{{
+					Name: "devbox", Status: status,
+				}}},
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "svc", IP: "192.168.100.12"}},
+				},
+			},
+		}, nil
+	}
+
+	sshRan := false
+	runSSHCommandFunc = func(_ context.Context, args []string, _ io.Reader, _, _ io.Writer) error {
+		sshRan = true
+		if command := args[len(args)-1]; command != "sudo -n systemctl poweroff --no-wall" {
+			t.Fatalf("guest shutdown command = %q", command)
+		}
+		return nil
+	}
+	execRemoteFn = func(_ context.Context, service string, args []string, _ io.Reader, _ bool) error {
+		if !sshRan {
+			t.Fatal("remote stop ran before guest shutdown")
+		}
+		if service != "devbox" || !reflect.DeepEqual(args, []string{"stop"}) {
+			t.Fatalf("remote stop = %q %#v", service, args)
+		}
+		return nil
+	}
+
+	err := handleSvcCommand(context.Background(), svcCommandRequest{
+		Command: svcCommand{Name: "stop", RawArgs: []string{"stop"}},
+		Service: "devbox",
+	})
+	if err != nil {
+		t.Fatalf("handleSvcCommand: %v", err)
+	}
+}
+
 func TestHandleSvcRunRejectsInvalidServiceNameBeforeDeploy(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "bad.name"

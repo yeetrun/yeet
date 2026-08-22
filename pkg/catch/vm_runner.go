@@ -64,7 +64,14 @@ func (r *vmRunner) Start() error {
 }
 
 func (r *vmRunner) Stop() error {
-	return r.systemctl("stop", r.unit())
+	if err := r.systemctl("stop", r.unit()); err != nil {
+		return err
+	}
+	resetErr := r.systemctl("reset-failed", r.unit())
+	if vmSystemdUnitMissingError(resetErr, r.unit()) {
+		resetErr = nil
+	}
+	return resetErr
 }
 
 func (r *vmRunner) Restart() error {

@@ -381,7 +381,7 @@ func (s *Server) planVMServiceSetNetwork(ctx context.Context, dv *db.DataView, n
 	if err != nil {
 		return vmNetworkPlan{}, nil, nil, err
 	}
-	input, err := vmNetworkInputForServiceSet(svcNet, allocation, modes, flags)
+	input, err := vmNetworkInputForServiceSet(current, svcNet, allocation, modes, flags)
 	if err != nil {
 		return vmNetworkPlan{}, nil, nil, err
 	}
@@ -422,11 +422,16 @@ func svcNetworkForVMServiceSet(dv *db.DataView, current *db.SvcNetwork, modes []
 	return nil, nil
 }
 
-func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, allocation *db.ISOAllocation, modes []string, flags cli.VMSetFlags) (vmNetworkInputs, error) {
-	input := vmNetworkInputs{
-		LANParent: strings.TrimSpace(flags.MacvlanParent),
-		LANVLAN:   flags.MacvlanVlan,
-		LANMAC:    strings.TrimSpace(flags.MacvlanMac),
+func vmNetworkInputForServiceSet(current []db.VMNetworkConfig, svcNet *db.SvcNetwork, allocation *db.ISOAllocation, modes []string, flags cli.VMSetFlags) (vmNetworkInputs, error) {
+	input := existingVMLANNetworkInput(current)
+	if parent := strings.TrimSpace(flags.MacvlanParent); parent != "" {
+		input.LANParent = parent
+	}
+	if flags.MacvlanVlan != 0 {
+		input.LANVLAN = flags.MacvlanVlan
+	}
+	if mac := strings.TrimSpace(flags.MacvlanMac); mac != "" {
+		input.LANMAC = mac
 	}
 	if svcNet != nil && svcNet.IPv4.IsValid() {
 		input.ServiceIP = svcNet.IPv4.String()
@@ -446,6 +451,19 @@ func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, allocation *db.ISOAlloca
 		}
 	}
 	return input, nil
+}
+
+func existingVMLANNetworkInput(networks []db.VMNetworkConfig) vmNetworkInputs {
+	for _, network := range networks {
+		if strings.EqualFold(strings.TrimSpace(network.Mode), "lan") {
+			return vmNetworkInputs{
+				LANParent: network.Parent,
+				LANVLAN:   network.VLAN,
+				LANMAC:    network.MAC,
+			}
+		}
+	}
+	return vmNetworkInputs{}
 }
 
 func cloneVMISOAllocation(allocation *db.ISOAllocation) *db.ISOAllocation {
