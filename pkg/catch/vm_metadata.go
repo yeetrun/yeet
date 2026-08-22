@@ -813,6 +813,7 @@ WantedBy=multi-user.target
 
 const vmGuestReadyScript = `#!/bin/sh
 vm_guest_ssh_ready() {
+	[ ! -e /run/nologin ] &&
 	ss -H -ltn 'sport = :22' 2>/dev/null | grep -q .
 }
 

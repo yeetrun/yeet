@@ -19,6 +19,8 @@ func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageMan
 	}
 	args := []string{
 		"console=ttyS0",
+		"quiet",
+		"loglevel=4",
 		"reboot=k",
 		"panic=1",
 		"init=" + vmGuestInitPath,

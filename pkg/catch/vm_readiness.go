@@ -5,7 +5,10 @@
 package catch
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os/exec"
@@ -33,11 +36,19 @@ type vmGuestReadyWaitInput struct {
 
 type vmGuestReadyJournalRunner func(context.Context, []string) ([]byte, error)
 
+type vmGuestReadyJournalStream struct {
+	Lines  <-chan []byte
+	Errors <-chan error
+}
+
+type vmGuestReadyJournalFollower func(context.Context, []string) (vmGuestReadyJournalStream, error)
+
 var (
-	vmGuestReadyJournalOutput = runVMGuestReadyJournalOutput
-	vmGuestReadyNow           = time.Now
-	vmGuestReadyPollInterval  = 500 * time.Millisecond
-	vmGuestReadyTimeout       = 30 * time.Second
+	vmGuestReadyJournalOutput     = runVMGuestReadyJournalOutput
+	vmGuestReadyJournalFollow     = runVMGuestReadyJournalFollow
+	vmGuestReadyNow               = time.Now
+	vmGuestReadyAgentPollInterval = 25 * time.Millisecond
+	vmGuestReadyTimeout           = 30 * time.Second
 )
 
 func captureVMGuestReadyBoundary(ctx context.Context, service string) (vmGuestReadyBoundary, error) {
@@ -59,30 +70,73 @@ func waitVMGuestReady(ctx context.Context, input vmGuestReadyWaitInput) (vmGuest
 	interfaceOrder := vmGuestReadyInterfaceOrder(input.Network)
 	ctx, cancel := context.WithTimeout(ctx, vmGuestReadyTimeout)
 	defer cancel()
-	var lastErr error
+
+	lines, journalErrors, lastErr := startVMGuestReadyJournal(ctx, service, input.Boundary)
+
+	ticker := time.NewTicker(vmGuestReadyAgentPollInterval)
+	defer ticker.Stop()
 	for {
-		report, ok, err := readVMGuestReady(ctx, service, input.Boundary, allowed)
-		if err != nil {
-			lastErr = err
-		} else if ok {
-			return report, nil
-		}
-		report, ok, err = readVMGuestReadyFromAgent(ctx, input.VsockSocket, interfaceOrder)
-		if err != nil {
-			lastErr = err
-		} else if ok {
+		report, ok, agentErr := readVMGuestReadyFromAgent(ctx, input.VsockSocket, interfaceOrder)
+		lastErr = latestVMGuestReadyError(lastErr, agentErr)
+		if ok {
 			return report, nil
 		}
 		select {
-		case <-ctx.Done():
-			msg := fmt.Sprintf("VM %s started, but guest readiness was not reported within %s; use `yeet vm console %s`", service, vmGuestReadyTimeout, service)
-			if lastErr != nil {
-				return vmGuestReadyReport{}, fmt.Errorf("%s: %w", msg, lastErr)
+		case line, open := <-lines:
+			if !open {
+				lines = nil
+				continue
 			}
-			return vmGuestReadyReport{}, fmt.Errorf("%s", msg)
-		case <-time.After(vmGuestReadyPollInterval):
+			if report, ok := parseVMGuestReadyReport(line, allowed); ok {
+				return report, nil
+			}
+		case err, open := <-journalErrors:
+			journalErrors, lastErr = consumeVMGuestReadyJournalError(journalErrors, lastErr, err, open)
+		case <-ctx.Done():
+			return vmGuestReadyReport{}, vmGuestReadyTimeoutError(service, lastErr)
+		case <-ticker.C:
 		}
 	}
+}
+
+func startVMGuestReadyJournal(ctx context.Context, service string, boundary vmGuestReadyBoundary) (<-chan []byte, <-chan error, error) {
+	stream, err := vmGuestReadyJournalFollow(ctx, vmGuestReadyJournalFollowArgs(service, boundary))
+	if err != nil {
+		return nil, nil, fmt.Errorf("follow VM journal: %w", err)
+	}
+	return stream.Lines, stream.Errors, nil
+}
+
+func latestVMGuestReadyError(current, next error) error {
+	if next != nil {
+		return next
+	}
+	return current
+}
+
+func consumeVMGuestReadyJournalError(errors <-chan error, current, next error, open bool) (<-chan error, error) {
+	if !open {
+		return nil, current
+	}
+	return errors, latestVMGuestReadyError(current, next)
+}
+
+func vmGuestReadyTimeoutError(service string, lastErr error) error {
+	msg := fmt.Sprintf("VM %s started, but guest readiness was not reported within %s; use `yeet vm console %s`", service, vmGuestReadyTimeout, service)
+	if lastErr != nil {
+		return fmt.Errorf("%s: %w", msg, lastErr)
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+func vmGuestReadyJournalFollowArgs(service string, boundary vmGuestReadyBoundary) []string {
+	args := []string{"journalctl", "-u", vmSystemdUnitName(service), "-o", "cat", "--no-pager"}
+	if boundary.Cursor != "" {
+		args = append(args, "--after-cursor", boundary.Cursor)
+	} else if !boundary.Since.IsZero() {
+		args = append(args, "--since", "@"+strconv.FormatInt(boundary.Since.Unix(), 10))
+	}
+	return append(args, "--follow")
 }
 
 func readVMGuestReadyFromAgent(ctx context.Context, socketPath string, interfaces []string) (vmGuestReadyReport, bool, error) {
@@ -108,21 +162,6 @@ func readVMGuestReadyFromAgent(ctx context.Context, socketPath string, interface
 		}
 	}
 	return vmGuestReadyReport{}, false, nil
-}
-
-func readVMGuestReady(ctx context.Context, service string, boundary vmGuestReadyBoundary, allowed map[string]struct{}) (vmGuestReadyReport, bool, error) {
-	args := []string{"journalctl", "-u", vmSystemdUnitName(service), "-o", "cat", "--no-pager"}
-	if boundary.Cursor != "" {
-		args = append(args, "--after-cursor", boundary.Cursor)
-	} else if !boundary.Since.IsZero() {
-		args = append(args, "--since", "@"+strconv.FormatInt(boundary.Since.Unix(), 10))
-	}
-	raw, err := vmGuestReadyJournalOutput(ctx, args)
-	if err != nil {
-		return vmGuestReadyReport{}, false, fmt.Errorf("read VM journal: %w", err)
-	}
-	report, ok := parseVMGuestReadyReport(raw, allowed)
-	return report, ok, nil
 }
 
 func parseVMGuestReadyReport(raw []byte, allowed map[string]struct{}) (vmGuestReadyReport, bool) {
@@ -186,4 +225,52 @@ func runVMGuestReadyJournalOutput(ctx context.Context, args []string) ([]byte, e
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	return cmd.Output()
+}
+
+func runVMGuestReadyJournalFollow(ctx context.Context, args []string) (vmGuestReadyJournalStream, error) {
+	if len(args) == 0 {
+		return vmGuestReadyJournalStream{}, fmt.Errorf("journal command is empty")
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return vmGuestReadyJournalStream{}, fmt.Errorf("open journal output: %w", err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return vmGuestReadyJournalStream{}, fmt.Errorf("start journal follower: %w", err)
+	}
+
+	lines := make(chan []byte)
+	errorsOut := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		defer close(errorsOut)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
+		for scanner.Scan() {
+			line := bytes.Clone(scanner.Bytes())
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				_ = cmd.Wait()
+				return
+			}
+		}
+		waitErr := cmd.Wait()
+		if ctx.Err() != nil {
+			return
+		}
+		if err := errors.Join(scanner.Err(), waitErr); err != nil {
+			if output := strings.TrimSpace(stderr.String()); output != "" {
+				err = fmt.Errorf("follow VM journal: %w: %s", err, output)
+			} else {
+				err = fmt.Errorf("follow VM journal: %w", err)
+			}
+			errorsOut <- err
+		}
+	}()
+
+	return vmGuestReadyJournalStream{Lines: lines, Errors: errorsOut}, nil
 }

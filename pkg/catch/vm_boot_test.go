@@ -19,6 +19,10 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 
 	for _, want := range []string{
 		"console=ttyS0",
+		"quiet",
+		"loglevel=4",
+		"reboot=k",
+		"panic=1",
 		"init=/usr/local/lib/yeet-vm/yeet-init",
 		"ip=dhcp",
 		"yeet.hostname=devbox",
@@ -26,6 +30,11 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("boot args missing %q: %s", want, got)
+		}
+	}
+	for _, wantOnce := range []string{"quiet", "loglevel=4"} {
+		if count := strings.Count(got, wantOnce); count != 1 {
+			t.Fatalf("boot args contain %q %d times, want exactly once: %s", wantOnce, count, got)
 		}
 	}
 	for _, unwanted := range []string{"pci=off", "root=/dev/vda", " rw"} {

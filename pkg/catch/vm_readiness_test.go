@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -79,24 +81,20 @@ func TestVMGuestReadyDefaultTimeoutIsThirtySeconds(t *testing.T) {
 	}
 }
 
-func TestWaitVMGuestReadyUsesCursorAndReturnsFreshMarker(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
-	vmGuestReadyTimeout = time.Second
-	vmGuestReadyPollInterval = time.Millisecond
-	t.Cleanup(func() {
-		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
-	})
+func TestWaitVMGuestReadyFollowsCursorOnce(t *testing.T) {
+	lines := make(chan []byte, 2)
+	errs := make(chan error, 1)
+	lines <- []byte("old boot")
+	lines <- []byte("yeet-ready eth0 10.0.4.178")
+
 	calls := 0
-	stubVMGuestReadyJournal(t, func(ctx context.Context, args []string) ([]byte, error) {
+	stubVMGuestReadyJournalFollow(t, func(ctx context.Context, args []string) (vmGuestReadyJournalStream, error) {
 		calls++
-		if !strings.Contains(strings.Join(args, " "), "--after-cursor s/abc") {
-			t.Fatalf("args missing cursor: %#v", args)
+		want := []string{"journalctl", "-u", "yeet-vm-devbox.service", "-o", "cat", "--no-pager", "--after-cursor", "s/abc", "--follow"}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("args = %#v, want %#v", args, want)
 		}
-		if calls == 1 {
-			return []byte("old boot\n"), nil
-		}
-		return []byte("yeet-ready eth0 10.0.4.178\n"), nil
+		return vmGuestReadyJournalStream{Lines: lines, Errors: errs}, nil
 	})
 
 	report, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
@@ -107,22 +105,31 @@ func TestWaitVMGuestReadyUsesCursorAndReturnsFreshMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitVMGuestReady: %v", err)
 	}
+	if calls != 1 {
+		t.Fatalf("journal follower calls = %d, want 1", calls)
+	}
 	if report.Interface != "eth0" || report.IP.String() != "10.0.4.178" {
 		t.Fatalf("report = %#v", report)
 	}
 }
 
+func TestVMGuestReadyJournalFollowArgsUsesTimestampFallback(t *testing.T) {
+	boundary := vmGuestReadyBoundary{Since: time.Unix(1234, 0).UTC()}
+	want := []string{"journalctl", "-u", "yeet-vm-devbox.service", "-o", "cat", "--no-pager", "--since", "@1234", "--follow"}
+	if got := vmGuestReadyJournalFollowArgs("devbox", boundary); !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
 func TestWaitVMGuestReadyReturnsAgentReadinessWhenJournalHasNoMarker(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyAgentPollInterval
 	vmGuestReadyTimeout = time.Second
-	vmGuestReadyPollInterval = time.Millisecond
+	vmGuestReadyAgentPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
+		vmGuestReadyAgentPollInterval = oldPoll
 	})
-	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
-		return []byte("booting\n"), nil
-	})
+	stubIdleVMGuestReadyJournalFollow(t)
 	oldQuery := queryVMGuestReadyFn
 	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
 		if socketPath != "/run/devbox/vsock.sock" {
@@ -153,16 +160,14 @@ func TestWaitVMGuestReadyReturnsAgentReadinessWhenJournalHasNoMarker(t *testing.
 }
 
 func TestWaitVMGuestReadyWaitsWhenAgentSSHIsNotReady(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyAgentPollInterval
 	vmGuestReadyTimeout = time.Millisecond
-	vmGuestReadyPollInterval = time.Millisecond
+	vmGuestReadyAgentPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
+		vmGuestReadyAgentPollInterval = oldPoll
 	})
-	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
-		return nil, nil
-	})
+	stubIdleVMGuestReadyJournalFollow(t)
 	oldQuery := queryVMGuestReadyFn
 	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
 		return vmAgentGuestReadyState{
@@ -187,16 +192,14 @@ func TestWaitVMGuestReadyWaitsWhenAgentSSHIsNotReady(t *testing.T) {
 }
 
 func TestWaitVMGuestReadyIgnoresAgentInterfacesOutsidePlan(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyAgentPollInterval
 	vmGuestReadyTimeout = time.Millisecond
-	vmGuestReadyPollInterval = time.Millisecond
+	vmGuestReadyAgentPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
+		vmGuestReadyAgentPollInterval = oldPoll
 	})
-	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
-		return nil, nil
-	})
+	stubIdleVMGuestReadyJournalFollow(t)
 	oldQuery := queryVMGuestReadyFn
 	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
 		return vmAgentGuestReadyState{
@@ -221,16 +224,14 @@ func TestWaitVMGuestReadyIgnoresAgentInterfacesOutsidePlan(t *testing.T) {
 }
 
 func TestWaitVMGuestReadyTimeoutIncludesConsoleHint(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyAgentPollInterval
 	vmGuestReadyTimeout = time.Millisecond
-	vmGuestReadyPollInterval = time.Millisecond
+	vmGuestReadyAgentPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
+		vmGuestReadyAgentPollInterval = oldPoll
 	})
-	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
-		return nil, nil
-	})
+	stubIdleVMGuestReadyJournalFollow(t)
 
 	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
 		Service: "devbox",
@@ -242,15 +243,15 @@ func TestWaitVMGuestReadyTimeoutIncludesConsoleHint(t *testing.T) {
 }
 
 func TestWaitVMGuestReadyReportsJournalErrors(t *testing.T) {
-	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyAgentPollInterval
 	vmGuestReadyTimeout = time.Millisecond
-	vmGuestReadyPollInterval = time.Millisecond
+	vmGuestReadyAgentPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmGuestReadyTimeout = oldTimeout
-		vmGuestReadyPollInterval = oldPoll
+		vmGuestReadyAgentPollInterval = oldPoll
 	})
-	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
-		return nil, errors.New("journal unavailable")
+	stubVMGuestReadyJournalFollow(t, func(context.Context, []string) (vmGuestReadyJournalStream, error) {
+		return vmGuestReadyJournalStream{}, errors.New("journal unavailable")
 	})
 
 	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
@@ -259,6 +260,74 @@ func TestWaitVMGuestReadyReportsJournalErrors(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "journal unavailable") {
 		t.Fatalf("waitVMGuestReady error = %v, want journal error", err)
+	}
+}
+
+func TestRunVMGuestReadyJournalFollowStreamsLines(t *testing.T) {
+	script := writeVMGuestReadyJournalScript(t, "printf 'first\\nsecond\\n'")
+	stream, err := runVMGuestReadyJournalFollow(context.Background(), []string{script})
+	if err != nil {
+		t.Fatalf("runVMGuestReadyJournalFollow: %v", err)
+	}
+
+	var lines []string
+	for line := range stream.Lines {
+		lines = append(lines, string(line))
+	}
+	if !reflect.DeepEqual(lines, []string{"first", "second"}) {
+		t.Fatalf("lines = %#v", lines)
+	}
+	if err, ok := <-stream.Errors; ok {
+		t.Fatalf("unexpected follower error: %v", err)
+	}
+}
+
+func TestRunVMGuestReadyJournalFollowReportsProcessError(t *testing.T) {
+	script := writeVMGuestReadyJournalScript(t, "printf 'journal failed\\n' >&2\nexit 7")
+	stream, err := runVMGuestReadyJournalFollow(context.Background(), []string{script})
+	if err != nil {
+		t.Fatalf("runVMGuestReadyJournalFollow: %v", err)
+	}
+	for range stream.Lines {
+	}
+	got := <-stream.Errors
+	if got == nil || !strings.Contains(got.Error(), "exit status 7") || !strings.Contains(got.Error(), "journal failed") {
+		t.Fatalf("follower error = %v", got)
+	}
+}
+
+func TestRunVMGuestReadyJournalFollowRejectsInvalidCommand(t *testing.T) {
+	if _, err := runVMGuestReadyJournalFollow(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty command error = %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing-journalctl")
+	if _, err := runVMGuestReadyJournalFollow(context.Background(), []string{missing}); err == nil || !strings.Contains(err.Error(), "start journal follower") {
+		t.Fatalf("missing command error = %v", err)
+	}
+}
+
+func TestRunVMGuestReadyJournalFollowStopsOnCancellation(t *testing.T) {
+	script := writeVMGuestReadyJournalScript(t, "printf 'started\\n'\nexec sleep 30")
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := runVMGuestReadyJournalFollow(ctx, []string{script})
+	if err != nil {
+		t.Fatalf("runVMGuestReadyJournalFollow: %v", err)
+	}
+	if got := <-stream.Lines; string(got) != "started" {
+		t.Fatalf("first line = %q", got)
+	}
+	cancel()
+
+	select {
+	case _, ok := <-stream.Lines:
+		if ok {
+			t.Fatal("lines remained open after cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("journal follower did not stop after cancellation")
+	}
+	if err, ok := <-stream.Errors; ok {
+		t.Fatalf("unexpected cancellation error: %v", err)
 	}
 }
 
@@ -277,4 +346,30 @@ func stubVMGuestReadyJournal(t *testing.T, fn vmGuestReadyJournalRunner) {
 	old := vmGuestReadyJournalOutput
 	vmGuestReadyJournalOutput = fn
 	t.Cleanup(func() { vmGuestReadyJournalOutput = old })
+}
+
+func stubVMGuestReadyJournalFollow(t *testing.T, fn vmGuestReadyJournalFollower) {
+	t.Helper()
+	old := vmGuestReadyJournalFollow
+	vmGuestReadyJournalFollow = fn
+	t.Cleanup(func() { vmGuestReadyJournalFollow = old })
+}
+
+func stubIdleVMGuestReadyJournalFollow(t *testing.T) {
+	t.Helper()
+	lines := make(chan []byte)
+	errs := make(chan error)
+	stubVMGuestReadyJournalFollow(t, func(context.Context, []string) (vmGuestReadyJournalStream, error) {
+		return vmGuestReadyJournalStream{Lines: lines, Errors: errs}, nil
+	})
+}
+
+func writeVMGuestReadyJournalScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "journalctl")
+	content := "#!/bin/sh\nset -eu\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write journal helper: %v", err)
+	}
+	return path
 }
