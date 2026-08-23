@@ -96,11 +96,11 @@ func TestInstallISODNSServiceInstallsStartsAndReusesUnit(t *testing.T) {
 			}
 
 			var calls [][]string
-			withISODNSServiceFakes(t, "/usr/local/bin/catch", nil, systemdPath, func(string) bool { return tt.active }, func(args ...string) error {
+			withISODNSServiceFakes(t, systemdPath, func(string) bool { return tt.active }, func(args ...string) error {
 				calls = append(calls, append([]string(nil), args...))
 				return nil
 			})
-			if err := installISODNSService("/srv/yeet"); err != nil {
+			if err := installISODNSService("/srv/yeet", "/usr/local/bin/catch"); err != nil {
 				t.Fatalf("installISODNSService: %v", err)
 			}
 			if !reflect.DeepEqual(calls, tt.wantCalls) {
@@ -123,23 +123,21 @@ func TestInstallISODNSServicePropagatesLifecycleErrors(t *testing.T) {
 		name      string
 		failAt    string
 		active    bool
-		execErr   error
 		wantError string
 	}{
-		{name: "resolve executable", execErr: wantErr, wantError: "resolve catch binary"},
 		{name: "reload", failAt: "daemon-reload", wantError: "reload systemd"},
 		{name: "enable", failAt: "enable", wantError: "enable ISO DNS"},
 		{name: "start", failAt: "start", wantError: "start ISO DNS"},
 		{name: "restart", failAt: "try-restart", active: true, wantError: "systemctl failed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			withISODNSServiceFakes(t, "/usr/local/bin/catch", tt.execErr, filepath.Join(t.TempDir(), "systemd", "yeet-iso-dns.service"), func(string) bool { return tt.active }, func(args ...string) error {
+			withISODNSServiceFakes(t, filepath.Join(t.TempDir(), "systemd", "yeet-iso-dns.service"), func(string) bool { return tt.active }, func(args ...string) error {
 				if len(args) > 0 && args[0] == tt.failAt {
 					return wantErr
 				}
 				return nil
 			})
-			err := installISODNSService("/srv/yeet")
+			err := installISODNSService("/srv/yeet", "/usr/local/bin/catch")
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("installISODNSService error = %v, want %q", err, tt.wantError)
 			}
@@ -192,24 +190,19 @@ func TestInstallISODNSServiceUnitRejectsBlockedDestination(t *testing.T) {
 
 func renderISODNSServiceUnitWithPath(t *testing.T, catchBin, systemdPath, dataDir string) (string, string, func(), error) {
 	t.Helper()
-	prevExecutablePath := catchExecutablePath
 	prevSystemdUnitPath := catchSystemdUnitPath
-	catchExecutablePath = func() (string, error) { return catchBin, nil }
 	catchSystemdUnitPath = func(string) string { return systemdPath }
 	defer func() {
-		catchExecutablePath = prevExecutablePath
 		catchSystemdUnitPath = prevSystemdUnitPath
 	}()
-	return renderISODNSServiceUnit(dataDir)
+	return renderISODNSServiceUnit(dataDir, catchBin)
 }
 
-func withISODNSServiceFakes(t *testing.T, catchBin string, executableErr error, systemdPath string, active func(string) bool, systemctl func(...string) error) {
+func withISODNSServiceFakes(t *testing.T, systemdPath string, active func(string) bool, systemctl func(...string) error) {
 	t.Helper()
-	prevExecutablePath := catchExecutablePath
 	prevSystemdUnitPath := catchSystemdUnitPath
 	prevSystemdUnitActive := catchSystemdUnitActive
 	prevSystemctl := catchSystemctl
-	catchExecutablePath = func() (string, error) { return catchBin, executableErr }
 	catchSystemdUnitPath = func(unit string) string {
 		if unit != "yeet-iso-dns.service" {
 			t.Fatalf("unexpected unit path lookup %q", unit)
@@ -219,7 +212,6 @@ func withISODNSServiceFakes(t *testing.T, catchBin string, executableErr error, 
 	catchSystemdUnitActive = active
 	catchSystemctl = systemctl
 	t.Cleanup(func() {
-		catchExecutablePath = prevExecutablePath
 		catchSystemdUnitPath = prevSystemdUnitPath
 		catchSystemdUnitActive = prevSystemdUnitActive
 		catchSystemctl = prevSystemctl

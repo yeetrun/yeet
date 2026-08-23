@@ -1252,7 +1252,7 @@ func TestISOReconcileStopsDriftBeforeQuarantineAndVerifiesGlobalPolicyLast(t *te
 	}
 	want := []string{
 		"validate-pool", "install-dns", "ensure-policy:app", "verify-policy:app",
-		"ensure-topology:app", "verify-topology:app", "inspect-runtime:app",
+		"install-gate:app", "ensure-topology:app", "verify-topology:app", "inspect-runtime:app",
 		"stop:app", "quarantine:app", "verify-global-policy",
 	}
 	if !slices.Equal(recorder.events, want) {
@@ -1282,6 +1282,21 @@ func TestISOReconcileStoppedTailscaleServiceVerifiesStoppedWithoutActiveTSCheck(
 	}
 	if !slices.Contains(recorder.events, "verify-stopped:app") {
 		t.Fatalf("stopped ISO service absence was not verified: %#v", recorder.events)
+	}
+}
+
+func TestISOReconcileConvergesGateBeforeTopology(t *testing.T) {
+	allocation := testISONativeRuntimeAllocation("owesplit", iso.StateReady)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"owesplit": allocation})
+	recorder := &isoReconcileRecorder{server: server}
+
+	if err := server.reconcileISONetworksWith(context.Background(), recorder); err != nil {
+		t.Fatal(err)
+	}
+	gate := slices.Index(recorder.events, "install-gate:owesplit")
+	topology := slices.Index(recorder.events, "ensure-topology:owesplit")
+	if gate < 0 || topology < 0 || gate >= topology {
+		t.Fatalf("reconcile events = %#v, want gate convergence before topology", recorder.events)
 	}
 }
 
@@ -1646,6 +1661,10 @@ func (r *isoReconcileRecorder) EnsurePolicy(_ context.Context, service string) e
 
 func (r *isoReconcileRecorder) VerifyPolicy(_ context.Context, service string) error {
 	return r.step("verify-policy:" + service)
+}
+
+func (r *isoReconcileRecorder) InstallGate(_ context.Context, service string) error {
+	return r.step("install-gate:" + service)
 }
 
 func (r *isoReconcileRecorder) EnsureTopology(_ context.Context, service string) error {

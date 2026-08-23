@@ -2477,6 +2477,7 @@ yeet [GLOBAL_OPTIONS] service COMMAND [ARGS...]
 ## Discovery
 
 - Run `yeet service generations --help-agent` for command-specific context.
+- Run `yeet service readmit --help-agent` for command-specific context.
 - Run `yeet service rollback --help-agent` for command-specific context.
 - Run `yeet service set --help-agent` for command-specific context.
 - Run `yeet service sync --help-agent` for command-specific context.
@@ -2520,6 +2521,12 @@ Progress output (auto|tty|plain|quiet)
 service generations <svc> [--format=table|json|json-pretty] - Show service generation rollback state
 
 Run `yeet service generations --help-agent` for command-specific context.
+
+### `service readmit`
+
+Revalidate and readmit a quarantined native ISO service
+
+Run `yeet service readmit --help-agent` for command-specific context.
 
 ### `service rollback`
 
@@ -3549,6 +3556,70 @@ Service name
 Output format: table, json, json-pretty
 
 - **Type**: `string`
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+````
+
+## Group Command: service readmit
+
+````
+# yeet service readmit Agent Context
+
+## Purpose
+
+Revalidate and readmit a quarantined native ISO service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] service readmit <svc>
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Arguments
+
+### `SERVICE`
+
+Service name
+
+- **Type**: `cli.ServiceName`
+- **Required**: true
 
 ## Global Options
 

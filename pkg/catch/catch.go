@@ -336,7 +336,7 @@ func (s *Server) prepareNetworkRuntimeAllowed(ctx context.Context) error {
 	if err := installYeetNSService(s.catchRunnerPath()); err != nil {
 		return failPrerequisite(fmt.Errorf("install bridge service: %w", err))
 	}
-	if err := installYeetDNSServiceForServer(s.cfg.RootDir); err != nil {
+	if err := installYeetDNSServiceForServer(s.cfg.RootDir, s.catchRunnerPath()); err != nil {
 		return failPrerequisite(fmt.Errorf("install DNS service: %w", err))
 	}
 	if err := installDockerPrereqs(s); err != nil {
@@ -546,6 +546,7 @@ func (s *Server) systemdService(sn string) (*svc.SystemdService, error) {
 		sv,
 		serviceRunDirForRoot(root),
 		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+		svc.WithSystemdDirectory(systemdSystemDir),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)

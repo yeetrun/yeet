@@ -38,11 +38,7 @@ func newYeetDNSUnit(catchBin, dataDir string) *svc.SystemdUnit {
 	}
 }
 
-func installYeetDNSService(dataDir string) error {
-	catchBin, err := catchExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to resolve catch binary path: %w", err)
-	}
+func installYeetDNSService(dataDir, catchRunner string) error {
 	tmpDir, err := os.MkdirTemp("", "yeet-dns-unit-*")
 	if err != nil {
 		return fmt.Errorf("failed to create yeet-dns unit tempdir: %w", err)
@@ -52,7 +48,7 @@ func installYeetDNSService(dataDir string) error {
 			log.Printf("failed to remove yeet-dns unit tempdir: %v", err)
 		}
 	}()
-	unitFiles, err := newYeetDNSUnit(catchBin, dataDir).WriteOutUnitFiles(tmpDir)
+	unitFiles, err := newYeetDNSUnit(catchRunner, dataDir).WriteOutUnitFiles(tmpDir)
 	if err != nil {
 		return fmt.Errorf("failed to write yeet-dns unit: %w", err)
 	}

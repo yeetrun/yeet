@@ -20,6 +20,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
@@ -34,34 +35,41 @@ func (e *ttyExecer) startCmdFunc() error {
 	target := e.managedTargetLabel()
 	return e.withLockedServiceActivationMutation(func() error {
 		return e.runAction("start", "Start "+target, func() error {
-			if handled, err := e.activateISOVM(func(runner ServiceRunner) error {
-				return runner.Start()
-			}); handled {
-				if err != nil {
-					return fmt.Errorf("failed to start %s: %w", target, err)
-				}
-				return nil
-			}
-			if err := e.preflightActiveSandboxGeneration(); err != nil {
+			return e.startManagedService(target)
+		})
+	})
+}
+
+func (e *ttyExecer) startManagedService(target string) error {
+	if err := e.preflightISOActivationState(); err != nil {
+		return fmt.Errorf("failed to start %s: %w", target, err)
+	}
+	if handled, err := e.activateISOVM(func(runner ServiceRunner) error {
+		return runner.Start()
+	}); handled {
+		if err != nil {
+			return fmt.Errorf("failed to start %s: %w", target, err)
+		}
+		return nil
+	}
+	if err := e.preflightActiveSandboxGeneration(); err != nil {
+		return fmt.Errorf("failed to start %s: %w", target, err)
+	}
+	return e.withTailscaleResolverReadyForActivation(func() error {
+		if handled, err := e.installISOServiceIfAllocated(); handled {
+			if err != nil {
 				return fmt.Errorf("failed to start %s: %w", target, err)
 			}
-			return e.withTailscaleResolverReadyForActivation(func() error {
-				if handled, err := e.installISOServiceIfAllocated(); handled {
-					if err != nil {
-						return fmt.Errorf("failed to start %s: %w", target, err)
-					}
-					return nil
-				}
-				runner, err := e.serviceRunner()
-				if err != nil {
-					return fmt.Errorf("failed to get service runner: %w", err)
-				}
-				if err := runner.Start(); err != nil {
-					return fmt.Errorf("failed to start %s: %w", target, err)
-				}
-				return nil
-			})
-		})
+			return nil
+		}
+		runner, err := e.serviceRunner()
+		if err != nil {
+			return fmt.Errorf("failed to get service runner: %w", err)
+		}
+		if err := runner.Start(); err != nil {
+			return fmt.Errorf("failed to start %s: %w", target, err)
+		}
+		return nil
 	})
 }
 
@@ -176,6 +184,38 @@ func (e *ttyExecer) rollbackCmdFunc(serviceName string) error {
 		}
 		return e.installRollbackGeneration(ui, serviceName, service.Generation, gen)
 	})
+}
+
+func (e *ttyExecer) readmitCmdFunc(serviceName string) error {
+	return e.withServiceTarget(serviceName, func() error {
+		return e.withLockedServiceActivationMutation(func() error {
+			return e.runAction("readmit", "Readmit service", func() error {
+				return e.readmitService(serviceName)
+			})
+		})
+	})
+}
+
+func (e *ttyExecer) readmitService(serviceName string) error {
+	view, err := e.s.serviceView(serviceName)
+	if err != nil {
+		return fmt.Errorf("load service: %w", err)
+	}
+	record := view.AsStruct()
+	if err := validateNativeISOReadmission(record); err != nil {
+		return err
+	}
+	if err := e.preflightSandboxGenerationActivation(record, record.Generation); err != nil {
+		return fmt.Errorf("preflight readmission: %w", err)
+	}
+	readmit := e.readmitNativeISOFunc
+	if readmit == nil {
+		readmit = e.s.readmitNativeISO
+	}
+	if err := readmit(e.ctx, record); err != nil {
+		return fmt.Errorf("readmit service %q: %w", serviceName, err)
+	}
+	return nil
 }
 
 func (e *ttyExecer) rollbackGeneration(serviceName string) (*db.Service, int, error) {
@@ -530,6 +570,9 @@ func (e *ttyExecer) restartCmdFunc() error {
 	target := e.managedTargetLabel()
 	return e.withLockedServiceActivationMutation(func() error {
 		return e.runAction("restart", "Restart "+target, func() error {
+			if err := e.preflightISOActivationState(); err != nil {
+				return fmt.Errorf("failed to restart %s: %w", target, err)
+			}
 			if handled, err := e.activateISOVM(func(runner ServiceRunner) error {
 				return runner.Restart()
 			}); handled {
@@ -559,6 +602,29 @@ func (e *ttyExecer) restartCmdFunc() error {
 			})
 		})
 	})
+}
+
+func (e *ttyExecer) preflightISOActivationState() error {
+	if e.s == nil {
+		return nil
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return fmt.Errorf("load service network state: %w", err)
+	}
+	record := service.AsStruct()
+	allocation := record.ISO
+	if record.ServiceType != db.ServiceTypeSystemd || allocation == nil || allocation.Kind != string(iso.PayloadNative) {
+		return nil
+	}
+	if iso.AllocationState(allocation.State) != iso.StateQuarantined {
+		return nil
+	}
+	diagnostic := strings.TrimSpace(allocation.LastError)
+	if diagnostic == "" {
+		diagnostic = "no diagnostic was recorded"
+	}
+	return fmt.Errorf("service %q ISO allocation is quarantined: %s; run `yeet service readmit %s` after correcting the isolation failure", e.sn, diagnostic, e.sn)
 }
 
 func (e *ttyExecer) activateISOVM(activate func(ServiceRunner) error) (bool, error) {

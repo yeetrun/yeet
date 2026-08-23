@@ -50,9 +50,12 @@ func TestISOConcreteReconcilePolicyAndTopologyLifecycle(t *testing.T) {
 		events = append(events, "lock")
 		return func() { events = append(events, "unlock") }, nil
 	}
-	installISODNSServiceForServer = func(root string) error {
+	installISODNSServiceForServer = func(root, runner string) error {
 		if root != server.cfg.RootDir {
 			t.Fatalf("install DNS root = %q", root)
+		}
+		if runner != server.catchRunnerPath() {
+			t.Fatalf("install DNS runner = %q, want %q", runner, server.catchRunnerPath())
 		}
 		events = append(events, "dns")
 		return nil
@@ -690,7 +693,7 @@ func TestISONetworkPublicWrappersAndFailClosedStartup(t *testing.T) {
 	ensureISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
 	ensureISOTopologyForRuntime = func(context.Context, netns.ISOTopologySpec) error { return nil }
 	verifyISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
-	installISODNSServiceForServer = func(string) error { return nil }
+	installISODNSServiceForServer = func(string, string) error { return nil }
 	if err := server.EnsureISONetworkBoundary(context.Background(), "app"); err != nil {
 		t.Fatal(err)
 	}

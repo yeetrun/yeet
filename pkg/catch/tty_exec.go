@@ -142,6 +142,7 @@ type ttyExecer struct {
 	serviceInstallFunc                       func(InstallerCfg) error
 	serviceInstallGenFunc                    func(InstallerCfg, int) error
 	preflightSandboxGenerationActivationFunc func(context.Context, *db.Service, int) error
+	readmitNativeISOFunc                     func(context.Context, *db.Service) error
 	vmRuntimeTransactionFunc                 func(context.Context, *Config, func() error) error
 	closeNewStageInstallerFunc               func(FileInstallerCfg) error
 	removeServiceFunc                        func(string, RemoveOptions) (*RemoveReport, error)
@@ -516,10 +517,14 @@ func (e *ttyExecer) dispatch(args []string) error {
 }
 
 func (e *ttyExecer) serviceMutationTarget(cmd string, args []string) (string, error) {
-	if cmd != "service" || len(args) == 0 || args[0] != "rollback" {
+	if cmd != "service" || len(args) == 0 || (args[0] != "rollback" && args[0] != "readmit") {
 		return e.sn, nil
 	}
-	rest, err := cli.ParseServiceRollback(argsWithServiceDefault(args[1:], e.sn))
+	parse := cli.ParseServiceRollback
+	if args[0] == "readmit" {
+		parse = cli.ParseServiceReadmit
+	}
+	rest, err := parse(argsWithServiceDefault(args[1:], e.sn))
 	if err != nil {
 		return "", err
 	}

@@ -175,6 +175,111 @@ func TestInstallISONativeOrdersActivationInspectionAndReady(t *testing.T) {
 	}
 }
 
+func TestReadmitISONativeRevalidatesBoundaryAndRuntimeBeforeReady(t *testing.T) {
+	recorder := &isoNativeInstallRecorder{}
+	if err := readmitISONativeWith(context.Background(), recorder); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "ready"}) {
+		t.Fatalf("native ISO readmission events = %v", recorder.events)
+	}
+
+	recorder = &isoNativeInstallRecorder{failAt: "inspect"}
+	err := readmitISONativeWith(context.Background(), recorder)
+	if err == nil || !strings.Contains(err.Error(), "inspect") {
+		t.Fatalf("readmitISONativeWith error = %v, want inspection failure", err)
+	}
+	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "quarantine"}) {
+		t.Fatalf("failed native ISO readmission events = %v", recorder.events)
+	}
+}
+
+func TestMarkNativeISOReadmittedExactClearsQuarantineOnlyAfterExactMatch(t *testing.T) {
+	server := newTestServer(t)
+	record := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+		ISO: testISONativeRuntimeAllocation("api", iso.StateQuarantined),
+	}
+	record.ISO.LastError = "runtime boundary missing"
+	if err := server.cfg.DB.Set(&db.Data{
+		ISOPool:  &db.ISOPool{AggregateRouteState: "conflict", LastConflict: record.ISO.LastError},
+		Services: map[string]*db.Service{"api": record.Clone()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := server.markNativeISOReadmittedExact(record.Clone()); err != nil {
+		t.Fatal(err)
+	}
+	view, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := view.Services().Get("api").ISO()
+	if got.State() != string(iso.StateReady) || got.LastError() != "" {
+		t.Fatalf("readmitted allocation = %#v, want ready without diagnostic", got.AsStruct())
+	}
+	if view.ISOPool().AggregateRouteState() != "ready" || view.ISOPool().LastConflict() != "" {
+		t.Fatalf("readmitted pool = %#v, want ready without conflict", view.ISOPool().AsStruct())
+	}
+}
+
+func TestServerReadmitNativeISOValidatesAndRunsUnderISOOperationLock(t *testing.T) {
+	server := newTestServer(t)
+	record := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+		ISO: testISONativeRuntimeAllocation("api", iso.StateQuarantined),
+	}
+	oldFactory := newNativeISOReadmitSteps
+	oldAcquire := acquireISOOperationLockForRuntime
+	locked := false
+	recorder := &isoNativeInstallRecorder{assertLocked: func() {
+		if !locked {
+			t.Fatal("readmission phase ran outside the host ISO lock")
+		}
+	}}
+	newNativeISOReadmitSteps = func(gotServer *Server, gotRecord *db.Service) (isoNativeReadmitSteps, error) {
+		if gotServer != server || gotRecord != record {
+			t.Fatalf("readmission factory = (%p, %p), want (%p, %p)", gotServer, gotRecord, server, record)
+		}
+		return recorder, nil
+	}
+	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
+		locked = true
+		return func() { locked = false }, nil
+	}
+	t.Cleanup(func() {
+		newNativeISOReadmitSteps = oldFactory
+		acquireISOOperationLockForRuntime = oldAcquire
+	})
+
+	if err := server.readmitNativeISO(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if locked {
+		t.Fatal("host ISO lock remained held after readmission")
+	}
+	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "ready"}) {
+		t.Fatalf("readmission events = %v", recorder.events)
+	}
+
+	invalid := []*db.Service{
+		nil,
+		{Name: "api", ServiceType: db.ServiceTypeSystemd},
+		{Name: "api", ServiceType: db.ServiceTypeDockerCompose, ISO: record.ISO.Clone()},
+		{Name: "api", ServiceType: db.ServiceTypeSystemd, ISO: testISORuntimeAllocation("api", iso.StateQuarantined)},
+		{Name: "api", ServiceType: db.ServiceTypeSystemd, ISO: testISONativeRuntimeAllocation("api", iso.StateStopped)},
+	}
+	removing := record.Clone()
+	removing.ISO.RemoveRequested = true
+	invalid = append(invalid, removing)
+	for _, candidate := range invalid {
+		if err := server.readmitNativeISO(context.Background(), candidate); err == nil {
+			t.Fatalf("readmitNativeISO(%#v) returned nil, want validation error", candidate)
+		}
+	}
+}
+
 func TestMarkNativeISOReadyExactAcceptsOwnedWorkloadGateTransition(t *testing.T) {
 	server := newTestServer(t)
 	expected := &db.Service{
@@ -329,11 +434,15 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 }
 
 type isoNativeInstallRecorder struct {
-	events []string
-	failAt string
+	events       []string
+	failAt       string
+	assertLocked func()
 }
 
 func (r *isoNativeInstallRecorder) step(name string) error {
+	if r.assertLocked != nil {
+		r.assertLocked()
+	}
 	r.events = append(r.events, name)
 	if name == r.failAt {
 		return errors.New(name + " failed")
@@ -342,6 +451,9 @@ func (r *isoNativeInstallRecorder) step(name string) error {
 }
 
 func (r *isoNativeInstallRecorder) Install(context.Context) error { return r.step("install") }
+func (r *isoNativeInstallRecorder) RevalidateBoundary(context.Context) error {
+	return r.step("boundary")
+}
 func (r *isoNativeInstallRecorder) Restart(context.Context) error { return r.step("restart") }
 func (r *isoNativeInstallRecorder) Inspect(context.Context) (isoReconcileRuntimeState, error) {
 	if err := r.step("inspect"); err != nil {

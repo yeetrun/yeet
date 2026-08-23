@@ -61,8 +61,8 @@ func newISONetworkGateUnit(catchBin, dataDir, service string) (*svc.SystemdUnit,
 	}, nil
 }
 
-func installISODNSService(dataDir string) error {
-	generated, destination, cleanup, err := renderISODNSServiceUnit(dataDir)
+func installISODNSService(dataDir, catchRunner string) error {
+	generated, destination, cleanup, err := renderISODNSServiceUnit(dataDir, catchRunner)
 	if err != nil {
 		return err
 	}
@@ -74,12 +74,8 @@ func installISODNSService(dataDir string) error {
 	return activateISODNSServiceUnit(changed)
 }
 
-func renderISODNSServiceUnit(dataDir string) (string, string, func(), error) {
-	catchBin, err := catchExecutablePath()
-	if err != nil {
-		return "", "", nil, fmt.Errorf("resolve catch binary for ISO DNS: %w", err)
-	}
-	unit, err := newISODNSUnit(catchBin, dataDir)
+func renderISODNSServiceUnit(dataDir, catchRunner string) (string, string, func(), error) {
+	unit, err := newISODNSUnit(catchRunner, dataDir)
 	if err != nil {
 		return "", "", nil, err
 	}

@@ -97,6 +97,62 @@ func TestSystemdIdentityInstallPlanSurfaces(t *testing.T) {
 	}
 }
 
+func TestCatchSystemdUnitRepairsTransientExecutablePath(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "run")
+	transientExecutable := filepath.Join(root, "catch-vm-boot-readiness-deadbeef")
+	stableRunner := filepath.Join(runDir, catchSystemServiceName)
+	config := (&db.Service{Name: catchSystemServiceName, ServiceType: db.ServiceTypeSystemd}).View()
+	service, err := NewSystemdService(nil, config, runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "[Unit]\nConditionFileIsExecutable=" + transientExecutable + "\n" +
+		"[Service]\nExecStart=" + transientExecutable + " -data-dir " + root + "\n"
+
+	rendered, err := service.RenderPrimaryUnit(raw)
+	if err != nil {
+		t.Fatalf("RenderPrimaryUnit: %v", err)
+	}
+	if strings.Contains(rendered, transientExecutable) {
+		t.Fatalf("rendered Catch unit retained transient executable:\n%s", rendered)
+	}
+	for _, directive := range []string{
+		"ConditionFileIsExecutable=" + stableRunner,
+		"ExecStart=" + stableRunner + " -data-dir " + root,
+	} {
+		if !strings.Contains(rendered, directive) {
+			t.Fatalf("rendered Catch unit missing %q:\n%s", directive, rendered)
+		}
+	}
+}
+
+func TestRestartIgnoringDependenciesUsesExplicitSystemdJobMode(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "systemctl-args")
+	systemctl := filepath.Join(binDir, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$YEET_SYSTEMCTL_ARGS\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("YEET_SYSTEMCTL_ARGS", argsPath)
+	service, err := NewSystemdService(nil, (&db.Service{Name: "app", ServiceType: db.ServiceTypeSystemd}).View(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.RestartIgnoringDependencies(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(raw)), "--job-mode=ignore-dependencies restart app.service"; got != want {
+		t.Fatalf("systemctl args = %q, want %q", got, want)
+	}
+}
+
 func TestRewriteInstalledSystemdUnitIdentityPreservesRecognizedHome(t *testing.T) {
 	dataDir := "/srv/api/data"
 	for _, tt := range []struct {
@@ -1803,6 +1859,63 @@ func TestSystemdServiceRenderRewritesISONetworkGateToStableCatchRunner(t *testin
 	}
 	if strings.Contains(string(rendered), oldRunner) {
 		t.Fatalf("rendered ISO gate retained old Catch runner:\n%s", rendered)
+	}
+}
+
+func TestSystemdServiceConvergesISONetworkGateWithoutActivatingWorkload(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "services", "owesplit", "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	systemctlLog := installFakeSystemctl(t, tmp)
+	oldRunner := filepath.Join(tmp, "services", "catch", "bin", "catch-old")
+	stableRunner := filepath.Join(tmp, "services", "catch", "run", "catch")
+	gateSource := writeTempFile(t, tmp, "owesplit-ns.service",
+		"[Unit]\nConditionFileIsExecutable="+oldRunner+"\n"+
+			"[Service]\nExecStart="+oldRunner+" -data-dir /srv/yeet iso-network-ensure owesplit\n"+
+			"Type=oneshot\nRemainAfterExit=yes\n")
+	config := &db.Service{
+		Name: "owesplit", ServiceType: db.ServiceTypeSystemd, Generation: 11,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: artifactAt(11, gateSource),
+		},
+	}
+	service, err := NewSystemdService(
+		nil,
+		config.View(),
+		runDir,
+		WithSystemdDirectory(systemdDir),
+		WithTailscaleGuardRunner(stableRunner),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ConvergeISONetworkGate(); err != nil {
+		t.Fatal(err)
+	}
+
+	installed, err := os.ReadFile(filepath.Join(systemdDir, "yeet-owesplit-ns.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(installed), oldRunner) {
+		t.Fatalf("installed gate retained stale runner:\n%s", installed)
+	}
+	for _, want := range []string{
+		"ConditionFileIsExecutable=" + stableRunner,
+		"ExecStart=" + stableRunner + " -data-dir /srv/yeet iso-network-ensure owesplit",
+	} {
+		if !strings.Contains(string(installed), want) {
+			t.Fatalf("installed gate missing %q:\n%s", want, installed)
+		}
+	}
+	if got, want := readSystemctlLog(t, systemctlLog), []string{"daemon-reload"}; !cmp.Equal(got, want) {
+		t.Fatalf("systemctl calls = %v, want definition-only convergence %v", got, want)
 	}
 }
 

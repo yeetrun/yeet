@@ -2761,9 +2761,11 @@ func TestNativeISOStageFailureRemovesEveryCreatedArtifact(t *testing.T) {
 		{
 			name: "after resolver",
 			inject: func(t *testing.T, _ string) {
-				oldExecutable := catchExecutablePath
-				catchExecutablePath = func() (string, error) { return "", errors.New("injected gate render failure") }
-				t.Cleanup(func() { catchExecutablePath = oldExecutable })
+				oldGateUnit := newISONetworkGateUnitForMutation
+				newISONetworkGateUnitForMutation = func(string, string, string) (*svc.SystemdUnit, error) {
+					return nil, errors.New("injected gate render failure")
+				}
+				t.Cleanup(func() { newISONetworkGateUnitForMutation = oldGateUnit })
 			},
 			want: "injected gate render failure",
 		},

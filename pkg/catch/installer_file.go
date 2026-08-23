@@ -285,11 +285,7 @@ func (i *FileInstaller) stageISOComposeOverlay(content string) (string, error) {
 }
 
 func (i *FileInstaller) stageISONetworkGate() error {
-	catchBin, err := catchExecutablePath()
-	if err != nil {
-		return fmt.Errorf("resolve catch binary for ISO network gate: %w", err)
-	}
-	unit, err := newISONetworkGateUnit(catchBin, i.s.cfg.RootDir, i.cfg.ServiceName)
+	unit, err := newISONetworkGateUnit(i.s.catchRunnerPath(), i.s.cfg.RootDir, i.cfg.ServiceName)
 	if err != nil {
 		return err
 	}
@@ -1560,6 +1556,9 @@ func (i *FileInstaller) skipSystemdUnitGeneration() bool {
 }
 
 func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
+	if i.cfg.ServiceName == CatchService {
+		exe = i.s.catchRunnerPath()
+	}
 	su := &svc.SystemdUnit{
 		Name:             i.cfg.ServiceName,
 		Executable:       exe,

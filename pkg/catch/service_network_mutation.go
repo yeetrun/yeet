@@ -45,6 +45,8 @@ var prepareServiceNetworkIdentityReplacement = func(ctx context.Context, s *Serv
 	return s.prepareServiceNetworkIdentityReplacement(ctx, plan, flags, out)
 }
 
+var newISONetworkGateUnitForMutation = newISONetworkGateUnit
+
 var runRegularNetworkSystemctlForRuntime = func(ctx context.Context, args ...string) ([]byte, error) {
 	return runISOSystemctlForRuntime(ctx, args...)
 }
@@ -2144,11 +2146,7 @@ func (s *isoComposeNetworkStage) target() *db.Service {
 }
 
 func stageFreshISOServiceNetworkGate(server *Server, root, service string, txn *regularNetworkArtifactTransaction) (string, error) {
-	catchBin, err := catchExecutablePath()
-	if err != nil {
-		return "", fmt.Errorf("resolve catch binary for ISO network gate: %w", err)
-	}
-	unit, err := newISONetworkGateUnit(catchBin, server.cfg.RootDir, service)
+	unit, err := newISONetworkGateUnitForMutation(server.catchRunnerPath(), server.cfg.RootDir, service)
 	if err != nil {
 		return "", err
 	}

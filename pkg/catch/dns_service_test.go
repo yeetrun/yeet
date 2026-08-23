@@ -43,7 +43,6 @@ func TestInstallYeetDNSServiceInstallsAndStarts(t *testing.T) {
 	systemdPath := filepath.Join(t.TempDir(), "systemd", "yeet-dns.service")
 	var systemctlCalls [][]string
 	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: systemdPath,
 		unitActive:  func(string) bool { return false },
 		systemctl: func(args ...string) error {
@@ -52,7 +51,7 @@ func TestInstallYeetDNSServiceInstallsAndStarts(t *testing.T) {
 		},
 	})
 
-	if err := installYeetDNSService("/srv/yeet"); err != nil {
+	if err := installYeetDNSService("/srv/yeet", "/usr/local/bin/catch"); err != nil {
 		t.Fatalf("installYeetDNSService: %v", err)
 	}
 
@@ -77,7 +76,6 @@ func TestInstallYeetDNSServiceRestartsChangedActiveService(t *testing.T) {
 	systemdPath := filepath.Join(t.TempDir(), "systemd", "yeet-dns.service")
 	var systemctlCalls [][]string
 	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: systemdPath,
 		unitActive:  func(string) bool { return true },
 		systemctl: func(args ...string) error {
@@ -86,7 +84,7 @@ func TestInstallYeetDNSServiceRestartsChangedActiveService(t *testing.T) {
 		},
 	})
 
-	if err := installYeetDNSService("/srv/yeet"); err != nil {
+	if err := installYeetDNSService("/srv/yeet", "/usr/local/bin/catch"); err != nil {
 		t.Fatalf("installYeetDNSService: %v", err)
 	}
 
@@ -119,7 +117,6 @@ func TestInstallYeetDNSServicePreservesUnchangedActiveService(t *testing.T) {
 
 	var systemctlCalls [][]string
 	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: systemdPath,
 		unitActive:  func(string) bool { return true },
 		systemctl: func(args ...string) error {
@@ -128,7 +125,7 @@ func TestInstallYeetDNSServicePreservesUnchangedActiveService(t *testing.T) {
 		},
 	})
 
-	if err := installYeetDNSService("/srv/yeet"); err != nil {
+	if err := installYeetDNSService("/srv/yeet", "/usr/local/bin/catch"); err != nil {
 		t.Fatalf("installYeetDNSService: %v", err)
 	}
 
@@ -143,7 +140,6 @@ func TestInstallYeetDNSServicePreservesUnchangedActiveService(t *testing.T) {
 func TestInstallYeetDNSServicePropagatesStartErrors(t *testing.T) {
 	systemdPath := filepath.Join(t.TempDir(), "systemd", "yeet-dns.service")
 	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: systemdPath,
 		unitActive:  func(string) bool { return false },
 		systemctl: func(args ...string) error {
@@ -154,29 +150,23 @@ func TestInstallYeetDNSServicePropagatesStartErrors(t *testing.T) {
 		},
 	})
 
-	err := installYeetDNSService("/srv/yeet")
+	err := installYeetDNSService("/srv/yeet", "/usr/local/bin/catch")
 	if err == nil || !strings.Contains(err.Error(), "failed to start yeet-dns service") {
 		t.Fatalf("installYeetDNSService error = %v, want start error", err)
 	}
 }
 
 type yeetDNSServiceFakes struct {
-	catchBin      string
-	executableErr error
-	systemdPath   string
-	unitActive    func(string) bool
-	systemctl     func(...string) error
+	systemdPath string
+	unitActive  func(string) bool
+	systemctl   func(...string) error
 }
 
 func withYeetDNSServiceFakes(t *testing.T, fakes yeetDNSServiceFakes) {
 	t.Helper()
-	prevExecutablePath := catchExecutablePath
 	prevSystemdUnitPath := catchSystemdUnitPath
 	prevSystemdUnitActive := catchSystemdUnitActive
 	prevSystemctl := catchSystemctl
-	catchExecutablePath = func() (string, error) {
-		return fakes.catchBin, fakes.executableErr
-	}
 	catchSystemdUnitPath = func(unit string) string {
 		if unit != "yeet-dns.service" {
 			t.Fatalf("unexpected systemd unit path lookup: %s", unit)
@@ -186,7 +176,6 @@ func withYeetDNSServiceFakes(t *testing.T, fakes yeetDNSServiceFakes) {
 	catchSystemdUnitActive = fakes.unitActive
 	catchSystemctl = fakes.systemctl
 	t.Cleanup(func() {
-		catchExecutablePath = prevExecutablePath
 		catchSystemdUnitPath = prevSystemdUnitPath
 		catchSystemdUnitActive = prevSystemdUnitActive
 		catchSystemctl = prevSystemctl

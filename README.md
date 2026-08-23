@@ -505,6 +505,18 @@ yeet rm <svc>
 
 `yeet rm <svc>` keeps service data by default and prompts before removing the local config entry. Add `--clean` only when you want the data gone too.
 
+If a native `--net=iso` service is quarantined, `start` and `restart` leave it
+stopped and preserve the recorded diagnostic. Correct the reported isolation
+failure, then explicitly revalidate and readmit it:
+
+```bash
+yeet info <svc>
+yeet service readmit <svc>
+```
+
+Readmission verifies the isolation boundary, installs and restarts the current
+generation, and confirms the runtime is active before clearing quarantine.
+
 ## Targeting hosts
 
 Use `root@<machine-host>` for `yeet init`.

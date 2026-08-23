@@ -2142,10 +2142,16 @@ func TestRegistryMovesRollbackUnderService(t *testing.T) {
 	if got := reg.Groups["service"].Commands["generations"].Info.Usage; got != "service generations <svc> [--format=table|json|json-pretty]" {
 		t.Fatalf("service generations usage = %q, want service generations usage", got)
 	}
+	if got := reg.Groups["service"].Commands["readmit"].Info.Usage; got != "service readmit <svc>" {
+		t.Fatalf("service readmit usage = %q, want service readmit <svc>", got)
+	}
 
 	groupFlags := RemoteGroupFlagSpecs()["service"]
 	if _, ok := groupFlags["rollback"]; !ok {
 		t.Fatal("service rollback flag specs missing")
+	}
+	if _, ok := groupFlags["readmit"]; !ok {
+		t.Fatal("service readmit flag specs missing")
 	}
 	genFlags, ok := groupFlags["generations"]
 	if !ok {
@@ -2163,6 +2169,10 @@ func TestParseServiceGenerationCommands(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rollback, []string{"plex"}) {
 		t.Fatalf("rollback args = %#v, want plex", rollback)
+	}
+	readmit, err := ParseServiceReadmit([]string{"plex"})
+	if err != nil || !reflect.DeepEqual(readmit, []string{"plex"}) {
+		t.Fatalf("ParseServiceReadmit = %#v, %v; want plex", readmit, err)
 	}
 
 	flags, args, err := ParseServiceGenerations([]string{"plex", "--format=json"})
@@ -2189,6 +2199,12 @@ func TestParseServiceGenerationCommands(t *testing.T) {
 	}
 	if _, err := ParseServiceRollback([]string{"plex", "jellyfin"}); err == nil || !strings.Contains(err.Error(), "service rollback requires exactly one service") {
 		t.Fatalf("ParseServiceRollback extra args error = %v, want arity error", err)
+	}
+	if _, err := ParseServiceReadmit(nil); err == nil || !strings.Contains(err.Error(), "service readmit requires a service") {
+		t.Fatalf("ParseServiceReadmit missing service error = %v, want service required error", err)
+	}
+	if _, err := ParseServiceReadmit([]string{"plex", "jellyfin"}); err == nil || !strings.Contains(err.Error(), "service readmit requires exactly one service") {
+		t.Fatalf("ParseServiceReadmit extra args error = %v, want arity error", err)
 	}
 	if _, _, err := ParseServiceGenerations([]string{"plex", "--format=yaml"}); err == nil || !strings.Contains(err.Error(), "--format must be table, json, or json-pretty") {
 		t.Fatalf("ParseServiceGenerations format error = %v, want format error", err)

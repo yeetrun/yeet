@@ -1293,6 +1293,14 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantBridged: []string{"service", "rollback"},
 		},
 		{
+			name:        "service readmit host target",
+			args:        []string{"service@catch-a", "readmit", "svc-a"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantArgs:    []string{"service", "readmit"},
+			wantBridged: []string{"service", "readmit"},
+		},
+		{
 			name:        "service generations format host target",
 			args:        []string{"service@catch-a", "generations", "svc-a", "--format=json"},
 			wantHost:    "catch-a",

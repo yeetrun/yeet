@@ -725,6 +725,7 @@ type isoReconcileSteps interface {
 	InstallDNS(context.Context) error
 	EnsurePolicy(context.Context, string) error
 	VerifyPolicy(context.Context, string) error
+	InstallGate(context.Context, string) error
 	EnsureTopology(context.Context, string) error
 	VerifyTopology(context.Context, string) error
 	InspectRuntime(context.Context, string) (isoReconcileRuntimeState, error)
@@ -774,7 +775,7 @@ func hasISOAllocations(dv db.DataView) bool {
 }
 
 func (r *isoConcreteReconcileSteps) InstallDNS(context.Context) error {
-	return installISODNSServiceForServer(r.server.cfg.RootDir)
+	return installISODNSServiceForServer(r.server.cfg.RootDir, r.server.catchRunnerPath())
 }
 
 func (r *isoConcreteReconcileSteps) EnsurePolicy(ctx context.Context, service string) error {
@@ -818,6 +819,22 @@ func (r *isoConcreteReconcileSteps) VerifyPolicy(ctx context.Context, service st
 	if spec.VM {
 		defer r.release()
 		return r.server.ensureOrVerifyVMISOAttachmentForStartup(ctx, service)
+	}
+	return nil
+}
+
+func (r *isoConcreteReconcileSteps) InstallGate(ctx context.Context, service string) error {
+	if err := ctx.Err(); err != nil {
+		r.release()
+		return err
+	}
+	systemd, err := r.server.systemdService(service)
+	if err == nil {
+		err = systemd.ConvergeISONetworkGate()
+	}
+	if err != nil {
+		r.release()
+		return err
 	}
 	return nil
 }
@@ -1301,6 +1318,10 @@ func reconcileISOServiceWith(ctx context.Context, steps isoReconcileSteps, servi
 	}
 	if allocation.Kind != string(iso.PayloadVM) {
 		phases = append(phases,
+			struct {
+				name string
+				run  func(context.Context, string) error
+			}{name: "install gate", run: steps.InstallGate},
 			struct {
 				name string
 				run  func(context.Context, string) error
@@ -2114,6 +2135,9 @@ func (s *Server) markISOStoppedIfAllocated(service string) error {
 	}
 	_, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
 		if record.ISO == nil || record.ISO.RemoveRequested {
+			return nil
+		}
+		if iso.AllocationState(record.ISO.State) == iso.StateQuarantined {
 			return nil
 		}
 		record.ISO.State = string(iso.StateStopped)

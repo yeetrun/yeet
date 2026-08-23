@@ -96,6 +96,33 @@ func (s *Server) markNativeISOReadyExact(expected *db.Service, desired *db.Servi
 	return err
 }
 
+func (s *Server) markNativeISOReadmittedExact(expected *db.Service) error {
+	if expected == nil || expected.ISO == nil || iso.AllocationState(expected.ISO.State) != iso.StateQuarantined {
+		return errors.New("readmit native ISO without an exact quarantined service record")
+	}
+	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
+		current := data.Services[expected.Name]
+		if !serviceNetworkRecordsEqual(current, expected) {
+			return fmt.Errorf("service %q record changed before native ISO readmission", expected.Name)
+		}
+		if data.ISOPool == nil {
+			return fmt.Errorf("ISO pool disappeared while readmitting %q", expected.Name)
+		}
+		if current.ISO == nil || iso.AllocationState(current.ISO.State) != iso.StateQuarantined {
+			return fmt.Errorf("service %q is no longer quarantined", expected.Name)
+		}
+		if current.ISO.RemoveRequested || current.ISO.CleanupVerified {
+			return fmt.Errorf("service %q ISO removal or cleanup is in progress", expected.Name)
+		}
+		data.ISOPool.AggregateRouteState = "ready"
+		data.ISOPool.LastConflict = ""
+		current.ISO.State = string(iso.StateReady)
+		current.ISO.LastError = ""
+		return nil
+	})
+	return err
+}
+
 // The workload gate is allowed to publish the same allocation as ready while
 // its parent installer is still verifying activation. No other service-record
 // change is attributable to that gate.
@@ -813,6 +840,18 @@ type isoNativeInstallSteps interface {
 	Quarantine(context.Context, error) error
 }
 
+type isoNativeReadmitSteps interface {
+	isoNativeInstallSteps
+	RevalidateBoundary(context.Context) error
+}
+
+func readmitISONativeWith(ctx context.Context, steps isoNativeReadmitSteps) error {
+	if err := steps.RevalidateBoundary(ctx); err != nil {
+		return errors.Join(err, steps.Quarantine(ctx, err))
+	}
+	return installISONativeWith(ctx, steps)
+}
+
 func installISONativeWith(ctx context.Context, steps isoNativeInstallSteps) error {
 	if err := steps.Install(ctx); err != nil {
 		return errors.Join(err, steps.Quarantine(ctx, err))
@@ -837,6 +876,68 @@ type isoNativeSystemdInstallSteps struct {
 	si      *Installer
 	record  *db.Service
 	service *svc.SystemdService
+}
+
+type isoNativeSystemdReadmitSteps struct {
+	*isoNativeSystemdInstallSteps
+}
+
+var newNativeISOReadmitSteps = func(server *Server, record *db.Service) (isoNativeReadmitSteps, error) {
+	installer := &Installer{s: server}
+	service, err := newSystemdInstallService(installer, record)
+	if err != nil {
+		return nil, err
+	}
+	return &isoNativeSystemdReadmitSteps{isoNativeSystemdInstallSteps: &isoNativeSystemdInstallSteps{
+		si: installer, record: record, service: service,
+	}}, nil
+}
+
+func (s *isoNativeSystemdReadmitSteps) RevalidateBoundary(ctx context.Context) error {
+	if err := installISODNSServiceForServer(s.si.s.cfg.RootDir, s.si.s.catchRunnerPath()); err != nil {
+		return fmt.Errorf("install ISO DNS for readmission: %w", err)
+	}
+	return s.si.s.ensureISONetworkBoundaryLocked(ctx, s.record.Name)
+}
+
+func (s *isoNativeSystemdReadmitSteps) MarkReady(context.Context) error {
+	return s.si.s.markNativeISOReadmittedExact(s.record)
+}
+
+func (s *isoNativeSystemdReadmitSteps) Restart(context.Context) error {
+	return s.service.RestartIgnoringDependencies()
+}
+
+func (s *Server) readmitNativeISO(ctx context.Context, record *db.Service) error {
+	if s == nil {
+		return errors.New("native ISO readmission requires a service allocation")
+	}
+	if err := validateNativeISOReadmission(record); err != nil {
+		return err
+	}
+	steps, err := newNativeISOReadmitSteps(s, record)
+	if err != nil {
+		return err
+	}
+	return s.withISOOperationLock(ctx, func() error {
+		return readmitISONativeWith(ctx, steps)
+	})
+}
+
+func validateNativeISOReadmission(record *db.Service) error {
+	if record == nil || record.ISO == nil {
+		return errors.New("native ISO readmission requires a service allocation")
+	}
+	if record.ServiceType != db.ServiceTypeSystemd || record.ISO.Kind != string(iso.PayloadNative) {
+		return fmt.Errorf("service %q is not a native ISO service", record.Name)
+	}
+	if iso.AllocationState(record.ISO.State) != iso.StateQuarantined {
+		return fmt.Errorf("service %q ISO allocation is not quarantined", record.Name)
+	}
+	if record.ISO.RemoveRequested || record.ISO.CleanupVerified {
+		return fmt.Errorf("service %q ISO removal or cleanup is in progress", record.Name)
+	}
+	return nil
 }
 
 func (s *isoNativeSystemdInstallSteps) Install(context.Context) error {
@@ -1117,7 +1218,7 @@ func (l *isoComposeLifecycle) AdmitMerged(context.Context) error {
 }
 
 func (l *isoComposeLifecycle) InstallDNS(context.Context) error {
-	return installISODNSService(l.si.s.cfg.RootDir)
+	return installISODNSService(l.si.s.cfg.RootDir, l.si.s.catchRunnerPath())
 }
 
 func (l *isoComposeLifecycle) runtimeSpec() (isoRuntimeNetworkSpec, error) {

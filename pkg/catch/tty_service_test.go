@@ -1237,6 +1237,106 @@ func TestStopISOServiceRetainsAllocationAndMarksStopped(t *testing.T) {
 	}
 }
 
+func TestQuarantinedNativeISOStartAndRestartRejectBeforeSystemdMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*ttyExecer) error
+	}{
+		{name: "start", run: (*ttyExecer).startCmdFunc},
+		{name: "restart", run: (*ttyExecer).restartCmdFunc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			allocation := testISONativeRuntimeAllocation("app", iso.StateQuarantined)
+			allocation.LastError = "runtime inspection found the namespace boundary missing"
+			addTestServices(t, server, db.Service{
+				Name: "app", ServiceType: db.ServiceTypeSystemd,
+				Generation: 3, LatestGeneration: 3, ISO: allocation,
+			})
+			runner := &recordingServiceRunner{}
+			installerCalls := 0
+			execer := &ttyExecer{
+				ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+				serviceInstallGenFunc: func(InstallerCfg, int) error {
+					installerCalls++
+					return nil
+				},
+			}
+
+			err := tc.run(execer)
+			if err == nil || !strings.Contains(err.Error(), "quarantined") || !strings.Contains(err.Error(), allocation.LastError) {
+				t.Fatalf("%s error = %v, want quarantine diagnostic", tc.name, err)
+			}
+			if installerCalls != 0 || len(runner.calls) != 0 {
+				t.Fatalf("%s mutations = installer %d, runner %v; want zero", tc.name, installerCalls, runner.calls)
+			}
+			got := testService(t, server, "app").ISO
+			if got == nil || got.State != string(iso.StateQuarantined) || got.LastError != allocation.LastError {
+				t.Fatalf("%s allocation = %#v, want unchanged quarantine", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestStopQuarantinedISOPreservesDiagnostic(t *testing.T) {
+	server := newTestServer(t)
+	allocation := testISONativeRuntimeAllocation("app", iso.StateQuarantined)
+	allocation.LastError = "boundary verification failed"
+	addTestServices(t, server, db.Service{Name: "app", ServiceType: db.ServiceTypeSystemd, ISO: allocation})
+	runner := &recordingServiceRunner{}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+	}
+
+	if err := execer.stopCmdFunc(); err != nil {
+		t.Fatal(err)
+	}
+	got := testService(t, server, "app").ISO
+	if got == nil || got.State != string(iso.StateQuarantined) || got.LastError != allocation.LastError {
+		t.Fatalf("allocation = %#v, want preserved quarantine", got)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"stop"}) {
+		t.Fatalf("runner calls = %v, want stop", runner.calls)
+	}
+}
+
+func TestServiceReadmitUsesExplicitQuarantineRecovery(t *testing.T) {
+	server := newTestServer(t)
+	allocation := testISONativeRuntimeAllocation("app", iso.StateQuarantined)
+	allocation.LastError = "runtime boundary missing"
+	addTestServices(t, server, db.Service{
+		Name: "app", ServiceType: db.ServiceTypeSystemd,
+		Generation: 2, LatestGeneration: 2, ISO: allocation,
+	})
+	var events []string
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		preflightSandboxGenerationActivationFunc: func(_ context.Context, record *db.Service, generation int) error {
+			events = append(events, "static-preflight")
+			if record.Name != "app" || generation != 2 {
+				t.Fatalf("preflight record/generation = %q/%d, want app/2", record.Name, generation)
+			}
+			return nil
+		},
+		readmitNativeISOFunc: func(_ context.Context, record *db.Service) error {
+			events = append(events, "readmit")
+			if record.ISO == nil || record.ISO.State != string(iso.StateQuarantined) {
+				t.Fatalf("readmit record = %#v, want quarantined ISO", record)
+			}
+			return nil
+		},
+	}
+
+	if err := execer.serviceCmdFunc([]string{"readmit"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(events, []string{"static-preflight", "readmit"}) {
+		t.Fatalf("readmission events = %v", events)
+	}
+}
+
 func TestStartAndRestartISOServiceUseFullInstallerLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name string

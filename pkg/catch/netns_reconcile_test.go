@@ -99,7 +99,7 @@ func stubDockerPrereqsInstaller(t *testing.T, f func(*Server) error) {
 	})
 }
 
-func stubYeetDNSInstaller(t *testing.T, f func(string) error) {
+func stubYeetDNSInstaller(t *testing.T, f func(string, string) error) {
 	t.Helper()
 	prev := installYeetDNSServiceForServer
 	installYeetDNSServiceForServer = f
@@ -1355,9 +1355,12 @@ func TestReconcileRuntimeStateRunsResolverIsolationBeforeNetNSReconciliation(t *
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(root string) error {
+	stubYeetDNSInstaller(t, func(root, runner string) error {
 		if root != s.cfg.RootDir {
 			t.Fatalf("dns installer root = %q, want %q", root, s.cfg.RootDir)
+		}
+		if runner != s.catchRunnerPath() {
+			t.Fatalf("dns installer runner = %q, want %q", runner, s.catchRunnerPath())
 		}
 		calls = append(calls, "dns-install")
 		return nil
@@ -1478,7 +1481,7 @@ func TestServerStartRepairsTailscaleDNSBeforeResolverFleetMigration(t *testing.T
 				previousInstall := installYeetNSService
 				installYeetNSService = func(string) error { return nil }
 				t.Cleanup(func() { installYeetNSService = previousInstall })
-				stubYeetDNSInstaller(t, func(string) error { return nil })
+				stubYeetDNSInstaller(t, func(string, string) error { return nil })
 				stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 				previousSystemctl := catchSystemctl
 				catchSystemctl = func(...string) error { return nil }
@@ -1558,7 +1561,7 @@ func TestServerStartLogsNATReconciliationFailureNonFatally(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	prevNAT := reconcileDockerNetNSPortForwards
@@ -1620,7 +1623,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	reconciled := make(chan struct{})
 	prevNAT := reconcileDockerNetNSPortForwards
@@ -1677,7 +1680,7 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	reconciled := make(chan struct{})
 	prevNAT := reconcileDockerNetNSPortForwards
@@ -1730,7 +1733,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -1797,7 +1800,7 @@ func TestServerStartReturnsBeforeVMRuntimeRecoveryAndDelaysLaterReconciliation(t
 	prevInstall := installYeetNSService
 	installYeetNSService = func(string) error { return nil }
 	defer func() { installYeetNSService = prevInstall }()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	recoveryStarted := make(chan struct{})
@@ -1866,7 +1869,7 @@ func TestServerStartLogsVMRuntimeRecoveryFailureAndBlocksLaterReconciliation(t *
 	prevInstall := installYeetNSService
 	installYeetNSService = func(string) error { return nil }
 	defer func() { installYeetNSService = prevInstall }()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	s.recoverVMRuntimeState = func(context.Context, *Config) error {
@@ -1909,7 +1912,7 @@ func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -1996,7 +1999,7 @@ func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
-	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubYeetDNSInstaller(t, func(string, string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }

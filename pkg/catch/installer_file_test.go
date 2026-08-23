@@ -23,6 +23,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/fileutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/netns"
@@ -4062,6 +4063,7 @@ func TestNewSystemdUnitUsesNumericIdentityWithoutNames(t *testing.T) {
 
 func TestNewSystemdUnitKeepsCatchPrivilegedWithoutIdentityDirectives(t *testing.T) {
 	server := newTestServer(t)
+	transientExecutable := filepath.Join(t.TempDir(), "catch-vm-boot-readiness-deadbeef")
 	installer := &FileInstaller{
 		s:   server,
 		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}},
@@ -4069,15 +4071,94 @@ func TestNewSystemdUnitKeepsCatchPrivilegedWithoutIdentityDirectives(t *testing.
 			RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003,
 		}},
 	}
-	unit, err := installer.newSystemdUnit(filepath.Join(server.serviceBinDir(CatchService), "catch-1"))
+	unit, err := installer.newSystemdUnit(transientExecutable)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if unit.Executable != server.catchRunnerPath() {
+		t.Fatalf("Catch unit executable = %q, want stable runner %q", unit.Executable, server.catchRunnerPath())
 	}
 	if unit.User != "" || unit.Group != "" {
 		t.Fatalf("Catch unit identity = %q:%q, want privileged empty directives", unit.User, unit.Group)
 	}
 	if unit.EnvFile != "-"+filepath.Join(server.serviceEnvDir(CatchService), "env") {
 		t.Fatalf("Catch unit env = %q, want managed env path", unit.EnvFile)
+	}
+}
+
+func TestPersistentCatchUnitsSurviveTransientInstallerRemoval(t *testing.T) {
+	server := newTestServer(t)
+	transientExecutable := filepath.Join(t.TempDir(), "catch-vm-boot-readiness-deadbeef")
+	if err := os.WriteFile(transientExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stableRunner := server.catchRunnerPath()
+	if err := os.MkdirAll(filepath.Dir(stableRunner), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileutil.CopyFile(transientExecutable, stableRunner); err != nil {
+		t.Fatalf("install stable Catch runner: %v", err)
+	}
+
+	catchInstaller := &FileInstaller{s: server, cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}}}
+	catchUnit, err := catchInstaller.newSystemdUnit(transientExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catchFiles, err := catchUnit.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	systemdDir := t.TempDir()
+	previousSystemdPath := catchSystemdUnitPath
+	previousActive := catchSystemdUnitActive
+	previousSystemctl := catchSystemctl
+	catchSystemdUnitPath = func(unit string) string { return filepath.Join(systemdDir, unit) }
+	catchSystemdUnitActive = func(string) bool { return false }
+	catchSystemctl = func(...string) error { return nil }
+	t.Cleanup(func() {
+		catchSystemdUnitPath = previousSystemdPath
+		catchSystemdUnitActive = previousActive
+		catchSystemctl = previousSystemctl
+	})
+	if err := installYeetDNSService(server.cfg.RootDir, stableRunner); err != nil {
+		t.Fatal(err)
+	}
+	if err := installISODNSService(server.cfg.RootDir, stableRunner); err != nil {
+		t.Fatal(err)
+	}
+
+	gateInstaller := &FileInstaller{
+		s: server, cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "app"}},
+		artifacts: make(map[db.ArtifactName]string),
+	}
+	if err := os.MkdirAll(gateInstaller.serviceBinDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateInstaller.stageISONetworkGate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(transientExecutable); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(stableRunner).Run(); err != nil {
+		t.Fatalf("stable Catch runner failed after transient source removal: %v", err)
+	}
+	for name, path := range map[string]string{
+		"catch.service":        catchFiles[db.ArtifactSystemdUnit],
+		"yeet-dns.service":     filepath.Join(systemdDir, "yeet-dns.service"),
+		"yeet-iso-dns.service": filepath.Join(systemdDir, "yeet-iso-dns.service"),
+		"ISO network gate":     gateInstaller.artifacts[db.ArtifactNetNSService],
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if strings.Contains(string(raw), transientExecutable) || !strings.Contains(string(raw), "ExecStart="+stableRunner) || !strings.Contains(string(raw), "ConditionFileIsExecutable="+stableRunner) {
+			t.Fatalf("%s did not persist stable runner %q:\n%s", name, stableRunner, raw)
+		}
 	}
 }
 

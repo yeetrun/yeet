@@ -567,6 +567,13 @@ func (s *SystemdService) renderSystemdUnitContent(step installStep, raw []byte) 
 	if step.artifact == db.ArtifactNetNSService {
 		raw = []byte(s.rewriteISONetworkGateRunner(string(raw)))
 	}
+	if step.artifact == db.ArtifactSystemdUnit && s.Name() == catchSystemServiceName {
+		rewritten, err := s.rewriteCatchRuntimeRunner(string(raw))
+		if err != nil {
+			return nil, err
+		}
+		raw = []byte(rewritten)
+	}
 	raw = []byte(s.rewriteLegacyRuntimePaths(string(raw)))
 	identity := s.cfg.Identity()
 	if step.artifact == db.ArtifactSystemdUnit && identity.Valid() {
@@ -577,6 +584,33 @@ func (s *SystemdService) renderSystemdUnitContent(step installStep, raw []byte) 
 		raw = []byte(rewritten)
 	}
 	return raw, nil
+}
+
+func (s *SystemdService) rewriteCatchRuntimeRunner(raw string) (string, error) {
+	runner := filepath.Join(s.runDir, catchSystemServiceName)
+	lines := strings.Split(raw, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, directive := range []string{"ConditionFileIsExecutable=", "ExecStart="} {
+			command, ok := strings.CutPrefix(trimmed, directive)
+			if !ok {
+				continue
+			}
+			fields := strings.Fields(command)
+			if len(fields) == 0 || !filepath.IsAbs(fields[0]) {
+				return "", fmt.Errorf("catch %s must use an absolute executable path", strings.TrimSuffix(directive, "="))
+			}
+			prefixLength := strings.Index(line, directive) + len(directive)
+			commandOffset := strings.Index(line[prefixLength:], fields[0])
+			if commandOffset < 0 {
+				return "", fmt.Errorf("catch %s executable path is malformed", strings.TrimSuffix(directive, "="))
+			}
+			pathStart := prefixLength + commandOffset
+			lines[index] = line[:pathStart] + runner + line[pathStart+len(fields[0]):]
+			break
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func (s *SystemdService) rewriteISONetworkGateRunner(raw string) string {
@@ -843,6 +877,33 @@ func removeOptionalArtifact(path string) error {
 
 func (s *SystemdService) Install() error {
 	return s.InstallWithActivationCheck(nil)
+}
+
+// ConvergeISONetworkGate repairs the persisted gate definition without
+// starting, restarting, or enabling the workload. Startup reconciliation uses
+// this before trusting an existing ISO boundary.
+func (s *SystemdService) ConvergeISONetworkGate() error {
+	installer := s.artifactInstaller()[db.ArtifactNetNSService]
+	step := installStep{artifact: db.ArtifactNetNSService, artifactInstall: installer}
+	if _, ok := s.cfg.AsStruct().Artifacts.Gen(db.ArtifactNetNSService, s.cfg.Generation()); !ok {
+		return fmt.Errorf("service %q has no ISO network gate artifact for generation %d", s.Name(), s.cfg.Generation())
+	}
+	rollback, err := captureInstallDestinationRollback([]installStep{step})
+	if err != nil {
+		return err
+	}
+	if err := s.installArtifacts([]installStep{step}); err != nil {
+		return errors.Join(err, restoreInstallDestinations(rollback))
+	}
+	if err := s.run("daemon-reload"); err != nil {
+		restoreErr := restoreInstallDestinations(rollback)
+		reloadErr := s.run("daemon-reload")
+		if reloadErr != nil {
+			reloadErr = fmt.Errorf("reload restored systemd definitions: %w", reloadErr)
+		}
+		return errors.Join(fmt.Errorf("reload converged ISO network gate: %w", err), restoreErr, reloadErr)
+	}
+	return nil
 }
 
 type installDestinationRollback struct {
@@ -1423,6 +1484,13 @@ func (s *SystemdService) Restart() error {
 		return err
 	}
 	return s.Start()
+}
+
+// RestartIgnoringDependencies is reserved for recovery flows that have already
+// verified the dependencies under their owning lock. It prevents systemd from
+// invoking a recovery-blocked dependency gate a second time.
+func (s *SystemdService) RestartIgnoringDependencies() error {
+	return s.run("--job-mode=ignore-dependencies", "restart", s.primaryUnit())
 }
 
 func (s *SystemdService) Enable() error {
