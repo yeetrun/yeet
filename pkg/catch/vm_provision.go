@@ -456,10 +456,6 @@ func (e *ttyExecer) materializeVMProvisionComponents(ctx context.Context, servic
 	if err != nil {
 		return vmProvisionArtifacts{}, fmt.Errorf("cache VM runtime %s: %w", refs.Runtime.RuntimeID, err)
 	}
-	preparedRootFS, err := prepareVMComponentRootFS(ctx, serviceRoot.Root, guest)
-	if err != nil {
-		return vmProvisionArtifacts{}, err
-	}
 	kernelDir := filepath.Join(serviceDataDirForRoot(serviceRoot.Root), "kernels", kernel.Manifest.KernelID, kernel.ManifestSHA256)
 	kernelTarget := filepath.Join(kernelDir, vmKernelFilename)
 	configTarget := filepath.Join(kernelDir, vmKernelConfigFilename)
@@ -471,8 +467,7 @@ func (e *ttyExecer) materializeVMProvisionComponents(ctx context.Context, servic
 			KernelPath: kernelTarget, RootFSPath: guest.RootFSPath,
 			FirecrackerPath: runtimeArtifact.Firecracker, JailerPath: runtimeArtifact.Jailer,
 		},
-		PreparedRootFSPath: preparedRootFS,
-		Manifest:           vmImageManifestFromComponents(imageRef, guest, kernel, runtimeArtifact),
+		Manifest: vmImageManifestFromComponents(imageRef, guest, kernel, runtimeArtifact),
 	}
 	return vmProvisionArtifacts{
 		Image: image, GuestBase: guest.DBConfig(), Kernel: kernelConfig, Runtime: runtimeArtifact,
@@ -1531,9 +1526,6 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	if err := e.applyVMProvisionDisk(ctx, plan, ui); err != nil {
 		return networkTouched, err
 	}
-	if err := removeVMProvisionComponentRootFSStaging(plan); err != nil {
-		return networkTouched, err
-	}
 	ui.StartStep(vmRunStepMetadata)
 	doneWriteMetadata := e.traceBlock("vm write metadata")
 	if err := writeVMMetadata(plan.ServiceRoot.Root, plan.Metadata); err != nil {
@@ -1592,12 +1584,11 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 func (e *ttyExecer) applyVMProvisionDisk(ctx context.Context, plan vmProvisionPlan, ui *vmProvisionUI) error {
 	ui.StartStep(vmRunStepDisk)
 	doneDisk := e.traceBlock("vm disk provision")
-	var err error
-	if plan.Disk.Backend == vmDiskBackendZVOL {
-		err = runVMProvisionDiskPlanWithProgress(ctx, plan.Disk, vmProvisionDiskRunner, ui.UpdateDetail)
-	} else {
-		err = runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner)
+	progress := ui.UpdateDetail
+	if plan.Disk.Backend != vmDiskBackendZVOL {
+		progress = nil
 	}
+	err := runVMProvisionDiskPlanWithBasePreparation(ctx, plan.Disk, vmProvisionDiskRunner, progress, vmProvisionDiskBasePreparer(plan))
 	doneDisk()
 	if err != nil {
 		ui.FailStep(err.Error())
@@ -1607,14 +1598,23 @@ func (e *ttyExecer) applyVMProvisionDisk(ctx context.Context, plan vmProvisionPl
 	return nil
 }
 
-func removeVMProvisionComponentRootFSStaging(plan vmProvisionPlan) error {
-	if plan.Components == nil || plan.Artifacts.Legacy != nil || !vmProvisionPathWithin(plan.ServiceRoot.Root, plan.Disk.BaseRootFS) {
+func vmProvisionDiskBasePreparer(plan vmProvisionPlan) vmDiskBasePreparer {
+	if plan.Components == nil || plan.Artifacts.Legacy != nil {
 		return nil
 	}
-	if err := os.Remove(plan.Disk.BaseRootFS); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove VM component rootfs staging file: %w", err)
+	return func(ctx context.Context) (string, func() error, error) {
+		path, err := prepareVMComponentRootFSFile(ctx, plan.ServiceRoot.Root, plan.Image.Paths.RootFSPath, plan.Image.Manifest.RootFSSize)
+		if err != nil {
+			return "", nil, err
+		}
+		cleanup := func() error {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove VM component rootfs staging file: %w", err)
+			}
+			return nil
+		}
+		return path, cleanup, nil
 	}
-	return nil
 }
 
 func (e *ttyExecer) applyVMProvisionNetwork(ctx context.Context, plan vmNetworkPlan) error {

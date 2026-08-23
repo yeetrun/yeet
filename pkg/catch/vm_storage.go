@@ -50,6 +50,8 @@ type vmDiskPlanStep struct {
 
 type vmCommandRunner func(context.Context, []string) error
 
+type vmDiskBasePreparer func(context.Context) (string, func() error, error)
+
 var vmZVOLBaseMutexes sync.Map
 
 type vmSetupIncompleteError struct {
@@ -324,15 +326,21 @@ func runVMProvisionDiskPlan(ctx context.Context, plan vmDiskPlan, runner vmComma
 }
 
 func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner, progress func(string)) error {
+	return runVMProvisionDiskPlanWithBasePreparation(ctx, plan, runner, progress, nil)
+}
+
+func runVMProvisionDiskPlanWithBasePreparation(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner, progress func(string), prepare vmDiskBasePreparer) error {
 	if runner == nil {
 		runner = runVMCommand
 	}
 	if plan.Backend != vmDiskBackendZVOL {
-		steps, err := plan.Steps()
-		if err != nil {
-			return err
-		}
-		return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
+		return withPreparedVMDiskBase(ctx, plan, prepare, func(prepared vmDiskPlan) error {
+			steps, err := prepared.Steps()
+			if err != nil {
+				return err
+			}
+			return runVMDiskStepsWithRunner(ctx, prepared, steps, runner, progress)
+		})
 	}
 	if err := plan.Validate(); err != nil {
 		return err
@@ -343,11 +351,13 @@ func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, ru
 			if runner(ctx, check) == nil {
 				return nil
 			}
-			steps, err := zvolBasePreparationSteps(ctx, plan, runner)
-			if err != nil {
-				return err
-			}
-			return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
+			return withPreparedVMDiskBase(ctx, plan, prepare, func(prepared vmDiskPlan) error {
+				steps, err := zvolBasePreparationSteps(ctx, prepared, runner)
+				if err != nil {
+					return err
+				}
+				return runVMDiskStepsWithRunner(ctx, prepared, steps, runner, progress)
+			})
 		}); err != nil {
 			return err
 		}
@@ -357,6 +367,26 @@ func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, ru
 		return err
 	}
 	return runVMDiskStepsWithRunner(ctx, plan, clone, runner, progress)
+}
+
+func withPreparedVMDiskBase(ctx context.Context, plan vmDiskPlan, prepare vmDiskBasePreparer, run func(vmDiskPlan) error) (retErr error) {
+	if prepare == nil {
+		return run(plan)
+	}
+	baseRootFS, cleanup, err := prepare(ctx)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer func() {
+			retErr = errors.Join(retErr, cleanup())
+		}()
+	}
+	if strings.TrimSpace(baseRootFS) == "" {
+		return fmt.Errorf("prepared VM base rootfs is required")
+	}
+	plan.BaseRootFS = baseRootFS
+	return run(plan)
 }
 
 func zvolBasePreparationSteps(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner) ([]vmDiskPlanStep, error) {

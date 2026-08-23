@@ -88,6 +88,13 @@ func TestProvisionVMComponentComposition(t *testing.T) {
 	if !strings.Contains(string(unit), "--runtime-descriptor") || strings.Contains(string(unit), "--firecracker ") {
 		t.Fatalf("unit is not descriptor-managed:\n%s", unit)
 	}
+	staging, err := filepath.Glob(filepath.Join(serviceDataDirForRoot(root), ".guest-rootfs-*.ext4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staging) != 0 {
+		t.Fatalf("component rootfs staging files remain: %v", staging)
+	}
 }
 
 func TestProvisionVMComponentFailureAtomic(t *testing.T) {
@@ -2811,6 +2818,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	oldSystemctl := vmProvisionSystemctlFunc
 	oldCommit := vmProvisionCommitFunc
 	oldPrepareRootFS := prepareVMRootFSFunc
+	oldRootFSDecompressRunner := vmRootFSDecompressRunner
 	oldGuestReadyBoundary := vmProvisionGuestReadyBoundaryFunc
 	oldGuestReadyWait := vmProvisionGuestReadyWaitFunc
 	oldRuntimeIdentity := vmProvisionEnsureRuntimeIdentity
@@ -2829,6 +2837,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 		vmProvisionSystemctlFunc = oldSystemctl
 		vmProvisionCommitFunc = oldCommit
 		prepareVMRootFSFunc = oldPrepareRootFS
+		vmRootFSDecompressRunner = oldRootFSDecompressRunner
 		vmProvisionGuestReadyBoundaryFunc = oldGuestReadyBoundary
 		vmProvisionGuestReadyWaitFunc = oldGuestReadyWait
 		vmProvisionEnsureRuntimeIdentity = oldRuntimeIdentity
@@ -2868,6 +2877,16 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	}
 	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
 		return strings.TrimSuffix(source, ".zst"), nil
+	}
+	vmRootFSDecompressRunner = func(_ context.Context, name string, args ...string) error {
+		if name != "zstd" || len(args) < 2 {
+			return fmt.Errorf("unexpected rootfs decompression command: %s %v", name, args)
+		}
+		contents, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(args[len(args)-2], contents, 0o600)
 	}
 	vmProvisionDiskRunner = func(context.Context, []string) error { return nil }
 	vmProvisionNetworkRunner = func([]string) error { return nil }
@@ -2959,13 +2978,12 @@ func vmProvisionComponentTestArtifacts(t *testing.T, serviceRoot string) vmProvi
 	t.Helper()
 	cacheRoot := t.TempDir()
 	rootFS := filepath.Join(cacheRoot, "rootfs.ext4.zst")
-	preparedRootFS := filepath.Join(cacheRoot, "prepared-rootfs.ext4")
 	kernelSource := filepath.Join(cacheRoot, "vmlinux")
 	configSource := filepath.Join(cacheRoot, "kernel.config")
 	firecracker := filepath.Join(cacheRoot, "firecracker")
 	jailer := filepath.Join(cacheRoot, "jailer")
 	for path, contents := range map[string]string{
-		rootFS: "component-rootfs", preparedRootFS: "prepared-component-rootfs",
+		rootFS:       "component-rootfs",
 		kernelSource: "component-kernel", configSource: "CONFIG_VIRTIO=y\n",
 		firecracker: "component-firecracker", jailer: "component-jailer",
 	} {
@@ -2991,9 +3009,8 @@ func vmProvisionComponentTestArtifacts(t *testing.T, serviceRoot string) vmProvi
 	}
 	return vmProvisionArtifacts{
 		Image: vmImageAsset{
-			Paths:              vmImagePaths{Manifest: filepath.Join(cacheRoot, "guest-manifest.json"), Dir: cacheRoot, KernelPath: kernelTarget, RootFSPath: rootFS, FirecrackerPath: firecracker, JailerPath: jailer},
-			PreparedRootFSPath: preparedRootFS,
-			Manifest:           vmImageManifest{Name: "Ubuntu 26.04", Version: guest.ID, Architecture: "amd64", Distro: "ubuntu", DistroVersion: "26.04", DefaultUser: "ubuntu", GuestInit: vmGuestInitPath, MetadataDriver: "ubuntu", Kernel: "vmlinux", RootFS: "rootfs.ext4.zst", Firecracker: "firecracker", Jailer: "jailer", RootFSSize: 2 << 30},
+			Paths:    vmImagePaths{Manifest: filepath.Join(cacheRoot, "guest-manifest.json"), Dir: cacheRoot, KernelPath: kernelTarget, RootFSPath: rootFS, FirecrackerPath: firecracker, JailerPath: jailer},
+			Manifest: vmImageManifest{Name: "Ubuntu 26.04", Version: guest.ID, Architecture: "amd64", Distro: "ubuntu", DistroVersion: "26.04", DefaultUser: "ubuntu", GuestInit: vmGuestInitPath, MetadataDriver: "ubuntu", Kernel: "vmlinux", RootFS: "rootfs.ext4.zst", Firecracker: "firecracker", Jailer: "jailer", RootFSSize: int64(len("component-rootfs"))},
 		},
 		GuestBase: guest, Kernel: kernel, Runtime: runtimeArtifact,
 		KernelSourcePath: kernelSource, KernelConfigSourcePath: configSource, KernelConfigTargetPath: configTarget,

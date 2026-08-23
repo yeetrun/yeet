@@ -381,6 +381,101 @@ func TestRunVMProvisionDiskPlanSkipsExistingZVOLBaseSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunVMProvisionDiskPlanSkipsBasePreparationForExistingZVOLSnapshot(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	prepareCalls := 0
+
+	err := runVMProvisionDiskPlanWithBasePreparation(context.Background(), plan, func(context.Context, []string) error {
+		return nil
+	}, nil, func(context.Context) (string, func() error, error) {
+		prepareCalls++
+		return "/staged/rootfs.ext4", func() error { return nil }, nil
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithBasePreparation: %v", err)
+	}
+	if prepareCalls != 0 {
+		t.Fatalf("base preparation calls = %d, want 0", prepareCalls)
+	}
+}
+
+func TestRunVMProvisionDiskPlanPreparesMissingZVOLBase(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	preparedRootFS := "/staged/rootfs.ext4"
+	prepareCalls := 0
+	cleanupCalls := 0
+	var commands [][]string
+
+	err := runVMProvisionDiskPlanWithBasePreparation(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		if isZFSListSnapshotCommand(command, plan) {
+			return errors.New("snapshot missing")
+		}
+		if isZFSListBaseDatasetCommand(command, plan) {
+			return errors.New("base missing")
+		}
+		return nil
+	}, nil, func(context.Context) (string, func() error, error) {
+		prepareCalls++
+		return preparedRootFS, func() error {
+			cleanupCalls++
+			return nil
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithBasePreparation: %v", err)
+	}
+	if prepareCalls != 1 {
+		t.Fatalf("base preparation calls = %d, want 1", prepareCalls)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("base cleanup calls = %d, want 1", cleanupCalls)
+	}
+	wantDD := []string{"dd", "if=" + preparedRootFS, "of=/dev/zvol/" + plan.BaseDataset, "bs=16M", "status=none"}
+	if commandIndex(commands, wantDD) < 0 {
+		t.Fatalf("prepared rootfs write command not found in %#v", commands)
+	}
+}
+
+func TestRunVMProvisionDiskPlanPreparesRawDiskBase(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:    "devbox",
+		Backend:    vmDiskBackendRaw,
+		Path:       "/srv/yeet/services/devbox/data/rootfs.raw",
+		Bytes:      128 << 30,
+		BaseBytes:  2 << 30,
+		BaseRootFS: "/srv/yeet/images/ubuntu/rootfs.ext4.zst",
+	}
+	preparedRootFS := "/staged/rootfs.ext4"
+	prepareCalls := 0
+	cleanupCalls := 0
+	var commands [][]string
+
+	err := runVMProvisionDiskPlanWithBasePreparation(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}, nil, func(context.Context) (string, func() error, error) {
+		prepareCalls++
+		return preparedRootFS, func() error {
+			cleanupCalls++
+			return nil
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithBasePreparation: %v", err)
+	}
+	if prepareCalls != 1 {
+		t.Fatalf("base preparation calls = %d, want 1", prepareCalls)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("base cleanup calls = %d, want 1", cleanupCalls)
+	}
+	wantCopy := []string{"cp", "--reflink=auto", "--sparse=always", preparedRootFS, plan.Path}
+	if commandIndex(commands, wantCopy) < 0 {
+		t.Fatalf("prepared rootfs copy command not found in %#v", commands)
+	}
+}
+
 func TestRunVMProvisionDiskPlanCreatesMissingZVOLBase(t *testing.T) {
 	plan := vmDiskPlan{
 		Service:      "devbox",
@@ -468,6 +563,8 @@ func TestRunVMProvisionDiskPlanSerializesConcurrentZVOLBaseCreation(t *testing.T
 	snapshotCreated := false
 	baseCreates := 0
 	baseWrites := 0
+	basePreparations := 0
+	baseCleanups := 0
 	bothColdChecks := make(chan struct{})
 
 	runner := func(ctx context.Context, command []string) error {
@@ -518,7 +615,17 @@ func TestRunVMProvisionDiskPlanSerializesConcurrentZVOLBaseCreation(t *testing.T
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
-			errs <- runVMProvisionDiskPlanWithProgress(ctx, plan, runner, nil)
+			errs <- runVMProvisionDiskPlanWithBasePreparation(ctx, plan, runner, nil, func(context.Context) (string, func() error, error) {
+				mu.Lock()
+				basePreparations++
+				mu.Unlock()
+				return plan.BaseRootFS, func() error {
+					mu.Lock()
+					baseCleanups++
+					mu.Unlock()
+					return nil
+				}, nil
+			})
 		}()
 	}
 	for range 2 {
@@ -530,12 +637,20 @@ func TestRunVMProvisionDiskPlanSerializesConcurrentZVOLBaseCreation(t *testing.T
 	mu.Lock()
 	gotCreates := baseCreates
 	gotWrites := baseWrites
+	gotPreparations := basePreparations
+	gotCleanups := baseCleanups
 	mu.Unlock()
 	if gotCreates != 1 {
 		t.Fatalf("base creates = %d, want 1", gotCreates)
 	}
 	if gotWrites != 1 {
 		t.Fatalf("base writes = %d, want 1", gotWrites)
+	}
+	if gotPreparations != 1 {
+		t.Fatalf("base preparations = %d, want 1", gotPreparations)
+	}
+	if gotCleanups != 1 {
+		t.Fatalf("base cleanups = %d, want 1", gotCleanups)
 	}
 }
 

@@ -496,6 +496,10 @@ func prepareVMRootFS(ctx context.Context, source string) (string, error) {
 }
 
 func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmGuestBaseArtifact) (target string, retErr error) {
+	return prepareVMComponentRootFSFile(ctx, serviceRoot, guest.RootFSPath, guest.Manifest.RootFS.UncompressedBytes)
+}
+
+func prepareVMComponentRootFSFile(ctx context.Context, serviceRoot, source string, wantSize int64) (target string, retErr error) {
 	target, err := createVMComponentRootFSStagingFile(serviceDataDirForRoot(serviceRoot))
 	if err != nil {
 		return "", err
@@ -506,10 +510,10 @@ func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmG
 			_ = os.Remove(stagingPath)
 		}
 	}()
-	if err := vmRootFSDecompressRunner(ctx, "zstd", "-d", "-f", "--no-progress", "-o", target, guest.RootFSPath); err != nil {
+	if err := vmRootFSDecompressRunner(ctx, "zstd", "-d", "-f", "--no-progress", "-o", target, source); err != nil {
 		return "", fmt.Errorf("decompress VM component rootfs: %w", err)
 	}
-	if err := verifyAndSyncVMComponentRootFS(target, guest.Manifest.RootFS.UncompressedBytes); err != nil {
+	if err := verifyAndSyncVMComponentRootFS(target, wantSize); err != nil {
 		return "", err
 	}
 	return target, nil
