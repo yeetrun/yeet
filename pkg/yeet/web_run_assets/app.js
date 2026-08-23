@@ -137,7 +137,7 @@ const NETWORK_COMPATIBILITY = Object.freeze({
   file: new Set(["svc", "lan", "ts", "iso"]),
 });
 
-const ISO_PUBLISH_MESSAGE = "ISO does not support published ports";
+const ISO_PUBLISH_MESSAGE = "iso does not support published ports";
 const ISO_VM_MESSAGE = "VMs support only iso as a Yeet-managed isolated mode";
 
 const workloadDefinitions = {

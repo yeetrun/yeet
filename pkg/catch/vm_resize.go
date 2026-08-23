@@ -259,7 +259,7 @@ func (s *Server) applyVMNetworkSettings(ctx context.Context, dv *db.DataView, na
 		}
 		if plan.OldISO != nil && allocation == nil {
 			if plan.OldISO.RemoveRequested {
-				return fmt.Errorf("cannot change VM %q network while ISO removal is in progress", name)
+				return fmt.Errorf("cannot change VM %q network while iso removal is in progress", name)
 			}
 			plan.TransitionFromISO = true
 		}
@@ -779,17 +779,17 @@ func (s *Server) applyVMTransitionFromISO(ctx context.Context, plan vmSettingsPl
 		return err
 	}
 	if err := s.markISOState(plan.Service, string(iso.StateTombstoned), nil); err != nil {
-		return fmt.Errorf("record VM ISO transition intent: %w", err)
+		return fmt.Errorf("record VM iso transition intent: %w", err)
 	}
 	runner := vmServiceSetNetworkRunner
 	if runner == nil {
 		runner = execVMNetworkCommand
 	}
 	if err := plan.OldNetwork.ExecuteCleanup(runner); err != nil {
-		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("clean VM ISO TAP: %w", err))
+		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("clean VM iso TAP: %w", err))
 	}
 	if err := verifyVMISONetworkAbsentForSettings(ctx, plan.OldNetwork); err != nil {
-		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("verify VM ISO TAP absent: %w", err))
+		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("verify VM iso TAP absent: %w", err))
 	}
 
 	result := vmSettingsApplyResult{plan: plan, metadataTouched: plan.RewriteMetadata}
@@ -803,7 +803,7 @@ func (s *Server) applyVMTransitionFromISO(ctx context.Context, plan vmSettingsPl
 		return errors.Join(s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("commit replacement VM network: %w", err)), result.rollbackPreparedFiles(ctx))
 	}
 	if err := installVMISOPolicyAfterTransitionForSet(ctx, s); err != nil {
-		return fmt.Errorf("install ISO policy after VM transition: %w", err)
+		return fmt.Errorf("install iso policy after VM transition: %w", err)
 	}
 	if err := plan.NewNetwork.ExecuteSetup(runner); err != nil {
 		cleanupErr := plan.NewNetwork.ExecuteCleanup(runner)
@@ -826,7 +826,7 @@ func (r vmSettingsApplyResult) rollbackPreparedFiles(ctx context.Context) error 
 func verifyVMISONetworkPlanAbsent(ctx context.Context, plan vmNetworkPlan) error {
 	output, err := vmNetworkVerifyCommand(ctx, "ip", "-j", "link", "show")
 	if err != nil {
-		return fmt.Errorf("list links after VM ISO cleanup: %w", err)
+		return fmt.Errorf("list links after VM iso cleanup: %w", err)
 	}
 	links, err := decodeVMNetworkLinks(output)
 	if err != nil {
@@ -840,7 +840,7 @@ func decodeVMNetworkLinks(output []byte) ([]string, error) {
 		IfName string `json:"ifname"`
 	}
 	if err := json.Unmarshal(output, &links); err != nil {
-		return nil, fmt.Errorf("parse links after VM ISO cleanup: %w", err)
+		return nil, fmt.Errorf("parse links after VM iso cleanup: %w", err)
 	}
 	names := make([]string, 0, len(links))
 	for _, link := range links {
@@ -856,7 +856,7 @@ func verifyVMISOTapsAbsent(plan vmNetworkPlan, links []string) error {
 		}
 		for _, link := range links {
 			if link == iface.Tap {
-				return fmt.Errorf("VM ISO TAP %s still exists", iface.Tap)
+				return fmt.Errorf("VM iso TAP %s still exists", iface.Tap)
 			}
 		}
 	}
@@ -896,7 +896,7 @@ func (r vmNetworkTransitionResult) rollback(cause error) error {
 	}
 	if r.newISO && r.server != nil {
 		if err := r.server.markISOState(r.service, string(iso.StateQuarantined), cause); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("quarantine reserved VM ISO allocation: %w", err))
+			retErr = errors.Join(retErr, fmt.Errorf("quarantine reserved VM iso allocation: %w", err))
 		}
 	}
 	return retErr
@@ -941,7 +941,7 @@ func applyVMServiceNetworkSettings(ctx context.Context, server *Server, plan vmS
 	result.applied = true
 	if plan.NewISO != nil {
 		if err := verifyVMNetworkPlanForSettings(ctx, plan.NewNetwork); err != nil {
-			return result, fmt.Errorf("verify VM ISO network: %w", err)
+			return result, fmt.Errorf("verify VM iso network: %w", err)
 		}
 	}
 	return result, nil
@@ -1012,14 +1012,14 @@ func (s *Server) commitVMServiceSettingsPlan(name string, plan vmSettingsPlan) e
 		if plan.NetworkChanged {
 			if plan.NewISO != nil {
 				if !sameVMISOAllocation(service.ISO, plan.NewISO) || service.ISO.RemoveRequested || service.ISO.State != string(iso.StateReserved) {
-					return fmt.Errorf("service %q ISO allocation changed during VM network update", name)
+					return fmt.Errorf("service %q iso allocation changed during VM network update", name)
 				}
 				if !vmNetworkMatchesISOAllocation(plan.NewNetwork, service.ISO) {
-					return fmt.Errorf("service %q VM ISO network does not match its allocation", name)
+					return fmt.Errorf("service %q VM iso network does not match its allocation", name)
 				}
 			}
 			if plan.TransitionFromISO && service.ISO == nil {
-				return fmt.Errorf("service %q lost its ISO allocation before replacement commit", name)
+				return fmt.Errorf("service %q lost its iso allocation before replacement commit", name)
 			}
 			service.VM.Networks = plan.NewNetwork.DBNetworks()
 			service.SvcNetwork = cloneSvcNetwork(plan.SvcNetwork)

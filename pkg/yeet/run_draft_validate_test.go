@@ -151,17 +151,17 @@ func TestRunDraftISOCompatibility(t *testing.T) {
 		wantField string
 		wantErr   string
 	}{
-		{name: "VM ISO", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
-		{name: "container ISO TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}},
-		{name: "auto compose ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
-		{name: "file python ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: pythonPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso"}}}},
-		{name: "ISO SVC", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, PayloadKind: "compose", Network: RunDraftNetwork{Modes: []string{"iso", "svc"}}}, wantField: "network.modes", wantErr: "cannot combine"},
-		{name: "VM ISO TS", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "VMs support only iso"},
-		{name: "scheduled ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
-		{name: "native ISO TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: cronPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "native ISO supports only iso"},
-		{name: "scheduled ISO TS", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "timer ISO supports only iso"},
-		{name: "ISO publish", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, Publish: []string{"8080:80"}}}, wantField: "network.publish", wantErr: "published ports"},
-		{name: "ISO publish reset", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}, wantField: "network.publish", wantErr: "published ports"},
+		{name: "VM iso", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "container iso TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}},
+		{name: "auto compose iso", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "file python iso", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: pythonPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "iso SVC", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, PayloadKind: "compose", Network: RunDraftNetwork{Modes: []string{"iso", "svc"}}}, wantField: "network.modes", wantErr: "cannot combine"},
+		{name: "VM iso TS", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "VMs support only iso"},
+		{name: "scheduled iso", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "native iso TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: cronPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "native iso supports only iso"},
+		{name: "scheduled iso TS", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "timer iso supports only iso"},
+		{name: "iso publish", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, Publish: []string{"8080:80"}}}, wantField: "network.publish", wantErr: "published ports"},
+		{name: "iso publish reset", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}, wantField: "network.publish", wantErr: "published ports"},
 	}
 
 	for _, tt := range tests {
@@ -634,7 +634,7 @@ func TestValidateRunDraftScheduledISOUsesTimerPolicy(t *testing.T) {
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 		Network:     RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"},
 	}, tmp)
-	if got := validation.fieldError("network.modes"); !strings.Contains(got, "timer ISO supports only iso") {
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, "timer iso supports only iso") {
 		t.Fatalf("network.modes error = %q, errors = %#v", got, validation.Errors)
 	}
 }

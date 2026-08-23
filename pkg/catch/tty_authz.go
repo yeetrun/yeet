@@ -100,7 +100,7 @@ func serviceCommandPermissions(args []string) (permissionSet, error) {
 	switch args[0] {
 	case "generations":
 		return newPermissionSet(permissionRead), nil
-	case "set", "rollback", "readmit":
+	case "set", "rollback":
 		return newPermissionSet(permissionManage), nil
 	default:
 		return nil, fmt.Errorf("unclassified service command %q", args[0])

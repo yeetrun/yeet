@@ -36,7 +36,7 @@ func newISODNSHandler(store isoDNSPoolStore, forward dnsForwardFunc) dns.Handler
 func (h *isoDNSHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	resp := h.responseFor(req, w.RemoteAddr())
 	if err := w.WriteMsg(resp); err != nil {
-		log.Printf("failed to write ISO DNS response: %v", err)
+		log.Printf("failed to write iso DNS response: %v", err)
 	}
 }
 
@@ -60,14 +60,14 @@ func (h *isoDNSHandler) responseFor(req *dns.Msg, remote net.Addr) *dns.Msg {
 
 func (h *isoDNSHandler) loadPool() (netip.Prefix, error) {
 	if h.store == nil {
-		return netip.Prefix{}, fmt.Errorf("ISO DNS pool store is unavailable")
+		return netip.Prefix{}, fmt.Errorf("iso DNS pool store is unavailable")
 	}
 	pool, err := h.store.ISOPool(context.Background())
 	if err != nil {
 		return netip.Prefix{}, err
 	}
 	if !validISODNSPool(pool) {
-		return netip.Prefix{}, fmt.Errorf("ISO DNS pool is invalid")
+		return netip.Prefix{}, fmt.Errorf("iso DNS pool is invalid")
 	}
 	return pool, nil
 }
@@ -273,7 +273,7 @@ func forwardISODNSViaResolverConfig(ctx context.Context, req *dns.Msg, cfg *dns.
 		port = "53"
 	}
 	if port == "5353" {
-		return nil, fmt.Errorf("no usable ordinary upstream DNS servers after excluding ISO DNS listener port")
+		return nil, fmt.Errorf("no usable ordinary upstream DNS servers after excluding iso DNS listener port")
 	}
 	servers := usableISOHostResolverServers(cfg.Servers)
 	if len(servers) == 0 {

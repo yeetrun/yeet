@@ -92,7 +92,7 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 			return fmt.Errorf("unexpected service set args: %s", strings.Join(rest, " "))
 		}
 		return e.serviceSetCmdFunc(flags)
-	case "rollback", "readmit", "generations":
+	case "rollback", "generations":
 		return e.serviceLifecycleCmdFunc(args)
 	default:
 		return fmt.Errorf("unknown service command %q", args[0])
@@ -107,12 +107,6 @@ func (e *ttyExecer) serviceLifecycleCmdFunc(args []string) error {
 			return err
 		}
 		return e.rollbackCmdFunc(rest[0])
-	case "readmit":
-		rest, err := cli.ParseServiceReadmit(argsWithServiceDefault(args[1:], e.sn))
-		if err != nil {
-			return err
-		}
-		return e.readmitCmdFunc(rest[0])
 	case "generations":
 		flags, rest, err := cli.ParseServiceGenerations(argsWithServiceDefault(args[1:], e.sn))
 		if err != nil {

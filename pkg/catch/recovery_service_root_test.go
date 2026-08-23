@@ -144,7 +144,7 @@ func TestCloneServiceRootRecoveryServiceStripsISOStateAndGeneratedArtifacts(t *t
 	}
 
 	if cloned.ISO != nil {
-		t.Fatalf("cloned ISO allocation = %#v, want nil so the next install reserves fresh identities", cloned.ISO)
+		t.Fatalf("cloned iso allocation = %#v, want nil so the next install reserves fresh identities", cloned.ISO)
 	}
 	for _, name := range []db.ArtifactName{
 		db.ArtifactDockerComposeNetwork, db.ArtifactNetNSService, db.ArtifactNetNSEnv, db.ArtifactNetNSResolv,
@@ -155,7 +155,7 @@ func TestCloneServiceRootRecoveryServiceStripsISOStateAndGeneratedArtifacts(t *t
 		}
 	}
 	if _, ok := cloned.Artifacts[db.ArtifactDockerComposeFile]; !ok {
-		t.Fatal("cloned payload Compose artifact was removed with ISO network artifacts")
+		t.Fatal("cloned payload Compose artifact was removed with iso network artifacts")
 	}
 }
 

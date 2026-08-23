@@ -27,9 +27,9 @@ func TestValidateNetworkMatrix(t *testing.T) {
 		{name: "native script", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
 		{name: "native root", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
 		{name: "native non-root", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
-		{name: "native tailscale", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso", "ts"}}, wantErr: "native ISO supports only iso"},
+		{name: "native tailscale", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso", "ts"}}, wantErr: "native iso supports only iso"},
 		{name: "timer", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso"}}},
-		{name: "timer tailscale", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso", "ts"}}, wantErr: "timer ISO supports only iso"},
+		{name: "timer tailscale", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso", "ts"}}, wantErr: "timer iso supports only iso"},
 		{name: "publish", req: NetworkRequest{Payload: PayloadContainer, Modes: []string{"iso"}, Published: true}, wantErr: "published ports"},
 	}
 	for _, tt := range tests {

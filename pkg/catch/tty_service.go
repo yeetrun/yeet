@@ -144,7 +144,7 @@ func (e *ttyExecer) stopCmdFunc() error {
 			}
 			if e.s != nil {
 				if err := e.s.markISOStoppedIfAllocated(e.sn); err != nil {
-					return fmt.Errorf("record stopped ISO state for %s: %w", target, err)
+					return fmt.Errorf("record stopped iso state for %s: %w", target, err)
 				}
 			}
 			return nil
@@ -184,38 +184,6 @@ func (e *ttyExecer) rollbackCmdFunc(serviceName string) error {
 		}
 		return e.installRollbackGeneration(ui, serviceName, service.Generation, gen)
 	})
-}
-
-func (e *ttyExecer) readmitCmdFunc(serviceName string) error {
-	return e.withServiceTarget(serviceName, func() error {
-		return e.withLockedServiceActivationMutation(func() error {
-			return e.runAction("readmit", "Readmit service", func() error {
-				return e.readmitService(serviceName)
-			})
-		})
-	})
-}
-
-func (e *ttyExecer) readmitService(serviceName string) error {
-	view, err := e.s.serviceView(serviceName)
-	if err != nil {
-		return fmt.Errorf("load service: %w", err)
-	}
-	record := view.AsStruct()
-	if err := validateNativeISOReadmission(record); err != nil {
-		return err
-	}
-	if err := e.preflightSandboxGenerationActivation(record, record.Generation); err != nil {
-		return fmt.Errorf("preflight readmission: %w", err)
-	}
-	readmit := e.readmitNativeISOFunc
-	if readmit == nil {
-		readmit = e.s.readmitNativeISO
-	}
-	if err := readmit(e.ctx, record); err != nil {
-		return fmt.Errorf("readmit service %q: %w", serviceName, err)
-	}
-	return nil
 }
 
 func (e *ttyExecer) rollbackGeneration(serviceName string) (*db.Service, int, error) {
@@ -624,7 +592,7 @@ func (e *ttyExecer) preflightISOActivationState() error {
 	if diagnostic == "" {
 		diagnostic = "no diagnostic was recorded"
 	}
-	return fmt.Errorf("service %q ISO allocation is quarantined: %s; run `yeet service readmit %s` after correcting the isolation failure", e.sn, diagnostic, e.sn)
+	return fmt.Errorf("service %q iso allocation is quarantined: %s; manual Catch-host recovery is required after correcting the isolation failure", e.sn, diagnostic)
 }
 
 func (e *ttyExecer) activateISOVM(activate func(ServiceRunner) error) (bool, error) {

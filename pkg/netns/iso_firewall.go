@@ -33,7 +33,7 @@ const (
 
 var isoInterfaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 
-// ISOEndpoint describes one root-side attachment protected by the global ISO
+// ISOEndpoint describes one root-side attachment protected by the global iso
 // policy. Project is empty for VM TAP endpoints.
 type ISOEndpoint struct {
 	Interface string
@@ -43,7 +43,7 @@ type ISOEndpoint struct {
 	Tailscale bool
 }
 
-// ISOPolicySpec is the backend-neutral input to the host ISO firewall.
+// ISOPolicySpec is the backend-neutral input to the host iso firewall.
 type ISOPolicySpec struct {
 	Pool      netip.Prefix
 	DNSPort   uint16
@@ -110,10 +110,10 @@ func RenderISOPolicy(backend FirewallBackend, spec ISOPolicySpec) (ISOPolicyRule
 func validateISOPolicySpec(spec ISOPolicySpec) error {
 	pool := spec.Pool
 	if !pool.IsValid() || !pool.Addr().Is4() || pool.Bits() != 16 || pool != pool.Masked() {
-		return fmt.Errorf("ISO policy requires a canonical IPv4 /16")
+		return fmt.Errorf("iso policy requires a canonical IPv4 /16")
 	}
 	if spec.DNSPort == 0 {
-		return fmt.Errorf("ISO DNS port is required")
+		return fmt.Errorf("iso DNS port is required")
 	}
 	return nil
 }
@@ -125,7 +125,7 @@ func renderISOPolicyBackend(backend FirewallBackend, spec ISOPolicySpec) (ISOPol
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
 		return renderIPTablesISOPolicy(backend, spec)
 	default:
-		return ISOPolicyRules{}, fmt.Errorf("unsupported ISO firewall backend %q", backend)
+		return ISOPolicyRules{}, fmt.Errorf("unsupported iso firewall backend %q", backend)
 	}
 }
 
@@ -137,7 +137,7 @@ func validateISOEndpoints(pool netip.Prefix, endpoints []ISOEndpoint) error {
 	seen := newISOEndpointIdentitySet(len(endpoints))
 	for _, endpoint := range endpoints {
 		if !isoInterfaceNameRE.MatchString(endpoint.Interface) {
-			return fmt.Errorf("invalid ISO interface %q", endpoint.Interface)
+			return fmt.Errorf("invalid iso interface %q", endpoint.Interface)
 		}
 		if err := validateISOEndpointNetwork(layout, endpoint); err != nil {
 			return err
@@ -167,20 +167,20 @@ func newISOEndpointIdentitySet(size int) isoEndpointIdentitySet {
 
 func (seen isoEndpointIdentitySet) add(endpoint ISOEndpoint) error {
 	if owner, exists := seen.interfaces[endpoint.Interface]; exists {
-		return fmt.Errorf("duplicate ISO interface %q already used by %q", endpoint.Interface, owner)
+		return fmt.Errorf("duplicate iso interface %q already used by %q", endpoint.Interface, owner)
 	}
 	seen.interfaces[endpoint.Interface] = endpoint.Interface
 	if owner, exists := seen.links[endpoint.Link]; exists {
-		return fmt.Errorf("duplicate ISO link %s on interfaces %q and %q", endpoint.Link, owner, endpoint.Interface)
+		return fmt.Errorf("duplicate iso link %s on interfaces %q and %q", endpoint.Link, owner, endpoint.Interface)
 	}
 	seen.links[endpoint.Link] = endpoint.Interface
 	if owner, exists := seen.peers[endpoint.PeerIP]; exists {
-		return fmt.Errorf("duplicate ISO peer %s on interfaces %q and %q", endpoint.PeerIP, owner, endpoint.Interface)
+		return fmt.Errorf("duplicate iso peer %s on interfaces %q and %q", endpoint.PeerIP, owner, endpoint.Interface)
 	}
 	seen.peers[endpoint.PeerIP] = endpoint.Interface
 	if endpoint.Project.IsValid() {
 		if owner, exists := seen.projects[endpoint.Project]; exists {
-			return fmt.Errorf("duplicate ISO project %s on interfaces %q and %q", endpoint.Project, owner, endpoint.Interface)
+			return fmt.Errorf("duplicate iso project %s on interfaces %q and %q", endpoint.Project, owner, endpoint.Interface)
 		}
 		seen.projects[endpoint.Project] = endpoint.Interface
 	}
@@ -190,10 +190,10 @@ func (seen isoEndpointIdentitySet) add(endpoint ISOEndpoint) error {
 func validateISOEndpointNetwork(layout iso.Layout, endpoint ISOEndpoint) error {
 	link := endpoint.Link.Masked()
 	if !link.IsValid() || !link.Addr().Is4() || link.Bits() != 30 || !layout.Links.Contains(link.Addr()) || endpoint.Link != link {
-		return fmt.Errorf("ISO endpoint %s requires a canonical in-pool /30 link", endpoint.Interface)
+		return fmt.Errorf("iso endpoint %s requires a canonical in-pool /30 link", endpoint.Interface)
 	}
 	if endpoint.PeerIP != link.Addr().Next().Next() {
-		return fmt.Errorf("ISO endpoint %s peer must be link host two", endpoint.Interface)
+		return fmt.Errorf("iso endpoint %s peer must be link host two", endpoint.Interface)
 	}
 	return validateISOEndpointProject(layout, endpoint)
 }
@@ -204,7 +204,7 @@ func validateISOEndpointProject(layout iso.Layout, endpoint ISOEndpoint) error {
 	}
 	project := endpoint.Project.Masked()
 	if !project.Addr().Is4() || project.Bits() != 27 || endpoint.Project != project || !layout.Projects.Contains(project.Addr()) {
-		return fmt.Errorf("ISO endpoint %s requires a canonical in-pool /27 project", endpoint.Interface)
+		return fmt.Errorf("iso endpoint %s requires a canonical in-pool /27 project", endpoint.Interface)
 	}
 	return nil
 }
@@ -340,7 +340,7 @@ func renderIPTablesISOPolicy(backend FirewallBackend, spec ISOPolicySpec) (ISOPo
 	for _, endpoint := range spec.Endpoints {
 		writeIPTablesISOEndpointComment(&ipv4, endpoint)
 	}
-	fmt.Fprintf(&ipv4, "# ISO non-public destinations %s\n", strings.Join(prefixStrings(compactISOPrefixes(iso.NonPublicIPv4Prefixes(spec.Pool))), ","))
+	fmt.Fprintf(&ipv4, "# iso non-public destinations %s\n", strings.Join(prefixStrings(compactISOPrefixes(iso.NonPublicIPv4Prefixes(spec.Pool))), ","))
 	ipv4.WriteString("*mangle\n")
 	fmt.Fprintf(&ipv4, ":%s - [0:0]\n-F %s\n-A PREROUTING -j %s\n", isoIPTablesMangle, isoIPTablesMangle, isoIPTablesMangle)
 	for _, endpoint := range spec.Endpoints {
@@ -399,7 +399,7 @@ func writeISOIPSetEndpoint(out *strings.Builder, endpoint ISOEndpoint) {
 }
 
 func writeIPTablesISOEndpointComment(out *strings.Builder, endpoint ISOEndpoint) {
-	fmt.Fprintf(out, "# ISO endpoint %s source %s", endpoint.Interface, netip.PrefixFrom(endpoint.PeerIP, 32))
+	fmt.Fprintf(out, "# iso endpoint %s source %s", endpoint.Interface, netip.PrefixFrom(endpoint.PeerIP, 32))
 	if endpoint.Project.IsValid() {
 		fmt.Fprintf(out, " project %s", endpoint.Project)
 	}
@@ -410,7 +410,7 @@ func writeIPTablesISOEndpointComment(out *strings.Builder, endpoint ISOEndpoint)
 // verifies their complete live digest. Any missing tool or mismatch is fatal.
 func EnsureISOPolicy(ctx context.Context, rules ISOPolicyRules) error {
 	if rules.Digest == "" || rules.Digest != digestISOPolicy(rules) {
-		return fmt.Errorf("ISO firewall policy has an invalid desired digest")
+		return fmt.Errorf("iso firewall policy has an invalid desired digest")
 	}
 	if err := applyISOIPSets(ctx, rules); err != nil {
 		return err
@@ -429,7 +429,7 @@ func applyISOIPSets(ctx context.Context, rules ISOPolicyRules) error {
 		return nil
 	}
 	if rules.Backend != BackendIPTablesNFT && rules.Backend != BackendIPTablesLegacy {
-		return fmt.Errorf("unsupported ISO firewall backend %q", rules.Backend)
+		return fmt.Errorf("unsupported iso firewall backend %q", rules.Backend)
 	}
 	script, err := renderAtomicISOIPSetRestore(rules.IPSet)
 	if err != nil {
@@ -437,7 +437,7 @@ func applyISOIPSets(ctx context.Context, rules ISOPolicyRules) error {
 	}
 	_, err = runISOCommand(ctx, []byte(script), "ipset", "restore", "-exist")
 	if err != nil {
-		return fmt.Errorf("apply ISO ipsets: %w", err)
+		return fmt.Errorf("apply iso ipsets: %w", err)
 	}
 	return nil
 }
@@ -462,16 +462,16 @@ func parseISOIPSetRestore(desired string) (map[string]string, map[string][]strin
 		switch fields[0] {
 		case "create":
 			if len(fields) < 3 {
-				return nil, nil, fmt.Errorf("invalid ISO ipset create line %q", line)
+				return nil, nil, fmt.Errorf("invalid iso ipset create line %q", line)
 			}
 			creates[fields[1]] = strings.Join(fields[2:], " ")
 		case "add":
 			if len(fields) < 3 {
-				return nil, nil, fmt.Errorf("invalid ISO ipset add line %q", line)
+				return nil, nil, fmt.Errorf("invalid iso ipset add line %q", line)
 			}
 			entries[fields[1]] = append(entries[fields[1]], strings.Join(fields[2:], " "))
 		default:
-			return nil, nil, fmt.Errorf("invalid ISO ipset command %q", line)
+			return nil, nil, fmt.Errorf("invalid iso ipset command %q", line)
 		}
 	}
 	return creates, entries, nil
@@ -482,7 +482,7 @@ func renderISOIPSetSwaps(creates map[string]string, entries map[string][]string)
 	for _, name := range []string{isoIPSetSources, isoIPSetNonPublic} {
 		kind, ok := creates[name]
 		if !ok {
-			return "", fmt.Errorf("ISO ipset %s is missing", name)
+			return "", fmt.Errorf("iso ipset %s is missing", name)
 		}
 		temp := name + "_next"
 		fmt.Fprintf(&script, "create %s %s\ncreate %s %s\nflush %s\n", name, kind, temp, kind, temp)
@@ -498,7 +498,7 @@ func applyISOIPv4(ctx context.Context, rules ISOPolicyRules) error {
 	switch rules.Backend {
 	case BackendNFT:
 		if err := applyISONFTTable(ctx, "ip", rules.IPv4); err != nil {
-			return fmt.Errorf("apply ISO nft IPv4 policy: %w", err)
+			return fmt.Errorf("apply iso nft IPv4 policy: %w", err)
 		}
 		return nil
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
@@ -507,11 +507,11 @@ func applyISOIPv4(ctx context.Context, rules ISOPolicyRules) error {
 			return err
 		}
 		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv4)), restore, iptablesWaitArg, "--noflush"); err != nil {
-			return fmt.Errorf("apply ISO IPv4 policy: %w", err)
+			return fmt.Errorf("apply iso IPv4 policy: %w", err)
 		}
 		return ensureISOIPTablesJumps(ctx, rules.Backend, false)
 	default:
-		return fmt.Errorf("unsupported ISO firewall backend %q", rules.Backend)
+		return fmt.Errorf("unsupported iso firewall backend %q", rules.Backend)
 	}
 }
 
@@ -519,7 +519,7 @@ func applyISOIPv6(ctx context.Context, rules ISOPolicyRules) error {
 	switch rules.Backend {
 	case BackendNFT:
 		if err := applyISONFTTable(ctx, "ip6", rules.IPv6); err != nil {
-			return fmt.Errorf("apply ISO nft IPv6 policy: %w", err)
+			return fmt.Errorf("apply iso nft IPv6 policy: %w", err)
 		}
 		return nil
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
@@ -528,11 +528,11 @@ func applyISOIPv6(ctx context.Context, rules ISOPolicyRules) error {
 			return err
 		}
 		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv6)), restore, iptablesWaitArg, "--noflush"); err != nil {
-			return fmt.Errorf("apply ISO IPv6 policy: %w", err)
+			return fmt.Errorf("apply iso IPv6 policy: %w", err)
 		}
 		return ensureISOIPTablesJumps(ctx, rules.Backend, true)
 	default:
-		return fmt.Errorf("unsupported ISO firewall backend %q", rules.Backend)
+		return fmt.Errorf("unsupported iso firewall backend %q", rules.Backend)
 	}
 }
 
@@ -565,7 +565,7 @@ func isoNamedNFTTableExists(ctx context.Context, name string, prefix []string, f
 	if strings.Contains(strings.ToLower(err.Error()), "no such file or directory") {
 		return false, nil
 	}
-	return false, fmt.Errorf("probe ISO nft %s table %s: %w", family, table, err)
+	return false, fmt.Errorf("probe iso nft %s table %s: %w", family, table, err)
 }
 
 func iptablesRestoreOwnedChains(rendered string) string {
@@ -643,7 +643,7 @@ func reconcileISOIPTablesJump(ctx context.Context, name string, prefix []string,
 	}
 	out, err := runISOCommand(ctx, nil, name, args("-S", chain)...)
 	if err != nil {
-		return fmt.Errorf("inspect ISO jump %s/%s: %w", table, chain, err)
+		return fmt.Errorf("inspect iso jump %s/%s: %w", table, chain, err)
 	}
 	count, first := isoIPTablesJumpState(string(out), chain, target)
 	if count == 1 && first {
@@ -651,11 +651,11 @@ func reconcileISOIPTablesJump(ctx context.Context, name string, prefix []string,
 	}
 	for range count {
 		if _, err := runISOCommand(ctx, nil, name, args("-D", chain, "-j", target)...); err != nil {
-			return fmt.Errorf("remove stale ISO jump %s/%s: %w", table, chain, err)
+			return fmt.Errorf("remove stale iso jump %s/%s: %w", table, chain, err)
 		}
 	}
 	if _, err := runISOCommand(ctx, nil, name, args("-I", chain, "1", "-j", target)...); err != nil {
-		return fmt.Errorf("install ISO jump %s/%s: %w", table, chain, err)
+		return fmt.Errorf("install iso jump %s/%s: %w", table, chain, err)
 	}
 	return nil
 }
@@ -696,7 +696,7 @@ func VerifyISOPolicy(ctx context.Context, want ISOPolicyRules) error {
 		return err
 	}
 	if got := digestISOPolicy(live); got != want.Digest {
-		return fmt.Errorf("ISO firewall policy digest mismatch: got %s want %s", got, want.Digest)
+		return fmt.Errorf("iso firewall policy digest mismatch: got %s want %s", got, want.Digest)
 	}
 	return nil
 }
@@ -708,7 +708,7 @@ func readLiveISOPolicy(ctx context.Context, backend FirewallBackend) (ISOPolicyR
 	case BackendNFT:
 		live.IPv4, err = readISOCommandText(ctx, "nft", "list", "table", "ip", isoNFTTable)
 		if err != nil {
-			return ISOPolicyRules{}, fmt.Errorf("read live ISO nft IPv4 policy: %w", err)
+			return ISOPolicyRules{}, fmt.Errorf("read live iso nft IPv4 policy: %w", err)
 		}
 		live.IPv6, err = readISOCommandText(ctx, "nft", "list", "table", "ip6", isoNFTTable)
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
@@ -728,10 +728,10 @@ func readLiveISOPolicy(ctx context.Context, backend FirewallBackend) (ISOPolicyR
 			live.IPSet, err = readISOCommandText(ctx, "ipset", "save")
 		}
 	default:
-		return ISOPolicyRules{}, fmt.Errorf("unsupported ISO firewall backend %q", backend)
+		return ISOPolicyRules{}, fmt.Errorf("unsupported iso firewall backend %q", backend)
 	}
 	if err != nil {
-		return ISOPolicyRules{}, fmt.Errorf("read live ISO firewall policy: %w", err)
+		return ISOPolicyRules{}, fmt.Errorf("read live iso firewall policy: %w", err)
 	}
 	return live, nil
 }

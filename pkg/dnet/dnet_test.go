@@ -486,7 +486,7 @@ func TestCreateNetworkStoresDockerNetwork(t *testing.T) {
 }
 
 func TestISODriverPersistsModeAndRejectsUnknownMode(t *testing.T) {
-	t.Run("persists ISO mode", func(t *testing.T) {
+	t.Run("persists iso mode", func(t *testing.T) {
 		var syncs []capturedPortForwardSync
 		p := newTestPlugin(t, &db.Data{}, &syncs)
 		rr := postJSON(t, p.CreateNetwork, isoCreateNetworkRequest("iso"))
@@ -551,7 +551,7 @@ func TestISODriverRejectsPortMapsAtEveryCallback(t *testing.T) {
 			var commands []recordedCommand
 			p.runCommandFunc = recordingRunner(&commands, nil)
 			rr := postJSON(t, tt.handler(p), tt.body)
-			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "ISO network does not support port maps") {
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "iso network does not support port maps") {
 				t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
 			}
 			if len(syncs) != 0 || len(commands) != 0 {
@@ -573,7 +573,7 @@ func TestISODriverRejectsRestoredPortMaps(t *testing.T) {
 		syncCalls++
 		return nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "ISO network does not support port maps") {
+	if err == nil || !strings.Contains(err.Error(), "iso network does not support port maps") {
 		t.Fatalf("reconcilePortForwardsFromData error = %v", err)
 	}
 	if existsCalls != 0 || syncCalls != 0 {
@@ -598,11 +598,11 @@ func TestISODriverJoinAttachesInterfaceWithoutNamespaceNAT(t *testing.T) {
 	}
 	for _, command := range commands {
 		if command.name == "iptables" {
-			t.Fatalf("ISO Join ran namespace NAT command: %#v", command)
+			t.Fatalf("iso Join ran namespace NAT command: %#v", command)
 		}
 	}
 	if len(backend.prerouting) != 0 || len(backend.yeetOutput) != 0 || len(backend.output) != 0 {
-		t.Fatalf("ISO Join programmed port forwarding: %#v", backend)
+		t.Fatalf("iso Join programmed port forwarding: %#v", backend)
 	}
 	for _, want := range []recordedCommand{
 		{name: "ip", args: []string{"link", "set", "yv-abcd", "master", "br0"}},
@@ -631,7 +631,7 @@ func TestISODriverSkipsPortForwardSyncAndLeaveNAT(t *testing.T) {
 		t.Fatalf("Revoke response = %d %s", rr.Code, rr.Body.String())
 	}
 	if len(syncs) != 0 {
-		t.Fatalf("ISO Revoke port-forward syncs = %#v, want none", syncs)
+		t.Fatalf("iso Revoke port-forward syncs = %#v, want none", syncs)
 	}
 
 	var commands []recordedCommand
@@ -649,14 +649,14 @@ func TestISODriverSkipsPortForwardSyncAndLeaveNAT(t *testing.T) {
 		t.Fatalf("Leave commands mismatch (-want +got):\n%s", diff)
 	}
 	if len(backend.prerouting) != 0 || len(backend.yeetOutput) != 0 || len(backend.output) != 0 {
-		t.Fatalf("ISO Leave programmed port forwarding: %#v", backend)
+		t.Fatalf("iso Leave programmed port forwarding: %#v", backend)
 	}
 	rr = postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "iso-network"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("DeleteNetwork response = %d %s", rr.Code, rr.Body.String())
 	}
 	if len(syncs) != 0 {
-		t.Fatalf("ISO DeleteNetwork port-forward syncs = %#v, want none", syncs)
+		t.Fatalf("iso DeleteNetwork port-forward syncs = %#v, want none", syncs)
 	}
 }
 

@@ -379,7 +379,7 @@ func TestISOConcreteVMRemovalStepsCleanEveryBoundary(t *testing.T) {
 		t.Fatalf("removal events = %#v", events)
 	}
 	if _, err := os.Lstat(unitPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("VM unit remains after ISO removal: %s (%v)", unitPath, err)
+		t.Fatalf("VM unit remains after iso removal: %s (%v)", unitPath, err)
 	}
 	if allocation.PeerIP.IsValid() == false {
 		t.Fatal("test allocation lost peer address")
@@ -409,7 +409,7 @@ func TestISOConcreteNativeRemovalUninstallsSystemdUnitsBeforeDelete(t *testing.T
 		t.Fatal(err)
 	}
 	if !called {
-		t.Fatal("native ISO removal skipped systemd uninstall")
+		t.Fatal("native iso removal skipped systemd uninstall")
 	}
 
 	wantErr := errors.New("uninstall failed")
@@ -621,7 +621,7 @@ func TestISOTailscaleConcreteVerificationUsesFinalSidecarCheck(t *testing.T) {
 		t.Fatalf("lifecycle calls = %#v, want final sidecar verification", lifecycleCalls)
 	}
 	if rawProbes != 0 {
-		t.Fatalf("raw ISO Tailscale probes = %d, want shared sidecar verifier only", rawProbes)
+		t.Fatalf("raw iso Tailscale probes = %d, want shared sidecar verifier only", rawProbes)
 	}
 	_, _, err = server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
 		service.TSNet = nil

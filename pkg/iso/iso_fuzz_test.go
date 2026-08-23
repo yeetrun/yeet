@@ -31,13 +31,13 @@ func FuzzValidateNetwork(f *testing.F) {
 			return
 		}
 		if published && err == nil {
-			t.Fatal("ISO input with published ports passed validation")
+			t.Fatal("iso input with published ports passed validation")
 		}
 		if (hasMode(modes, "svc") || hasMode(modes, "lan") || hasMode(modes, "host")) && err == nil {
-			t.Fatal("ISO input with an incompatible topology passed validation")
+			t.Fatal("iso input with an incompatible topology passed validation")
 		}
 		if (payload == PayloadNative || payload == PayloadCron) && len(modes) != 1 && err == nil {
-			t.Fatal("native or timer ISO input with a second mode passed validation")
+			t.Fatal("native or timer iso input with a second mode passed validation")
 		}
 	})
 }

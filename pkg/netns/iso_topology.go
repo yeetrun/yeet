@@ -194,26 +194,26 @@ func validateISOTopologySpec(spec ISOTopologySpec) error {
 func validateISOTopologyPoolAndBackend(spec ISOTopologySpec) (iso.Layout, error) {
 	pool := spec.Pool.Masked()
 	if !pool.IsValid() || !pool.Addr().Is4() || pool.Bits() != 16 || spec.Pool != pool {
-		return iso.Layout{}, fmt.Errorf("ISO topology requires a canonical IPv4 /16")
+		return iso.Layout{}, fmt.Errorf("iso topology requires a canonical IPv4 /16")
 	}
 	switch spec.Backend {
 	case "", BackendNFT, BackendIPTablesNFT, BackendIPTablesLegacy:
 		return iso.NewLayout(pool)
 	default:
-		return iso.Layout{}, fmt.Errorf("unsupported ISO firewall backend %q", spec.Backend)
+		return iso.Layout{}, fmt.Errorf("unsupported iso firewall backend %q", spec.Backend)
 	}
 }
 
 func validateISOTopologyLink(layout iso.Layout, allocation db.ISOAllocation) error {
 	link := allocation.Link.Masked()
 	if !link.IsValid() || !link.Addr().Is4() || link.Bits() != 30 || allocation.Link != link || !layout.Links.Contains(link.Addr()) {
-		return fmt.Errorf("ISO topology requires an in-pool /30 link")
+		return fmt.Errorf("iso topology requires an in-pool /30 link")
 	}
 	if allocation.HostIP != link.Addr().Next() || allocation.PeerIP != link.Addr().Next().Next() {
-		return fmt.Errorf("ISO topology link addresses must be host one and peer two")
+		return fmt.Errorf("iso topology link addresses must be host one and peer two")
 	}
 	if !isoInterfaceNameRE.MatchString(allocation.Interface) {
-		return fmt.Errorf("invalid ISO root interface %q", allocation.Interface)
+		return fmt.Errorf("invalid iso root interface %q", allocation.Interface)
 	}
 	return nil
 }
@@ -221,7 +221,7 @@ func validateISOTopologyLink(layout iso.Layout, allocation db.ISOAllocation) err
 func validateISOVMTopology(allocation db.ISOAllocation) error {
 	if allocation.Project.IsValid() || allocation.Gateway.IsValid() || allocation.NetNS != "" || allocation.Bridge != "" ||
 		len(allocation.Components) != 0 || len(allocation.RetiredComponents) != 0 {
-		return fmt.Errorf("ISO VM topology must not contain router or project state")
+		return fmt.Errorf("iso VM topology must not contain router or project state")
 	}
 	return nil
 }
@@ -229,16 +229,16 @@ func validateISOVMTopology(allocation db.ISOAllocation) error {
 func validateISONativeTopology(spec ISOTopologySpec) error {
 	a := spec.Allocation
 	if !isoInterfaceNameRE.MatchString(a.PeerInterface) {
-		return fmt.Errorf("invalid ISO native peer interface %q", a.PeerInterface)
+		return fmt.Errorf("invalid iso native peer interface %q", a.PeerInterface)
 	}
 	if strings.TrimSpace(a.NetNS) == "" {
-		return fmt.Errorf("ISO native topology namespace is required")
+		return fmt.Errorf("iso native topology namespace is required")
 	}
 	if a.Project.IsValid() || a.Gateway.IsValid() || a.Bridge != "" || len(a.Components) != 0 || len(a.RetiredComponents) != 0 {
-		return fmt.Errorf("ISO native topology must not contain router or project state")
+		return fmt.Errorf("iso native topology must not contain router or project state")
 	}
 	if spec.TailscaleInterface != "" {
-		return fmt.Errorf("ISO native topology does not support Tailscale")
+		return fmt.Errorf("iso native topology does not support Tailscale")
 	}
 	return nil
 }
@@ -252,17 +252,17 @@ func validateISORouterTopology(layout iso.Layout, spec ISOTopologySpec) error {
 		return err
 	}
 	if strings.TrimSpace(a.NetNS) == "" {
-		return fmt.Errorf("ISO topology namespace is required")
+		return fmt.Errorf("iso topology namespace is required")
 	}
 	if spec.TailscaleInterface != "" && !isoInterfaceNameRE.MatchString(spec.TailscaleInterface) {
-		return fmt.Errorf("invalid ISO Tailscale interface %q", spec.TailscaleInterface)
+		return fmt.Errorf("invalid iso Tailscale interface %q", spec.TailscaleInterface)
 	}
 	return nil
 }
 
 func validateISORouterInterfaces(allocation db.ISOAllocation) error {
 	if !isoInterfaceNameRE.MatchString(allocation.PeerInterface) || !isoInterfaceNameRE.MatchString(isoTopologyBridge(allocation)) {
-		return fmt.Errorf("invalid ISO router interface")
+		return fmt.Errorf("invalid iso router interface")
 	}
 	return nil
 }
@@ -270,10 +270,10 @@ func validateISORouterInterfaces(allocation db.ISOAllocation) error {
 func validateISOProjectNetwork(layout iso.Layout, allocation db.ISOAllocation) error {
 	project := allocation.Project.Masked()
 	if !project.IsValid() || !project.Addr().Is4() || project.Bits() != 27 || allocation.Project != project || !layout.Projects.Contains(project.Addr()) {
-		return fmt.Errorf("ISO topology requires an in-pool /27 project")
+		return fmt.Errorf("iso topology requires an in-pool /27 project")
 	}
 	if allocation.Gateway != project.Addr().Next() {
-		return fmt.Errorf("ISO topology project gateway must be host one")
+		return fmt.Errorf("iso topology project gateway must be host one")
 	}
 	return nil
 }
@@ -309,7 +309,7 @@ func isoRouterPolicyCommands(spec ISOTopologySpec, bridge string) []ISOCommand {
 		commands = append(commands, isoRouterJumpCommands(spec, backend)...)
 		return commands
 	default:
-		return []ISOCommand{{Name: "false", Args: []string{"unsupported-ISO-firewall-backend", string(backend)}}}
+		return []ISOCommand{{Name: "false", Args: []string{"unsupported-iso-firewall-backend", string(backend)}}}
 	}
 }
 
@@ -446,7 +446,7 @@ func EnsureISOTopology(ctx context.Context, spec ISOTopologySpec) error {
 	}
 	for _, command := range commands {
 		if err := command.Run(ctx); err != nil {
-			return fmt.Errorf("ensure ISO topology: %w", err)
+			return fmt.Errorf("ensure iso topology: %w", err)
 		}
 	}
 	return VerifyISOTopology(ctx, spec)
@@ -479,15 +479,15 @@ func VerifyISOTopology(ctx context.Context, spec ISOTopologySpec) error {
 func verifyISOAggregateRoute(ctx context.Context, pool netip.Prefix) error {
 	aggregate, err := readISOCommandText(ctx, "ip", "-o", "route", "show", "exact", pool.String())
 	if err != nil {
-		return fmt.Errorf("verify ISO aggregate route: %w", err)
+		return fmt.Errorf("verify iso aggregate route: %w", err)
 	}
 	lines := isoNonEmptyLines(aggregate)
 	if len(lines) != 1 {
-		return fmt.Errorf("verify ISO aggregate route: got %d exact routes, want 1", len(lines))
+		return fmt.Errorf("verify iso aggregate route: got %d exact routes, want 1", len(lines))
 	}
 	fields := strings.Fields(lines[0])
 	if len(fields) < 2 || fields[0] != "blackhole" || fields[1] != pool.String() || isoFieldValueCount(fields, "metric", isoAggregateRouteMetric) != 1 {
-		return fmt.Errorf("verify ISO aggregate route: unexpected route %q", lines[0])
+		return fmt.Errorf("verify iso aggregate route: unexpected route %q", lines[0])
 	}
 	return nil
 }
@@ -522,15 +522,15 @@ func verifyISORouteAndLinkState(ctx context.Context, allocation db.ISOAllocation
 func verifyISOLinkUp(ctx context.Context, label string, args []string, iface string) error {
 	out, err := readISOCommandText(ctx, "ip", args...)
 	if err != nil {
-		return fmt.Errorf("verify ISO %s: %w", label, err)
+		return fmt.Errorf("verify iso %s: %w", label, err)
 	}
 	lines := isoNonEmptyLines(out)
 	if len(lines) != 1 {
-		return fmt.Errorf("verify ISO %s: got %d links, want 1", label, len(lines))
+		return fmt.Errorf("verify iso %s: got %d links, want 1", label, len(lines))
 	}
 	fields := strings.Fields(lines[0])
 	if len(fields) < 3 || isoOutputInterface(fields[1]) != iface || !isoLinkFlagsContain(fields[2], "UP") {
-		return fmt.Errorf("verify ISO %s: link is not exactly %s up: %q", label, iface, lines[0])
+		return fmt.Errorf("verify iso %s: link is not exactly %s up: %q", label, iface, lines[0])
 	}
 	return nil
 }
@@ -538,15 +538,15 @@ func verifyISOLinkUp(ctx context.Context, label string, args []string, iface str
 func verifyISOAddress(ctx context.Context, label string, args []string, iface, cidr string) error {
 	out, err := readISOCommandText(ctx, "ip", args...)
 	if err != nil {
-		return fmt.Errorf("verify ISO %s: %w", label, err)
+		return fmt.Errorf("verify iso %s: %w", label, err)
 	}
 	lines := isoNonEmptyLines(out)
 	if len(lines) != 1 {
-		return fmt.Errorf("verify ISO %s: got %d addresses, want 1", label, len(lines))
+		return fmt.Errorf("verify iso %s: got %d addresses, want 1", label, len(lines))
 	}
 	fields := strings.Fields(lines[0])
 	if len(fields) < 4 || isoOutputInterface(fields[1]) != iface || isoFieldValueCount(fields, "inet", cidr) != 1 {
-		return fmt.Errorf("verify ISO %s: unexpected address %q", label, lines[0])
+		return fmt.Errorf("verify iso %s: unexpected address %q", label, lines[0])
 	}
 	return nil
 }
@@ -554,15 +554,15 @@ func verifyISOAddress(ctx context.Context, label string, args []string, iface, c
 func verifyISORoute(ctx context.Context, label string, args []string, destination, via, dev string) error {
 	out, err := readISOCommandText(ctx, "ip", args...)
 	if err != nil {
-		return fmt.Errorf("verify ISO %s: %w", label, err)
+		return fmt.Errorf("verify iso %s: %w", label, err)
 	}
 	lines := isoNonEmptyLines(out)
 	if len(lines) != 1 {
-		return fmt.Errorf("verify ISO %s: got %d exact routes, want 1", label, len(lines))
+		return fmt.Errorf("verify iso %s: got %d exact routes, want 1", label, len(lines))
 	}
 	fields := strings.Fields(lines[0])
 	if len(fields) == 0 || fields[0] != destination || isoFieldValueCount(fields, "via", via) != 1 || isoFieldValueCount(fields, "dev", dev) != 1 || slicesIndex(fields, "nexthop") >= 0 {
-		return fmt.Errorf("verify ISO %s: unexpected route %q", label, lines[0])
+		return fmt.Errorf("verify iso %s: unexpected route %q", label, lines[0])
 	}
 	return nil
 }
@@ -630,10 +630,10 @@ func verifyISOSysctlState(ctx context.Context, allocation db.ISOAllocation) erro
 	} {
 		out, runErr := readISOCommandText(ctx, check.name, check.args...)
 		if runErr != nil {
-			return fmt.Errorf("verify ISO %s: %w", check.label, runErr)
+			return fmt.Errorf("verify iso %s: %w", check.label, runErr)
 		}
 		if strings.TrimSpace(out) != check.want {
-			return fmt.Errorf("verify ISO %s: got %q want %s", check.label, strings.TrimSpace(out), check.want)
+			return fmt.Errorf("verify iso %s: got %q want %s", check.label, strings.TrimSpace(out), check.want)
 		}
 	}
 	return nil
@@ -661,7 +661,7 @@ func verifyNFTISORouterPolicy(ctx context.Context, spec ISOTopologySpec) error {
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("verify ISO router policy: %w", err)
+		return fmt.Errorf("verify iso router policy: %w", err)
 	}
 	return nil
 }
@@ -685,7 +685,7 @@ func verifyIPTablesISORouterPolicy(ctx context.Context, spec ISOTopologySpec, ba
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("verify ISO router policy: %w", err)
+		return fmt.Errorf("verify iso router policy: %w", err)
 	}
 	return nil
 }
@@ -722,7 +722,7 @@ func RemoveISOTopology(ctx context.Context, spec ISOTopologySpec) error {
 	}
 	for _, command := range ISOTopologyRemoveCommands(spec) {
 		if err := command.Run(ctx); err != nil && !command.NotFound(err) {
-			return fmt.Errorf("remove ISO topology: %w", err)
+			return fmt.Errorf("remove iso topology: %w", err)
 		}
 	}
 	return VerifyISOTopologyAbsent(ctx, spec)
@@ -749,10 +749,10 @@ func VerifyISOTopologyAbsent(ctx context.Context, spec ISOTopologySpec) error {
 func verifyISORootLinkAbsent(ctx context.Context, iface string) error {
 	_, err := readISOCommandText(ctx, "ip", "link", "show", "dev", iface)
 	if err == nil {
-		return fmt.Errorf("ISO root interface %s still exists", iface)
+		return fmt.Errorf("iso root interface %s still exists", iface)
 	}
 	if !(ISOCommand{}).NotFound(err) {
-		return fmt.Errorf("verify ISO root interface absence: %w", err)
+		return fmt.Errorf("verify iso root interface absence: %w", err)
 	}
 	return nil
 }
@@ -760,11 +760,11 @@ func verifyISORootLinkAbsent(ctx context.Context, iface string) error {
 func verifyISONamespaceAbsent(ctx context.Context, namespace string) error {
 	namespaces, err := readISOCommandText(ctx, "ip", "netns", "list")
 	if err != nil {
-		return fmt.Errorf("verify ISO namespace absence: %w", err)
+		return fmt.Errorf("verify iso namespace absence: %w", err)
 	}
 	for _, line := range strings.Split(namespaces, "\n") {
 		if fields := strings.Fields(line); len(fields) != 0 && fields[0] == namespace {
-			return fmt.Errorf("ISO namespace %s still exists", namespace)
+			return fmt.Errorf("iso namespace %s still exists", namespace)
 		}
 	}
 	return nil
@@ -773,10 +773,10 @@ func verifyISONamespaceAbsent(ctx context.Context, namespace string) error {
 func verifyISOProjectRouteAbsent(ctx context.Context, project netip.Prefix) error {
 	route, err := readISOCommandText(ctx, "ip", "route", "show", "exact", project.String())
 	if err != nil {
-		return fmt.Errorf("verify ISO project route absence: %w", err)
+		return fmt.Errorf("verify iso project route absence: %w", err)
 	}
 	if strings.TrimSpace(route) != "" {
-		return fmt.Errorf("ISO project route %s still exists", project)
+		return fmt.Errorf("iso project route %s still exists", project)
 	}
 	return nil
 }

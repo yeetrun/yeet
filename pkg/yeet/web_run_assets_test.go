@@ -160,7 +160,7 @@ func TestWebRunAssetsExposeISOCompatibility(t *testing.T) {
 		`["svc", "lan"].includes(input.value)`,
 		`publish.value = ""`,
 		`publish.disabled = vmPayload || isoSelected`,
-		`ISO does not support published ports`,
+		`iso does not support published ports`,
 		`VMs support only iso as a Yeet-managed isolated mode`,
 	} {
 		if !strings.Contains(raw, want) {

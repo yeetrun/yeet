@@ -41,7 +41,7 @@ type ISOComposeAdmissionOptions struct {
 }
 
 // ISOComposeModel is the admitted portion of a canonical Compose model needed
-// by ISO allocation and overlay rendering.
+// by iso allocation and overlay rendering.
 type ISOComposeModel struct {
 	Components []string
 }
@@ -85,7 +85,7 @@ var isoAllowedServiceFields = map[string]bool{
 }
 
 var isoForbiddenServiceFields = map[string]string{
-	"build":               "Catch-side builds run before the ISO boundary",
+	"build":               "Catch-side builds run before the iso boundary",
 	"cap_add":             "added capabilities can bypass the runtime boundary",
 	"cgroup":              "host cgroup namespace sharing is not allowed",
 	"cgroup_parent":       "host cgroup placement is not allowed",
@@ -93,18 +93,18 @@ var isoForbiddenServiceFields = map[string]string{
 	"cpu_rt_runtime":      "host realtime scheduling is not allowed",
 	"devices":             "host devices are not allowed",
 	"device_cgroup_rules": "device cgroup rules are not allowed",
-	"dns":                 "custom DNS bypasses the ISO resolver",
-	"dns_opt":             "custom DNS bypasses the ISO resolver",
-	"dns_search":          "custom DNS search bypasses the ISO resolver",
+	"dns":                 "custom DNS bypasses the iso resolver",
+	"dns_opt":             "custom DNS bypasses the iso resolver",
+	"dns_search":          "custom DNS search bypasses the iso resolver",
 	"domainname":          "custom DNS search is not allowed",
 	"external_links":      "external links cross the admitted project",
 	"ipc":                 "host or external IPC namespaces are not allowed",
-	"links":               "links may cross the generated ISO default network",
+	"links":               "links may cross the generated iso default network",
 	"network_mode":        "alternate network namespaces are not allowed",
 	"pid":                 "host or external PID namespaces are not allowed",
-	"ports":               "ISO does not support published ports",
+	"ports":               "iso does not support published ports",
 	"privileged":          "privileged containers are not allowed",
-	"provider":            "host-side providers run before the ISO boundary",
+	"provider":            "host-side providers run before the iso boundary",
 	"runtime":             "custom OCI runtimes are not allowed",
 	"security_opt":        "unclassified security options fail closed",
 	"storage_opt":         "host storage-driver options are not allowed",
@@ -113,7 +113,7 @@ var isoForbiddenServiceFields = map[string]string{
 }
 
 // AdmitISOCompose decodes Docker Compose's canonical JSON model and admits only
-// the versioned ISO-safe profile. It intentionally does not parse operator YAML.
+// the versioned iso-safe profile. It intentionally does not parse operator YAML.
 func AdmitISOCompose(raw []byte, opts ISOComposeAdmissionOptions) (ISOComposeModel, error) {
 	app, err := decodeISOCanonicalCompose(raw)
 	if err != nil {
@@ -163,7 +163,7 @@ func validateISOTopFields(top map[string]json.RawMessage) error {
 	}
 	for _, field := range sortedRawKeys(top) {
 		if !allowed[field] {
-			return fmt.Errorf("%s: unknown field in ISO safe profile v%d", field, isoComposeProfileVersion)
+			return fmt.Errorf("%s: unknown field in iso safe profile v%d", field, isoComposeProfileVersion)
 		}
 	}
 	return nil
@@ -221,7 +221,7 @@ func validateISOProjectIdentity(canonical, expected string) error {
 
 func validateISOComponentNames(services map[string]json.RawMessage, requestedLimit int) ([]string, error) {
 	if len(services) == 0 {
-		return nil, fmt.Errorf("services: ISO Compose project has no services")
+		return nil, fmt.Errorf("services: iso Compose project has no services")
 	}
 	names := sortedRawKeys(services)
 	for _, name := range names {
@@ -231,7 +231,7 @@ func validateISOComponentNames(services map[string]json.RawMessage, requestedLim
 	}
 	limit := isoComponentLimit(requestedLimit)
 	if len(names) > limit {
-		return nil, fmt.Errorf("services: ISO supports at most %d active components", limit)
+		return nil, fmt.Errorf("services: iso supports at most %d active components", limit)
 	}
 	return names, nil
 }
@@ -290,7 +290,7 @@ func requireISOServiceNetworks(path string, fields map[string]json.RawMessage, o
 		if overlay == nil {
 			return fmt.Errorf("%s.networks: canonical default network attachment is required", path)
 		}
-		return fmt.Errorf("%s.networks: persisted ISO overlay attachment is required", path)
+		return fmt.Errorf("%s.networks: persisted iso overlay attachment is required", path)
 	}
 	return nil
 }
@@ -312,7 +312,7 @@ func validateISOServiceField(servicePath, name, field string, value json.RawMess
 		return fmt.Errorf("%s: %s", path, reason)
 	}
 	if !isoAllowedServiceFields[field] && isoForbiddenServiceFields[field] == "" {
-		return fmt.Errorf("%s: unknown field in ISO safe profile v%d", path, isoComposeProfileVersion)
+		return fmt.Errorf("%s: unknown field in iso safe profile v%d", path, isoComposeProfileVersion)
 	}
 	return nil
 }
@@ -322,23 +322,23 @@ func validateISOServiceDNS(path string, raw json.RawMessage, overlay *db.ISOAllo
 		if len(raw) == 0 || isJSONEmpty(raw) {
 			return nil
 		}
-		return fmt.Errorf("%s: custom DNS bypasses the ISO resolver", path)
+		return fmt.Errorf("%s: custom DNS bypasses the iso resolver", path)
 	}
 	if len(raw) == 0 {
-		return fmt.Errorf("%s: ISO overlay requires exactly one generated DNS resolver", path)
+		return fmt.Errorf("%s: iso overlay requires exactly one generated DNS resolver", path)
 	}
 	var resolvers []string
 	if err := json.Unmarshal(raw, &resolvers); err != nil || resolvers == nil {
 		return fmt.Errorf("%s: invalid canonical DNS representation", path)
 	}
 	if len(resolvers) != 1 {
-		return fmt.Errorf("%s: ISO overlay requires exactly one generated DNS resolver", path)
+		return fmt.Errorf("%s: iso overlay requires exactly one generated DNS resolver", path)
 	}
 	if _, err := netip.ParseAddr(resolvers[0]); err != nil {
 		return fmt.Errorf("%s: invalid canonical DNS address", path)
 	}
 	if expected := isoComposeResolver(overlay); resolvers[0] != expected {
-		return fmt.Errorf("%s: DNS address does not match generated ISO resolver %q", path, expected)
+		return fmt.Errorf("%s: DNS address does not match generated iso resolver %q", path, expected)
 	}
 	return nil
 }
@@ -392,7 +392,7 @@ func validateISOOptionalField(path string, raw json.RawMessage, validate func(st
 func validateISOScale(path string, raw json.RawMessage) error {
 	var scale int
 	if err := json.Unmarshal(raw, &scale); err != nil || scale != 1 {
-		return fmt.Errorf("%s: ISO requires exactly one container", path)
+		return fmt.Errorf("%s: iso requires exactly one container", path)
 	}
 	return nil
 }
@@ -497,7 +497,7 @@ func validateISODeployResources(path string, raw json.RawMessage) error {
 	}
 	for _, field := range sortedRawKeys(resources) {
 		if field != "limits" && field != "reservations" {
-			return fmt.Errorf("%s.%s: unknown deploy resource field in ISO safe profile v%d", path, field, isoComposeProfileVersion)
+			return fmt.Errorf("%s.%s: unknown deploy resource field in iso safe profile v%d", path, field, isoComposeProfileVersion)
 		}
 		if err := validateISODeployResourceClass(path+"."+field, resources[field]); err != nil {
 			return err
@@ -517,7 +517,7 @@ func validateISODeployResourceClass(path string, raw json.RawMessage) error {
 		case "devices", "generic_resources":
 			return fmt.Errorf("%s.%s: host device resources are not allowed", path, key)
 		default:
-			return fmt.Errorf("%s.%s: unknown deploy resource field in ISO safe profile v%d", path, key, isoComposeProfileVersion)
+			return fmt.Errorf("%s.%s: unknown deploy resource field in iso safe profile v%d", path, key, isoComposeProfileVersion)
 		}
 	}
 	return nil
@@ -550,7 +550,7 @@ func validateISOSysctls(path string, raw json.RawMessage) error {
 	}
 	for _, name := range sortedRawKeys(values) {
 		if !isISOContainerSysctl(name) {
-			return fmt.Errorf("%s.%s: sysctl is not allowed by ISO sysctl profile v%d", path, name, isoSysctlProfileVersion)
+			return fmt.Errorf("%s.%s: sysctl is not allowed by iso sysctl profile v%d", path, name, isoSysctlProfileVersion)
 		}
 		var value string
 		if err := json.Unmarshal(values[name], &value); err != nil {
@@ -1025,15 +1025,15 @@ func validateISOTopLevelNetworks(networks map[string]json.RawMessage, projectNam
 		if overlay == nil {
 			return fmt.Errorf("networks.default: canonical implicit default network is required")
 		}
-		return fmt.Errorf("networks.default: persisted ISO overlay network is required")
+		return fmt.Errorf("networks.default: persisted iso overlay network is required")
 	}
 	for _, name := range sortedRawKeys(networks) {
 		if name != "default" {
-			return fmt.Errorf("networks.%s: ISO allows only the project default network", name)
+			return fmt.Errorf("networks.%s: iso allows only the project default network", name)
 		}
 	}
 	if len(networks) != 1 {
-		return fmt.Errorf("networks: ISO allows exactly one default network")
+		return fmt.Errorf("networks: iso allows exactly one default network")
 	}
 	return validateISODefaultNetwork(networks["default"], projectName, overlay)
 }
@@ -1066,11 +1066,11 @@ func validateISODefaultNetwork(raw json.RawMessage, projectName string, overlay 
 
 func validateISONetworkFlags(path string, fields map[string]json.RawMessage) error {
 	for _, flag := range []string{"external", "attachable", "internal"} {
-		if err := validateISOFalseFlag(path+"."+flag, fields[flag], "ISO does not allow this network override"); err != nil {
+		if err := validateISOFalseFlag(path+"."+flag, fields[flag], "iso does not allow this network override"); err != nil {
 			return err
 		}
 	}
-	if err := validateISOFalseFlag(path+".enable_ipv6", fields["enable_ipv6"], "ISO requires IPv6 to be disabled"); err != nil {
+	if err := validateISOFalseFlag(path+".enable_ipv6", fields["enable_ipv6"], "iso requires IPv6 to be disabled"); err != nil {
 		return err
 	}
 	return validateISOIPv4Enabled(path+".enable_ipv4", fields["enable_ipv4"])
@@ -1082,7 +1082,7 @@ func validateISOIPv4Enabled(path string, raw json.RawMessage) error {
 	}
 	var enabled bool
 	if err := json.Unmarshal(raw, &enabled); err != nil || !enabled {
-		return fmt.Errorf("%s: ISO requires IPv4 to be enabled", path)
+		return fmt.Errorf("%s: iso requires IPv4 to be enabled", path)
 	}
 	return nil
 }
@@ -1114,13 +1114,13 @@ func validateISOOverlayNetwork(path string, fields map[string]json.RawMessage, o
 
 func validateISOPersistedOverlay(path string, overlay *db.ISOAllocation) error {
 	if !overlay.Project.IsValid() || !overlay.Project.Addr().Is4() || overlay.Project.Bits() != 27 {
-		return fmt.Errorf("%s.ipam.config[0].subnet: persisted ISO project must be an IPv4 /27", path)
+		return fmt.Errorf("%s.ipam.config[0].subnet: persisted iso project must be an IPv4 /27", path)
 	}
 	if !overlay.Gateway.IsValid() || !overlay.Project.Contains(overlay.Gateway) {
-		return fmt.Errorf("%s.ipam.config[0].gateway: persisted ISO gateway is invalid", path)
+		return fmt.Errorf("%s.ipam.config[0].gateway: persisted iso gateway is invalid", path)
 	}
 	if !isoPersistedNetNSRE.MatchString(overlay.NetNS) {
-		return fmt.Errorf("%s.driver_opts.dev.catchit.netns: persisted ISO namespace is invalid", path)
+		return fmt.Errorf("%s.driver_opts.dev.catchit.netns: persisted iso namespace is invalid", path)
 	}
 	return nil
 }
@@ -1128,7 +1128,7 @@ func validateISOPersistedOverlay(path string, overlay *db.ISOAllocation) error {
 func validateISOOverlayDriver(path string, raw json.RawMessage) error {
 	var driver string
 	if json.Unmarshal(raw, &driver) != nil || driver != "yeet" {
-		return fmt.Errorf("%s.driver: ISO overlay requires the yeet driver", path)
+		return fmt.Errorf("%s.driver: iso overlay requires the yeet driver", path)
 	}
 	return nil
 }
@@ -1136,7 +1136,7 @@ func validateISOOverlayDriver(path string, raw json.RawMessage) error {
 func validateISOOverlayDriverOptions(path string, raw json.RawMessage, netNS string) error {
 	var options map[string]string
 	if json.Unmarshal(raw, &options) != nil || options == nil {
-		return fmt.Errorf("%s: ISO overlay requires exact driver options", path)
+		return fmt.Errorf("%s: iso overlay requires exact driver options", path)
 	}
 	expectedOptions := map[string]string{
 		"dev.catchit.mode":  "iso",
@@ -1144,19 +1144,19 @@ func validateISOOverlayDriverOptions(path string, raw json.RawMessage, netNS str
 	}
 	for _, key := range sortedStringKeys(options) {
 		if _, ok := expectedOptions[key]; !ok {
-			return fmt.Errorf("%s.%s: unexpected ISO driver option", path, key)
+			return fmt.Errorf("%s.%s: unexpected iso driver option", path, key)
 		}
 	}
 	for _, key := range sortedStringKeys(expectedOptions) {
 		if options[key] != expectedOptions[key] {
-			return fmt.Errorf("%s.%s: ISO driver option does not match persisted allocation", path, key)
+			return fmt.Errorf("%s.%s: iso driver option does not match persisted allocation", path, key)
 		}
 	}
 	return nil
 }
 
 func validateISOOverlayIPAM(path string, raw json.RawMessage, project netip.Prefix, gateway netip.Addr) error {
-	ipam, err := decodeISOObject(path, raw, "ISO overlay IPAM")
+	ipam, err := decodeISOObject(path, raw, "iso overlay IPAM")
 	if err != nil {
 		return err
 	}
@@ -1165,7 +1165,7 @@ func validateISOOverlayIPAM(path string, raw json.RawMessage, project netip.Pref
 	}
 	var configs []map[string]json.RawMessage
 	if err := json.Unmarshal(ipam["config"], &configs); err != nil || len(configs) != 1 {
-		return fmt.Errorf("%s.config: ISO overlay requires one persisted IPv4 configuration", path)
+		return fmt.Errorf("%s.config: iso overlay requires one persisted IPv4 configuration", path)
 	}
 	return validateISOOverlayIPAMConfig(path+".config[0]", configs[0], project, gateway)
 }
@@ -1177,11 +1177,11 @@ func validateISOOverlayIPAMConfig(path string, config map[string]json.RawMessage
 	}
 	var subnet string
 	if json.Unmarshal(config["subnet"], &subnet) != nil || subnet != project.String() {
-		return fmt.Errorf("%s.subnet: ISO subnet does not match persisted allocation", path)
+		return fmt.Errorf("%s.subnet: iso subnet does not match persisted allocation", path)
 	}
 	var gatewayText string
 	if json.Unmarshal(config["gateway"], &gatewayText) != nil || gatewayText != gateway.String() {
-		return fmt.Errorf("%s.gateway: ISO gateway does not match persisted allocation", path)
+		return fmt.Errorf("%s.gateway: iso gateway does not match persisted allocation", path)
 	}
 	return nil
 }
@@ -1192,11 +1192,11 @@ func validateISOServiceNetworks(path string, raw json.RawMessage, serviceName st
 		return err
 	}
 	if len(networks) != 1 {
-		return fmt.Errorf("%s: ISO service must attach to exactly the default network", path)
+		return fmt.Errorf("%s: iso service must attach to exactly the default network", path)
 	}
 	if _, ok := networks["default"]; !ok {
 		name := sortedRawKeys(networks)[0]
-		return fmt.Errorf("%s.%s: ISO allows only the default network attachment", path, name)
+		return fmt.Errorf("%s.%s: iso allows only the default network attachment", path, name)
 	}
 	attachment := networks["default"]
 	if overlay == nil {
@@ -1215,9 +1215,9 @@ func validateISOImplicitServiceNetwork(path string, attachment json.RawMessage) 
 func validateISOOverlayServiceNetwork(path string, attachment json.RawMessage, serviceName string, overlay *db.ISOAllocation) error {
 	component, ok := overlay.Components[serviceName]
 	if !ok || !component.Address.IsValid() || !overlay.Project.Contains(component.Address) {
-		return fmt.Errorf("%s.ipv4_address: persisted ISO component address is missing or invalid", path)
+		return fmt.Errorf("%s.ipv4_address: persisted iso component address is missing or invalid", path)
 	}
-	fields, err := decodeISOObject(path, attachment, "ISO overlay attachment")
+	fields, err := decodeISOObject(path, attachment, "iso overlay attachment")
 	if err != nil {
 		return err
 	}
@@ -1226,7 +1226,7 @@ func validateISOOverlayServiceNetwork(path string, attachment json.RawMessage, s
 	}
 	var address string
 	if json.Unmarshal(fields["ipv4_address"], &address) != nil || address != component.Address.String() {
-		return fmt.Errorf("%s.ipv4_address: ISO address does not match persisted component allocation", path)
+		return fmt.Errorf("%s.ipv4_address: iso address does not match persisted component allocation", path)
 	}
 	return nil
 }
@@ -1280,7 +1280,7 @@ func decodeISOObject(path string, raw json.RawMessage, description string) (map[
 func validateISOAllowedKeys(path string, values map[string]json.RawMessage, allowed map[string]bool, kind string) error {
 	for _, field := range sortedRawKeys(values) {
 		if !allowed[field] {
-			return fmt.Errorf("%s.%s: unknown %s field in ISO safe profile v%d", path, field, kind, isoComposeProfileVersion)
+			return fmt.Errorf("%s.%s: unknown %s field in iso safe profile v%d", path, field, kind, isoComposeProfileVersion)
 		}
 	}
 	return nil

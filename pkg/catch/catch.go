@@ -347,11 +347,11 @@ func (s *Server) prepareNetworkRuntimeAllowed(ctx context.Context) error {
 	}
 	if requiresDocker {
 		if err := waitDockerReadyForISOForServer(ctx); err != nil {
-			return failPrerequisite(fmt.Errorf("wait for Docker before ISO reconciliation: %w", err))
+			return failPrerequisite(fmt.Errorf("wait for Docker before iso reconciliation: %w", err))
 		}
 	}
 	if err := reconcileISONetworksForServer(ctx, s); err != nil {
-		return fmt.Errorf("reconcile ISO networks: %w", err)
+		return fmt.Errorf("reconcile iso networks: %w", err)
 	}
 	return nil
 }
@@ -359,7 +359,7 @@ func (s *Server) prepareNetworkRuntimeAllowed(ctx context.Context) error {
 func (s *Server) isoRecordKinds() (hasISO bool, requiresDocker bool, err error) {
 	dv, err := s.cfg.DB.Get()
 	if err != nil {
-		return false, false, fmt.Errorf("load ISO records for Docker readiness: %w", err)
+		return false, false, fmt.Errorf("load iso records for Docker readiness: %w", err)
 	}
 	for _, service := range dv.Services().All() {
 		allocation := service.ISO()
@@ -1398,7 +1398,7 @@ func (s *Server) removeServiceWithOptionsLocked(name string, opts RemoveOptions)
 	doneZFSRoot()
 	serviceView, serviceViewErr := s.serviceView(name)
 	if serviceViewErr != nil && !errors.Is(serviceViewErr, errServiceNotFound) {
-		return report, fmt.Errorf("determine ISO removal state for %q: %w", name, serviceViewErr)
+		return report, fmt.Errorf("determine iso removal state for %q: %w", name, serviceViewErr)
 	}
 	isISO := serviceViewErr == nil && serviceView.ISO().Valid()
 	doneServiceRoot := removeTraceBlock(opts, "remove service root lookup")
@@ -1434,10 +1434,10 @@ func (s *Server) removeISOServicePrepared(name string, opts RemoveOptions, repor
 	}
 	steps, err := stepsFactory(name, opts, report, serviceRootZFS)
 	if err != nil {
-		return report, fmt.Errorf("prepare ISO removal: %w", err)
+		return report, fmt.Errorf("prepare iso removal: %w", err)
 	}
 	if err := s.removeISOServiceWithOptions(context.Background(), name, opts.CleanData, steps); err != nil {
-		return report, fmt.Errorf("remove ISO service: %w", err)
+		return report, fmt.Errorf("remove iso service: %w", err)
 	}
 	s.publishServiceDeleted(name)
 	s.deleteTailscaleDevice(report, tsStableID)

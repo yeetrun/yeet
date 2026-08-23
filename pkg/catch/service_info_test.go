@@ -189,11 +189,11 @@ func TestServiceNetworkInfoReportsEffectiveModes(t *testing.T) {
 	}{
 		{name: "host", service: &db.Service{Name: "host"}, want: []string{"host"}},
 		{name: "combined modes", service: &db.Service{SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.9")}, Macvlan: &db.MacvlanNetwork{}, TSNet: &db.TailscaleNetwork{}}, want: []string{"lan", "svc", "ts"}},
-		{name: "reserved ISO keeps runtime attachments", service: runtimeService(iso.StateReserved), want: []string{"svc", "ts"}},
-		{name: "staged ISO keeps runtime attachments", service: runtimeService(iso.StateStopped), want: []string{"svc", "ts"}},
-		{name: "ready ISO is effective", service: runtimeService(iso.StateReady), want: []string{"iso", "ts"}},
-		{name: "removing ISO keeps runtime attachments", service: runtimeService(iso.StateRemoving), want: []string{"svc", "ts"}},
-		{name: "tombstoned ISO keeps runtime attachments", service: runtimeService(iso.StateTombstoned), want: []string{"svc", "ts"}},
+		{name: "reserved iso keeps runtime attachments", service: runtimeService(iso.StateReserved), want: []string{"svc", "ts"}},
+		{name: "staged iso keeps runtime attachments", service: runtimeService(iso.StateStopped), want: []string{"svc", "ts"}},
+		{name: "ready iso is effective", service: runtimeService(iso.StateReady), want: []string{"iso", "ts"}},
+		{name: "removing iso keeps runtime attachments", service: runtimeService(iso.StateRemoving), want: []string{"svc", "ts"}},
+		{name: "tombstoned iso keeps runtime attachments", service: runtimeService(iso.StateTombstoned), want: []string{"svc", "ts"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -217,7 +217,7 @@ func TestServiceISOInfoProjectsEndpointAndNamespaceByPayloadKind(t *testing.T) {
 				Kind: string(iso.PayloadNative), State: string(iso.StateReady),
 				HostIP: netip.MustParseAddr("172.16.0.5"), PeerIP: netip.MustParseAddr("172.16.0.6"),
 				Interface: "yi-private", PeerInterface: "yo-private", NetNS: "yeet-0123456789-ns",
-				LastError: `service "MYISOAPP" ISO network firewall drift`,
+				LastError: `service "MYISOAPP" iso network firewall drift`,
 			},
 			wantNamespace:  "yeet-0123456789-ns",
 			wantComponents: []catchrpc.ServiceISOComponent{{Name: "service", IP: "172.16.0.6", State: "ready"}},
@@ -275,7 +275,7 @@ func TestServiceISOInfoProjectsEndpointAndNamespaceByPayloadKind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, private := range []string{"172.16.0.5", "yi-private", "yo-private", "ISO network"} {
+			for _, private := range []string{"172.16.0.5", "yi-private", "yo-private", "iso network"} {
 				if strings.Contains(string(raw), private) {
 					t.Fatalf("service isolated-network info leaked host-only value %q: %s", private, raw)
 				}
@@ -1079,10 +1079,10 @@ func TestServiceNetworkInfoIncludesPersistedISOStateAndSortedEndpoints(t *testin
 		},
 	}).View())
 	if info.ISO == nil || info.ISO.DNS != "tailscale" || !info.ISO.PublicEgress || info.ISO.LastError != "firewall digest mismatch" {
-		t.Fatalf("ISO info = %#v", info.ISO)
+		t.Fatalf("iso info = %#v", info.ISO)
 	}
 	if got := info.ISO.Components; len(got) != 2 || got[0].Name != "api" || got[1].Name != "worker" {
-		t.Fatalf("ISO components = %#v, want stable sort", got)
+		t.Fatalf("iso components = %#v, want stable sort", got)
 	}
 }
 
@@ -1103,7 +1103,7 @@ func TestServiceIPListUsesOnlyPersistedISOEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ips) != 2 || ips[0].Label != "api" || ips[0].IP != "172.30.128.2" || ips[1].Label != "worker" {
-		t.Fatalf("container ISO endpoints = %#v", ips)
+		t.Fatalf("container iso endpoints = %#v", ips)
 	}
 
 	vm := (&db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ISO: &db.ISOAllocation{
@@ -1114,7 +1114,7 @@ func TestServiceIPListUsesOnlyPersistedISOEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ips) != 1 || ips[0] != (catchrpc.ServiceIP{Label: "vm", IP: "172.30.0.2"}) {
-		t.Fatalf("VM ISO endpoints = %#v", ips)
+		t.Fatalf("VM iso endpoints = %#v", ips)
 	}
 }
 

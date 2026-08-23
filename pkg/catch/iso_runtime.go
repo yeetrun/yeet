@@ -73,10 +73,10 @@ func verifyISODNSListenerReady(ctx context.Context) error {
 	dialer := net.Dialer{Timeout: time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", isoDNSPort))
 	if err != nil {
-		return fmt.Errorf("verify ISO DNS listener: %w", err)
+		return fmt.Errorf("verify iso DNS listener: %w", err)
 	}
 	if err := conn.Close(); err != nil {
-		return fmt.Errorf("close ISO DNS readiness connection: %w", err)
+		return fmt.Errorf("close iso DNS readiness connection: %w", err)
 	}
 	return nil
 }
@@ -99,22 +99,22 @@ type isoRuntimeTopology struct {
 // another service's still-reserved firewall identity.
 func (s *Server) isoRuntimeSpec(dv db.DataView, service string) (isoRuntimeNetworkSpec, error) {
 	if !dv.Valid() {
-		return isoRuntimeNetworkSpec{}, fmt.Errorf("ISO network requires database state")
+		return isoRuntimeNetworkSpec{}, fmt.Errorf("iso network requires database state")
 	}
 	pool := dv.ISOPool()
 	if !pool.Valid() {
-		return isoRuntimeNetworkSpec{}, fmt.Errorf("ISO pool is not configured")
+		return isoRuntimeNetworkSpec{}, fmt.Errorf("iso pool is not configured")
 	}
 	if err := validateISORuntimeState(dv); err != nil {
 		return isoRuntimeNetworkSpec{}, err
 	}
 	targetView, ok := dv.Services().GetOk(service)
 	if !ok || !targetView.ISO().Valid() {
-		return isoRuntimeNetworkSpec{}, fmt.Errorf("service %q has no ISO allocation", service)
+		return isoRuntimeNetworkSpec{}, fmt.Errorf("service %q has no iso allocation", service)
 	}
 	backend, err := detectISOFirewallBackendForRuntime()
 	if err != nil {
-		return isoRuntimeNetworkSpec{}, fmt.Errorf("detect ISO firewall backend: %w", err)
+		return isoRuntimeNetworkSpec{}, fmt.Errorf("detect iso firewall backend: %w", err)
 	}
 
 	endpoints := isoRuntimeEndpoints(dv)
@@ -164,7 +164,7 @@ func isoRuntimeTopologies(dv db.DataView, backend netns.FirewallBackend, pool ne
 func validateISORuntimeState(dv db.DataView) error {
 	pool := dv.ISOPool()
 	if !pool.Valid() {
-		return fmt.Errorf("ISO pool is not configured")
+		return fmt.Errorf("iso pool is not configured")
 	}
 	layout, err := iso.NewLayout(pool.Prefix())
 	if err != nil {
@@ -225,7 +225,7 @@ func validateISORuntimeAllocation(
 }
 
 func isoRuntimeAllocationError(service, format string, args ...any) error {
-	return fmt.Errorf("service %q ISO allocation: %s", service, fmt.Sprintf(format, args...))
+	return fmt.Errorf("service %q iso allocation: %s", service, fmt.Sprintf(format, args...))
 }
 
 func validateISORuntimeLink(
@@ -448,7 +448,7 @@ func openISOOperationLockFileAt(dirFD int) (*os.File, int, error) {
 	file := os.NewFile(uintptr(fd), isoOperationLockFileName)
 	if file == nil {
 		_ = unix.Close(fd)
-		return nil, -1, fmt.Errorf("open ISO operation lock %s: invalid file descriptor", isoOperationLockFileName)
+		return nil, -1, fmt.Errorf("open iso operation lock %s: invalid file descriptor", isoOperationLockFileName)
 	}
 	if err := secureISOOperationLockFile(fd, created); err != nil {
 		_ = file.Close()
@@ -466,11 +466,11 @@ func openISOOperationLockFDAt(dirFD int, openAt isoOperationOpenAtFunc) (int, bo
 		return fd, true, nil
 	}
 	if !errors.Is(err, unix.EEXIST) {
-		return -1, false, fmt.Errorf("create ISO operation lock %s: %w", isoOperationLockFileName, err)
+		return -1, false, fmt.Errorf("create iso operation lock %s: %w", isoOperationLockFileName, err)
 	}
 	fd, err = openAt(dirFD, isoOperationLockFileName, flags, 0)
 	if err != nil {
-		return -1, false, fmt.Errorf("open existing ISO operation lock %s: %w", isoOperationLockFileName, err)
+		return -1, false, fmt.Errorf("open existing iso operation lock %s: %w", isoOperationLockFileName, err)
 	}
 	return fd, false, nil
 }
@@ -482,11 +482,11 @@ func secureISOOperationLockFile(fd int, created bool) error {
 		return err
 	}
 	if !created && stat.mode&0o7777 != 0o600 {
-		return fmt.Errorf("existing ISO operation lock %s mode is %#o, want 0600", isoOperationLockFileName, stat.mode&0o7777)
+		return fmt.Errorf("existing iso operation lock %s mode is %#o, want 0600", isoOperationLockFileName, stat.mode&0o7777)
 	}
 	if created {
 		if err := unix.Fchmod(fd, 0o600); err != nil {
-			return fmt.Errorf("secure ISO operation lock %s: %w", isoOperationLockFileName, err)
+			return fmt.Errorf("secure iso operation lock %s: %w", isoOperationLockFileName, err)
 		}
 	}
 	stat, err = inspectAndValidateISOOperationLock(fd, effectiveUID)
@@ -494,7 +494,7 @@ func secureISOOperationLockFile(fd int, created bool) error {
 		return err
 	}
 	if stat.mode&0o7777 != 0o600 {
-		return fmt.Errorf("ISO operation lock %s mode is %#o, want 0600", isoOperationLockFileName, stat.mode&0o7777)
+		return fmt.Errorf("iso operation lock %s mode is %#o, want 0600", isoOperationLockFileName, stat.mode&0o7777)
 	}
 	return nil
 }
@@ -502,7 +502,7 @@ func secureISOOperationLockFile(fd int, created bool) error {
 func inspectAndValidateISOOperationLock(fd int, effectiveUID uint32) (isoOperationInodeStat, error) {
 	stat, err := inspectISOOperationInode(fd)
 	if err != nil {
-		return isoOperationInodeStat{}, fmt.Errorf("inspect ISO operation lock %s: %w", isoOperationLockFileName, err)
+		return isoOperationInodeStat{}, fmt.Errorf("inspect iso operation lock %s: %w", isoOperationLockFileName, err)
 	}
 	if err := validateISOOperationLockStat(isoOperationLockFileName, stat, effectiveUID); err != nil {
 		return isoOperationInodeStat{}, err
@@ -528,7 +528,7 @@ func waitForISOOperationLock(ctx context.Context, fd int) error {
 		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
 			return nil
 		} else if !isISOOperationLockBusy(err) {
-			return fmt.Errorf("lock ISO network operations: %w", err)
+			return fmt.Errorf("lock iso network operations: %w", err)
 		}
 		if err := waitForISOOperationLockPoll(ctx); err != nil {
 			return err
@@ -577,7 +577,7 @@ func openValidatedISOOperationRootDir(rootDir string) (*os.File, string, error) 
 	}
 	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, "", fmt.Errorf("open filesystem root for ISO network: %w", err)
+		return nil, "", fmt.Errorf("open filesystem root for iso network: %w", err)
 	}
 	currentPath := string(filepath.Separator)
 	effectiveUID := uint32(os.Geteuid())
@@ -590,7 +590,7 @@ func openValidatedISOOperationRootDir(rootDir string) (*os.File, string, error) 
 		nextFD, openErr := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		_ = unix.Close(fd)
 		if openErr != nil {
-			return nil, "", fmt.Errorf("open ISO network RootDir component %s: %w", filepath.Join(currentPath, component), openErr)
+			return nil, "", fmt.Errorf("open iso network RootDir component %s: %w", filepath.Join(currentPath, component), openErr)
 		}
 		fd = nextFD
 		currentPath = filepath.Join(currentPath, component)
@@ -602,18 +602,18 @@ func openValidatedISOOperationRootDir(rootDir string) (*os.File, string, error) 
 	dir := os.NewFile(uintptr(fd), cleaned)
 	if dir == nil {
 		_ = unix.Close(fd)
-		return nil, "", fmt.Errorf("open ISO network RootDir %s: invalid file descriptor", cleaned)
+		return nil, "", fmt.Errorf("open iso network RootDir %s: invalid file descriptor", cleaned)
 	}
 	return dir, cleaned, nil
 }
 
 func cleanISOOperationRootDir(rootDir string) (string, error) {
 	if strings.TrimSpace(rootDir) == "" {
-		return "", fmt.Errorf("ISO network requires Config.RootDir")
+		return "", fmt.Errorf("iso network requires Config.RootDir")
 	}
 	rootDir = filepath.Clean(rootDir)
 	if !filepath.IsAbs(rootDir) || rootDir == string(filepath.Separator) {
-		return "", fmt.Errorf("ISO network requires a safe absolute Config.RootDir, got %q", rootDir)
+		return "", fmt.Errorf("iso network requires a safe absolute Config.RootDir, got %q", rootDir)
 	}
 	return rootDir, nil
 }
@@ -621,36 +621,36 @@ func cleanISOOperationRootDir(rootDir string) (string, error) {
 func validateISOOperationDirectoryFD(path string, fd int, effectiveUID uint32, final bool) error {
 	stat, err := inspectISOOperationInode(fd)
 	if err != nil {
-		return fmt.Errorf("inspect ISO network RootDir component %s: %w", path, err)
+		return fmt.Errorf("inspect iso network RootDir component %s: %w", path, err)
 	}
 	return validateISOOperationDirectoryStat(path, stat, effectiveUID, final)
 }
 
 func validateISOOperationDirectoryStat(path string, stat isoOperationInodeStat, effectiveUID uint32, final bool) error {
 	if stat.mode&unix.S_IFMT != unix.S_IFDIR {
-		return fmt.Errorf("ISO network RootDir component %s is not a directory", path)
+		return fmt.Errorf("iso network RootDir component %s is not a directory", path)
 	}
 	if stat.uid != 0 && stat.uid != effectiveUID {
-		return fmt.Errorf("ISO network RootDir component %s is owned by uid %d, want root or effective uid %d", path, stat.uid, effectiveUID)
+		return fmt.Errorf("iso network RootDir component %s is owned by uid %d, want root or effective uid %d", path, stat.uid, effectiveUID)
 	}
 	if final && stat.uid != effectiveUID {
-		return fmt.Errorf("ISO network RootDir %s is owned by uid %d, want effective uid %d", path, stat.uid, effectiveUID)
+		return fmt.Errorf("iso network RootDir %s is owned by uid %d, want effective uid %d", path, stat.uid, effectiveUID)
 	}
 	if stat.mode&0o022 != 0 && (final || stat.mode&unix.S_ISVTX == 0) {
-		return fmt.Errorf("ISO network RootDir component %s is writable by group or world without safe sticky protection", path)
+		return fmt.Errorf("iso network RootDir component %s is writable by group or world without safe sticky protection", path)
 	}
 	return nil
 }
 
 func validateISOOperationLockStat(path string, stat isoOperationInodeStat, effectiveUID uint32) error {
 	if stat.mode&unix.S_IFMT != unix.S_IFREG {
-		return fmt.Errorf("ISO operation lock %s is not a regular file", path)
+		return fmt.Errorf("iso operation lock %s is not a regular file", path)
 	}
 	if stat.uid != effectiveUID {
-		return fmt.Errorf("ISO operation lock %s is owned by uid %d, want effective uid %d", path, stat.uid, effectiveUID)
+		return fmt.Errorf("iso operation lock %s is owned by uid %d, want effective uid %d", path, stat.uid, effectiveUID)
 	}
 	if stat.nlink != 1 {
-		return fmt.Errorf("ISO operation lock %s has %d links, want exactly one", path, stat.nlink)
+		return fmt.Errorf("iso operation lock %s has %d links, want exactly one", path, stat.nlink)
 	}
 	return nil
 }
@@ -673,7 +673,7 @@ func (s *Server) withISOOperationLock(ctx context.Context, operation func() erro
 // manage permission; this local helper adds no RPC or remote operation.
 func (s *Server) EnsureISONetwork(ctx context.Context, service string) error {
 	if s == nil || s.cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	return s.withISOOperationLock(ctx, func() error {
 		return s.ensureISONetworkLocked(ctx, service)
@@ -695,7 +695,7 @@ func (s *Server) ensureISONetworkLocked(ctx context.Context, service string) err
 // form; only the actual workload start gate may mark ready.
 func (s *Server) EnsureISONetworkBoundary(ctx context.Context, service string) error {
 	if s == nil || s.cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	return s.withISOOperationLock(ctx, func() error {
 		return s.ensureISONetworkBoundaryLocked(ctx, service)
@@ -849,7 +849,7 @@ func (s *Server) ensureOrVerifyVMISOAttachmentForStartup(ctx context.Context, se
 		return err
 	}
 	if !plan.hasNetworkMode("iso") {
-		return fmt.Errorf("service %q has a VM ISO allocation but no ISO VM network", service)
+		return fmt.Errorf("service %q has a VM iso allocation but no iso VM network", service)
 	}
 	identity, err := vmNetworkEnsureRuntimeIdentity()
 	if err != nil {
@@ -930,14 +930,14 @@ func inspectISONativeRuntime(ctx context.Context, service *db.Service) (isoRecon
 	case "inactive", "failed":
 		return isoReconcileRuntimeAbsent, nil
 	default:
-		return "", fmt.Errorf("ISO native service %q has indeterminate systemd state %q", service.Name, state)
+		return "", fmt.Errorf("iso native service %q has indeterminate systemd state %q", service.Name, state)
 	}
 }
 
 func isoSystemdUnitState(ctx context.Context, unit string) (string, error) {
 	output, err := runISOSystemctlForRuntime(ctx, "show", "--property=ActiveState", "--value", unit)
 	if err != nil {
-		return "", fmt.Errorf("inspect ISO systemd unit %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("inspect iso systemd unit %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
 }
@@ -971,7 +971,7 @@ func (r *isoConcreteReconcileSteps) inspectISOComposeRuntime(ctx context.Context
 func inspectAbsentISOComposeRuntime(ctx context.Context, compose *svc.DockerComposeService) (isoReconcileRuntimeState, error) {
 	err := errors.Join(compose.VerifyProjectAbsent(ctx), compose.VerifyDefaultNetworkAbsent(ctx))
 	if err != nil {
-		return "", fmt.Errorf("ISO Compose runtime is not cleanly absent: %w", err)
+		return "", fmt.Errorf("iso Compose runtime is not cleanly absent: %w", err)
 	}
 	return isoReconcileRuntimeAbsent, nil
 }
@@ -998,11 +998,11 @@ func (r *isoConcreteReconcileSteps) inspectRunningISOComposeRuntime(ctx context.
 func isoComposeInspectionArtifacts(record *db.Service) (string, string, error) {
 	base, ok := record.Artifacts.Gen(db.ArtifactDockerComposeFile, record.Generation)
 	if !ok {
-		return "", "", fmt.Errorf("ISO Compose base artifact is missing for generation %d", record.Generation)
+		return "", "", fmt.Errorf("iso Compose base artifact is missing for generation %d", record.Generation)
 	}
 	overlay, ok := record.Artifacts.Gen(db.ArtifactDockerComposeNetwork, record.Generation)
 	if !ok {
-		return "", "", fmt.Errorf("ISO Compose overlay artifact is missing for generation %d", record.Generation)
+		return "", "", fmt.Errorf("iso Compose overlay artifact is missing for generation %d", record.Generation)
 	}
 	return base, overlay, nil
 }
@@ -1040,7 +1040,7 @@ func (r *isoConcreteReconcileSteps) verifyStoppedISOVM(service string) error {
 		return err
 	}
 	if running {
-		return fmt.Errorf("ISO VM %q is running while allocation is stopped", service)
+		return fmt.Errorf("iso VM %q is running while allocation is stopped", service)
 	}
 	return nil
 }
@@ -1055,7 +1055,7 @@ func (r *isoConcreteReconcileSteps) verifyStoppedISOCompose(ctx context.Context,
 		return err
 	}
 	if running {
-		return fmt.Errorf("ISO Compose workload %q is running while allocation is stopped", service)
+		return fmt.Errorf("iso Compose workload %q is running while allocation is stopped", service)
 	}
 	return verifyISOAuxiliaryUnitsStopped(ctx, view.AsStruct())
 }
@@ -1077,14 +1077,14 @@ func (r *isoConcreteReconcileSteps) VerifyTailscale(ctx context.Context, service
 	}
 	record := view.AsStruct()
 	if record.TSNet == nil {
-		return fmt.Errorf("ISO service %q requests Tailscale without persisted Tailscale state", service)
+		return fmt.Errorf("iso service %q requests Tailscale without persisted Tailscale state", service)
 	}
 	systemdService, err := r.server.systemdService(service)
 	if err != nil {
-		return fmt.Errorf("load ISO Tailscale service %q: %w", service, err)
+		return fmt.Errorf("load iso Tailscale service %q: %w", service, err)
 	}
 	if err := verifyTailscaleSystemdSidecar(ctx, systemdService); err != nil {
-		return fmt.Errorf("verify ISO Tailscale service %q: %w", service, err)
+		return fmt.Errorf("verify iso Tailscale service %q: %w", service, err)
 	}
 	return nil
 }
@@ -1176,7 +1176,7 @@ func (s *Server) currentGlobalISOPolicy() (netns.ISOPolicyRules, bool, error) {
 	pool := dv.ISOPool()
 	if !pool.Valid() {
 		if hasISOAllocations(dv) {
-			return netns.ISOPolicyRules{}, false, fmt.Errorf("ISO pool is not configured")
+			return netns.ISOPolicyRules{}, false, fmt.Errorf("iso pool is not configured")
 		}
 		return netns.ISOPolicyRules{}, false, nil
 	}
@@ -1200,7 +1200,7 @@ func (s *Server) currentGlobalISOPolicy() (netns.ISOPolicyRules, bool, error) {
 //nolint:cyclop,gocognit // Startup reconciliation is an ordered fail-closed state machine kept linear for auditability.
 func (s *Server) reconcileISONetworksWith(ctx context.Context, steps isoReconcileSteps) error {
 	if s == nil || s.cfg.DB == nil {
-		return fmt.Errorf("ISO reconciliation requires a config database")
+		return fmt.Errorf("iso reconciliation requires a config database")
 	}
 	dv, err := s.cfg.DB.Get()
 	if err != nil {
@@ -1220,11 +1220,11 @@ func (s *Server) reconcileISONetworksWith(ctx context.Context, steps isoReconcil
 
 	var reconciliationErrs []error
 	var restartCandidates []string
-	if err := runISOReconcileGlobalPhase(ctx, "validate ISO pool", steps.ValidatePool); err != nil {
+	if err := runISOReconcileGlobalPhase(ctx, "validate iso pool", steps.ValidatePool); err != nil {
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
 	if len(reconciliationErrs) == 0 {
-		if err := runISOReconcileGlobalPhase(ctx, "install ISO DNS", steps.InstallDNS); err != nil {
+		if err := runISOReconcileGlobalPhase(ctx, "install iso DNS", steps.InstallDNS); err != nil {
 			reconciliationErrs = append(reconciliationErrs, err)
 		}
 	}
@@ -1237,7 +1237,7 @@ func (s *Server) reconcileISONetworksWith(ctx context.Context, steps isoReconcil
 		for _, name := range names {
 			if allocations[name].RemoveRequested {
 				if err := steps.ResumeRemoval(ctx, name); err != nil {
-					reconciliationErrs = append(reconciliationErrs, fmt.Errorf("resume ISO removal for %q: %w", name, err))
+					reconciliationErrs = append(reconciliationErrs, fmt.Errorf("resume iso removal for %q: %w", name, err))
 				}
 				continue
 			}
@@ -1251,11 +1251,11 @@ func (s *Server) reconcileISONetworksWith(ctx context.Context, steps isoReconcil
 			}
 		}
 	}
-	if err := runISOReconcileGlobalPhase(ctx, "verify global ISO policy", steps.VerifyGlobalPolicy); err != nil {
+	if err := runISOReconcileGlobalPhase(ctx, "verify global iso policy", steps.VerifyGlobalPolicy); err != nil {
 		reconciliationErrs = append(reconciliationErrs, err)
 		stopNames := names
 		if current, loadErr := s.currentISOAllocationNames(); loadErr != nil {
-			reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reload ISO records after global policy failure: %w", loadErr))
+			reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reload iso records after global policy failure: %w", loadErr))
 		} else {
 			stopNames = current
 		}
@@ -1265,11 +1265,11 @@ func (s *Server) reconcileISONetworksWith(ctx context.Context, steps isoReconcil
 	} else {
 		for _, name := range restartCandidates {
 			if err := ctx.Err(); err != nil {
-				reconciliationErrs = append(reconciliationErrs, stopAndQuarantineISO(ctx, steps, name, fmt.Errorf("restart verified ISO service %q: %w", name, err)))
+				reconciliationErrs = append(reconciliationErrs, stopAndQuarantineISO(ctx, steps, name, fmt.Errorf("restart verified iso service %q: %w", name, err)))
 				continue
 			}
 			if err := steps.RestartTrusted(ctx, name); err != nil {
-				reconciliationErrs = append(reconciliationErrs, stopAndQuarantineISO(ctx, steps, name, fmt.Errorf("restart verified ISO service %q: %w", name, err)))
+				reconciliationErrs = append(reconciliationErrs, stopAndQuarantineISO(ctx, steps, name, fmt.Errorf("restart verified iso service %q: %w", name, err)))
 			}
 		}
 	}
@@ -1293,11 +1293,11 @@ func (s *Server) currentISOAllocationNames() ([]string, error) {
 
 func (s *Server) failClosedISONetworks(ctx context.Context, cause error) error {
 	if s == nil || s.cfg.DB == nil {
-		return fmt.Errorf("fail-closed ISO startup requires a config database")
+		return fmt.Errorf("fail-closed iso startup requires a config database")
 	}
 	names, err := s.currentISOAllocationNames()
 	if err != nil {
-		return fmt.Errorf("load ISO records for fail-closed startup: %w", err)
+		return fmt.Errorf("load iso records for fail-closed startup: %w", err)
 	}
 	steps := &isoConcreteReconcileSteps{server: s}
 	var errs []error
@@ -1414,7 +1414,7 @@ func (s *Server) finalizeISORetirementsWith(ctx context.Context, service string,
 	}
 	view, ok := dv.Services().GetOk(service)
 	if !ok || !view.ISO().Valid() {
-		return fmt.Errorf("service %q has no ISO allocation", service)
+		return fmt.Errorf("service %q has no iso allocation", service)
 	}
 	retired := view.ISO().AsStruct().RetiredComponents
 	if len(retired) == 0 {
@@ -1424,7 +1424,7 @@ func (s *Server) finalizeISORetirementsWith(ctx context.Context, service string,
 	stopErr := steps.StopProject(stopCtx, service)
 	stopCancel()
 	if stopErr != nil {
-		return quarantineISORetirement(ctx, steps, service, fmt.Errorf("stop ISO project before component retirement: %w", stopErr))
+		return quarantineISORetirement(ctx, steps, service, fmt.Errorf("stop iso project before component retirement: %w", stopErr))
 	}
 	checks := []struct {
 		name string
@@ -1444,7 +1444,7 @@ func (s *Server) finalizeISORetirementsWith(ctx context.Context, service string,
 	}
 	if _, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
 		if record.ISO == nil {
-			return fmt.Errorf("service %q lost its ISO allocation", service)
+			return fmt.Errorf("service %q lost its iso allocation", service)
 		}
 		record.ISO.RetiredComponents = nil
 		return nil
@@ -1452,7 +1452,7 @@ func (s *Server) finalizeISORetirementsWith(ctx context.Context, service string,
 		return quarantineISORetirement(ctx, steps, service, fmt.Errorf("clear verified retired component mappings: %w", err))
 	}
 	if err := steps.Reserve(ctx, service); err != nil {
-		return quarantineISORetirement(ctx, steps, service, fmt.Errorf("re-reserve ISO components: %w", err))
+		return quarantineISORetirement(ctx, steps, service, fmt.Errorf("re-reserve iso components: %w", err))
 	}
 	return nil
 }
@@ -1541,7 +1541,7 @@ func classifyISORemoveRecord(record *db.Service) (vm, native bool, err error) {
 	case record.ServiceType == db.ServiceTypeSystemd && serviceRecordHasISOKind(record, iso.PayloadNative):
 		return false, true, nil
 	default:
-		return false, false, fmt.Errorf("ISO removal for service type %q is not implemented in the container lifecycle", record.ServiceType)
+		return false, false, fmt.Errorf("iso removal for service type %q is not implemented in the container lifecycle", record.ServiceType)
 	}
 }
 
@@ -1588,7 +1588,7 @@ func stopAndVerifyISOUnits(ctx context.Context, units []string) error {
 	}
 	args := append([]string{"stop"}, units...)
 	if output, err := runISOSystemctlForRuntime(ctx, args...); err != nil {
-		return fmt.Errorf("stop ISO auxiliary units: %w: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("stop iso auxiliary units: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return verifyISOUnitsStopped(ctx, units)
 }
@@ -1601,11 +1601,11 @@ func verifyISOUnitsStopped(ctx context.Context, units []string) error {
 	for _, unit := range units {
 		output, err := runISOSystemctlForRuntime(ctx, "show", "--property=ActiveState", "--value", unit)
 		if err != nil {
-			return fmt.Errorf("verify ISO auxiliary unit %s stopped: %w: %s", unit, err, strings.TrimSpace(string(output)))
+			return fmt.Errorf("verify iso auxiliary unit %s stopped: %w: %s", unit, err, strings.TrimSpace(string(output)))
 		}
 		state := strings.TrimSpace(string(output))
 		if state != "inactive" && state != "failed" {
-			return fmt.Errorf("ISO auxiliary unit %s remains %s", unit, state)
+			return fmt.Errorf("iso auxiliary unit %s remains %s", unit, state)
 		}
 	}
 	return nil
@@ -1682,7 +1682,7 @@ func verifyISOAllocationDNetAbsent(server *Server, allocation db.ISOAllocation) 
 	for _, component := range allocation.RetiredComponents {
 		addresses[component.Address] = true
 	}
-	return verifyDNetAddressesAbsent(dv.AsStruct().DockerNetworks, addresses, "ISO address")
+	return verifyDNetAddressesAbsent(dv.AsStruct().DockerNetworks, addresses, "iso address")
 }
 
 func verifyDNetAddressesAbsent(networks map[string]*db.DockerNetwork, addresses map[netip.Addr]bool, label string) error {
@@ -1784,7 +1784,7 @@ func (s *Server) removeISOServiceWith(ctx context.Context, service string, steps
 func (s *Server) removeISOServiceWithOptions(ctx context.Context, service string, cleanData bool, steps isoRemoveSteps) error {
 	return s.withISOOperationLock(ctx, func() error {
 		if err := s.recordISORemovalIntent(service, cleanData); err != nil {
-			return fmt.Errorf("record ISO removal intent: %w", err)
+			return fmt.Errorf("record iso removal intent: %w", err)
 		}
 		return s.removeISOServiceLockedWith(ctx, service, steps)
 	})
@@ -1794,17 +1794,17 @@ func (s *Server) removeISOServiceWithOptions(ctx context.Context, service string
 func (s *Server) removeISOServiceLockedWith(ctx context.Context, service string, steps isoRemoveSteps) error {
 	dv, err := s.cfg.DB.Get()
 	if err != nil {
-		return fmt.Errorf("load ISO removal state: %w", err)
+		return fmt.Errorf("load iso removal state: %w", err)
 	}
 	serviceView, ok := dv.Services().GetOk(service)
 	if !ok || !serviceView.ISO().Valid() {
-		return fmt.Errorf("service %q has no ISO allocation", service)
+		return fmt.Errorf("service %q has no iso allocation", service)
 	}
 	allocation := serviceView.ISO()
 	cleanupVerified := allocation.RemoveRequested() && allocation.CleanupVerified()
 	if !allocation.RemoveRequested() {
 		if err := s.markISORemoveRequested(service); err != nil {
-			return fmt.Errorf("record ISO removal intent: %w", err)
+			return fmt.Errorf("record iso removal intent: %w", err)
 		}
 	}
 	if !cleanupVerified {
@@ -1826,7 +1826,7 @@ func (s *Server) removeISOServiceLockedWith(ctx context.Context, service string,
 			}
 		}
 		if err := s.markISOCleanupVerified(service); err != nil {
-			return s.retainISOTombstone(service, fmt.Errorf("record verified ISO cleanup: %w", err))
+			return s.retainISOTombstone(service, fmt.Errorf("record verified iso cleanup: %w", err))
 		}
 	}
 	policy := []struct {
@@ -1845,7 +1845,7 @@ func (s *Server) removeISOServiceLockedWith(ctx context.Context, service string,
 		return s.retainISOTombstone(service, fmt.Errorf("before-delete: %w", err))
 	}
 	if err := s.removeServiceFromDB(service); err != nil {
-		return s.retainISOTombstone(service, fmt.Errorf("delete verified ISO service: %w", err))
+		return s.retainISOTombstone(service, fmt.Errorf("delete verified iso service: %w", err))
 	}
 	return nil
 }
@@ -1857,7 +1857,7 @@ func runISORemoveStep(ctx context.Context, service string, run func(context.Cont
 }
 
 // transitionFromISOWith prepares the replacement without activating it, then
-// releases ISO only in the same DB mutation that commits the verified new
+// releases iso only in the same DB mutation that commits the verified new
 // network. Cleanup uncertainty retains a tombstone and never starts the new
 // mode.
 func (s *Server) transitionFromISOWith(ctx context.Context, service string, desired []string, steps isoTransitionSteps) error {
@@ -1872,19 +1872,19 @@ func (s *Server) transitionFromISOWith(ctx context.Context, service string, desi
 	stopErr := steps.StopISO(stopCtx, service)
 	stopCancel()
 	if stopErr != nil {
-		return s.retainISOTransitionTombstone(service, fmt.Errorf("stop ISO service before transition: %w", stopErr))
+		return s.retainISOTransitionTombstone(service, fmt.Errorf("stop iso service before transition: %w", stopErr))
 	}
 	cleanCtx, cleanCancel := isoSecurityCleanupContext(ctx)
 	cleanErr := steps.CleanISO(cleanCtx, service)
 	cleanCancel()
 	if cleanErr != nil {
-		return s.retainISOTransitionTombstone(service, fmt.Errorf("clean ISO service before transition: %w", cleanErr))
+		return s.retainISOTransitionTombstone(service, fmt.Errorf("clean iso service before transition: %w", cleanErr))
 	}
 	if err := ctx.Err(); err != nil {
-		return s.retainISOTransitionTombstone(service, fmt.Errorf("verify ISO absence before transition: %w", err))
+		return s.retainISOTransitionTombstone(service, fmt.Errorf("verify iso absence before transition: %w", err))
 	}
 	if err := steps.VerifyISOAbsent(ctx, service); err != nil {
-		return s.retainISOTransitionTombstone(service, fmt.Errorf("verify ISO absence before transition: %w", err))
+		return s.retainISOTransitionTombstone(service, fmt.Errorf("verify iso absence before transition: %w", err))
 	}
 	if err := s.commitReplacementNetwork(service, prepared); err != nil {
 		return s.retainISOTransitionTombstone(service, fmt.Errorf("commit replacement network: %w", err))
@@ -1973,10 +1973,10 @@ func (s *Server) retainISOTransitionTombstone(service string, cause error) error
 func (s *Server) commitReplacementNetwork(service string, prepared isoReplacementNetwork) error {
 	_, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
 		if prepared.Expected != nil && !serviceNetworkRecordsEqual(record, prepared.Expected) {
-			return fmt.Errorf("service %q changed before ISO replacement commit", service)
+			return fmt.Errorf("service %q changed before iso replacement commit", service)
 		}
 		if record.ISO == nil {
-			return fmt.Errorf("service %q lost its ISO allocation before replacement commit", service)
+			return fmt.Errorf("service %q lost its iso allocation before replacement commit", service)
 		}
 		record.SvcNetwork = cloneISOReplacementSvcNetwork(prepared.SvcNetwork)
 		record.Macvlan = cloneISOReplacementMacvlan(prepared.Macvlan)
@@ -2022,11 +2022,11 @@ var isoNetworkArtifactNames = map[db.ArtifactName]bool{
 	db.ArtifactTSConfig:             true,
 }
 
-// ISO-to-regular replacement preparation may also stage a fresh workload
+// iso-to-regular replacement preparation may also stage a fresh workload
 // service unit. The unit is network-owned for the duration of the mutation
 // because it contains the replacement namespace and dependency directives,
-// but it is not an ISO cleanup artifact: the service definition must survive
-// when an ISO allocation is removed.
+// but it is not an iso cleanup artifact: the service definition must survive
+// when an iso allocation is removed.
 var isoReplacementArtifactNames = func() map[db.ArtifactName]bool {
 	names := maps.Clone(isoNetworkArtifactNames)
 	names[db.ArtifactSystemdUnit] = true
@@ -2090,7 +2090,7 @@ func verifyISORuntimeSiblings(ctx context.Context, service string, topologies []
 			continue
 		}
 		if err := ensureISOTopologyForRuntime(ctx, topology.Spec); err != nil {
-			return fmt.Errorf("reconcile ISO sibling %q: %w", topology.Service, err)
+			return fmt.Errorf("reconcile iso sibling %q: %w", topology.Service, err)
 		}
 		if err := verifyISOTopologyForRuntime(ctx, topology.Spec); err != nil {
 			return err
@@ -2107,18 +2107,18 @@ func (s *Server) failISORuntime(err error) error {
 func (s *Server) markISOReady(service string) error {
 	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
 		if data.ISOPool == nil {
-			return fmt.Errorf("ISO pool disappeared while ensuring %q", service)
+			return fmt.Errorf("iso pool disappeared while ensuring %q", service)
 		}
 		allocation, ok := isoAllocationInData(data, service)
 		if !ok {
-			return fmt.Errorf("service %q has no ISO allocation", service)
+			return fmt.Errorf("service %q has no iso allocation", service)
 		}
 		if allocation.RemoveRequested || allocation.CleanupVerified {
-			return fmt.Errorf("service %q ISO removal or cleanup is in progress", service)
+			return fmt.Errorf("service %q iso removal or cleanup is in progress", service)
 		}
 		switch iso.AllocationState(allocation.State) {
 		case iso.StateRemoving, iso.StateTombstoned, iso.StateQuarantined:
-			return fmt.Errorf("service %q ISO lifecycle state %q cannot become ready", service, allocation.State)
+			return fmt.Errorf("service %q iso lifecycle state %q cannot become ready", service, allocation.State)
 		}
 		data.ISOPool.AggregateRouteState = "ready"
 		data.ISOPool.LastConflict = ""
@@ -2170,7 +2170,7 @@ func (s *Server) markISORuntimeConflict(cause error) error {
 // the allocation tombstone; later lifecycle reconciliation owns final release.
 func (s *Server) CleanISONetwork(ctx context.Context, service string) error {
 	if s == nil || s.cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	return s.withISOOperationLock(ctx, func() error {
 		return s.cleanISONetworkLocked(ctx, service)
@@ -2184,7 +2184,7 @@ func (s *Server) cleanISONetworkLocked(ctx context.Context, service string) erro
 		return err
 	}
 	if spec.VM {
-		err := fmt.Errorf("VM ISO topology cleanup must be verified by the VM network lifecycle")
+		err := fmt.Errorf("VM iso topology cleanup must be verified by the VM network lifecycle")
 		_ = s.markISOState(service, string(iso.StateQuarantined), err)
 		return err
 	}
@@ -2237,7 +2237,7 @@ func (s *Server) markISORemoveRequested(service string) error {
 func (s *Server) recordISORemovalIntent(service string, cleanData bool) error {
 	_, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
 		if record.ISO == nil {
-			return fmt.Errorf("service %q has no ISO allocation", service)
+			return fmt.Errorf("service %q has no iso allocation", service)
 		}
 		if !record.ISO.RemoveRequested {
 			record.ISO.RemoveRequested = true
@@ -2254,7 +2254,7 @@ func (s *Server) recordISORemovalIntent(service string, cleanData bool) error {
 func (s *Server) markISOCleanupVerified(service string) error {
 	_, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
 		if record.ISO == nil || !record.ISO.RemoveRequested {
-			return fmt.Errorf("service %q ISO cleanup was not requested", service)
+			return fmt.Errorf("service %q iso cleanup was not requested", service)
 		}
 		record.ISO.CleanupVerified = true
 		record.ISO.State = string(iso.StateTombstoned)
@@ -2279,7 +2279,7 @@ func isoAllocationInData(data *db.Data, service string) (*db.ISOAllocation, bool
 // registered in the remote TTY/RPC command registry.
 func EnsureISONetwork(ctx context.Context, cfg *Config, service string) error {
 	if cfg == nil || cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	server := &Server{cfg: *cfg}
 	return server.EnsureISONetwork(ctx, service)
@@ -2287,7 +2287,7 @@ func EnsureISONetwork(ctx context.Context, cfg *Config, service string) error {
 
 func EnsureISONetworkBoundary(ctx context.Context, cfg *Config, service string) error {
 	if cfg == nil || cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	server := &Server{cfg: *cfg}
 	return server.EnsureISONetworkBoundary(ctx, service)
@@ -2296,7 +2296,7 @@ func EnsureISONetworkBoundary(ctx context.Context, cfg *Config, service string) 
 // CleanISONetwork is the matching local-only cleanup wrapper.
 func CleanISONetwork(ctx context.Context, cfg *Config, service string) error {
 	if cfg == nil || cfg.DB == nil {
-		return fmt.Errorf("ISO network requires a config DB")
+		return fmt.Errorf("iso network requires a config DB")
 	}
 	server := &Server{cfg: *cfg}
 	return server.CleanISONetwork(ctx, service)

@@ -667,7 +667,7 @@ func TestRunAndStagePublishResetReachISOValidation(t *testing.T) {
 				t.Fatalf("preparePayloadInstall error = %v, want ErrPublishedPorts", err)
 			}
 			if len(installer.artifacts) != 0 {
-				t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+				t.Fatalf("artifacts = %#v, want none before iso rejection", installer.artifacts)
 			}
 		})
 	}
@@ -688,7 +688,7 @@ func TestRunVMPublishResetRejectsISOBeforeProvisioning(t *testing.T) {
 		t.Fatalf("runCmdFunc error = %v, want ErrPublishedPorts", err)
 	}
 	if called {
-		t.Fatal("VM provisioning ran before ISO publish-reset rejection")
+		t.Fatal("VM provisioning ran before iso publish-reset rejection")
 	}
 }
 

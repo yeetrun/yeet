@@ -1227,6 +1227,13 @@ func TestResolveGlobalOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildGroupHandlersDoesNotExposeReadmit(t *testing.T) {
+	service := buildGroupHandlers()["service"]
+	if _, ok := service.Commands["readmit"]; ok {
+		t.Fatal("service group exposes readmit")
+	}
+}
+
 func TestPrepareCommandRoute(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1291,14 +1298,6 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantService: "svc-a",
 			wantArgs:    []string{"service", "rollback"},
 			wantBridged: []string{"service", "rollback"},
-		},
-		{
-			name:        "service readmit host target",
-			args:        []string{"service@catch-a", "readmit", "svc-a"},
-			wantHost:    "catch-a",
-			wantService: "svc-a",
-			wantArgs:    []string{"service", "readmit"},
-			wantBridged: []string{"service", "readmit"},
 		},
 		{
 			name:        "service generations format host target",

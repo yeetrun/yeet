@@ -186,7 +186,7 @@ type isoComposeResolveFunc func(context.Context, svc.ComposeResolveOptions) ([]b
 //nolint:cyclop // Admission and quarantine ordering stays explicit at this security boundary.
 func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoComposeResolveFunc) (ISOComposeModel, error) {
 	if i == nil || i.s == nil || i.s.cfg.DB == nil {
-		return ISOComposeModel{}, fmt.Errorf("ISO Compose preparation requires a config database")
+		return ISOComposeModel{}, fmt.Errorf("iso Compose preparation requires a config database")
 	}
 	if resolve == nil {
 		resolve = svc.ResolveComposeJSON
@@ -208,7 +208,7 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 	}
 	baseJSON, err := resolve(ctx, resolveOpts)
 	if err != nil {
-		return ISOComposeModel{}, fmt.Errorf("resolve base ISO Compose model: %w", err)
+		return ISOComposeModel{}, fmt.Errorf("resolve base iso Compose model: %w", err)
 	}
 	base, err := AdmitISOCompose(baseJSON, ISOComposeAdmissionOptions{
 		ServiceRoot:   i.effectiveServiceRoot(),
@@ -216,7 +216,7 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 		MaxComponents: iso.MaxComponents,
 	})
 	if err != nil {
-		return ISOComposeModel{}, fmt.Errorf("admit base ISO Compose model: %w", err)
+		return ISOComposeModel{}, fmt.Errorf("admit base iso Compose model: %w", err)
 	}
 	allocation, err := i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, isoReservationRequest{
 		Kind:       iso.PayloadCompose,
@@ -224,7 +224,7 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 		Components: slices.Clone(base.Components),
 	})
 	if err != nil {
-		return ISOComposeModel{}, fmt.Errorf("reserve ISO Compose allocation: %w", err)
+		return ISOComposeModel{}, fmt.Errorf("reserve iso Compose allocation: %w", err)
 	}
 	i.isoAllocation = allocation.Clone()
 	failReserved := func(cause error) (ISOComposeModel, error) {
@@ -233,7 +233,7 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 	}
 	overlay, err := renderISOComposeOverlay(allocation, base)
 	if err != nil {
-		return failReserved(fmt.Errorf("render persisted ISO Compose overlay: %w", err))
+		return failReserved(fmt.Errorf("render persisted iso Compose overlay: %w", err))
 	}
 	overlayPath, err := i.stageISOComposeOverlay(overlay)
 	if err != nil {
@@ -242,7 +242,7 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 	resolveOpts.Files = []string{composePath, overlayPath}
 	mergedJSON, err := resolve(ctx, resolveOpts)
 	if err != nil {
-		return failReserved(fmt.Errorf("resolve merged ISO Compose model: %w", err))
+		return failReserved(fmt.Errorf("resolve merged iso Compose model: %w", err))
 	}
 	merged, err := AdmitISOCompose(mergedJSON, ISOComposeAdmissionOptions{
 		ServiceRoot:       i.effectiveServiceRoot(),
@@ -251,10 +251,10 @@ func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoCompos
 		RequireISOOverlay: allocation,
 	})
 	if err != nil {
-		return failReserved(fmt.Errorf("admit merged ISO Compose model: %w", err))
+		return failReserved(fmt.Errorf("admit merged iso Compose model: %w", err))
 	}
 	if !slices.Equal(base.Components, merged.Components) {
-		return failReserved(fmt.Errorf("ISO overlay changed Compose components: base %v, merged %v", base.Components, merged.Components))
+		return failReserved(fmt.Errorf("iso overlay changed Compose components: base %v, merged %v", base.Components, merged.Components))
 	}
 	if err := i.stageISONetworkGate(); err != nil {
 		return failReserved(err)
@@ -272,13 +272,13 @@ func (i *FileInstaller) isoBaseComposePath() (string, error) {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("ISO Compose base file is not staged")
+	return "", fmt.Errorf("iso Compose base file is not staged")
 }
 
 func (i *FileInstaller) stageISOComposeOverlay(content string) (string, error) {
 	path := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("compose.network"))
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("write ISO Compose overlay: %w", err)
+		return "", fmt.Errorf("write iso Compose overlay: %w", err)
 	}
 	mak.Set(&i.artifacts, db.ArtifactDockerComposeNetwork, path)
 	return path, nil
@@ -291,11 +291,11 @@ func (i *FileInstaller) stageISONetworkGate() error {
 	}
 	artifacts, err := unit.WriteOutUnitFiles(i.serviceBinDir())
 	if err != nil {
-		return fmt.Errorf("write ISO network gate unit: %w", err)
+		return fmt.Errorf("write iso network gate unit: %w", err)
 	}
 	path := artifacts[db.ArtifactSystemdUnit]
 	if path == "" {
-		return fmt.Errorf("ISO network gate did not render a systemd unit")
+		return fmt.Errorf("iso network gate did not render a systemd unit")
 	}
 	mak.Set(&i.artifacts, db.ArtifactNetNSService, path)
 	return nil
@@ -308,7 +308,7 @@ func (i *FileInstaller) stageISONetworkGate() error {
 //nolint:cyclop // Phase ordering stays linear so every fail-closed transition is visible.
 func (i *FileInstaller) installISOCompose(ctx context.Context, steps isoComposeInstallSteps) error {
 	if i == nil || i.s == nil || i.s.cfg.DB == nil {
-		return fmt.Errorf("ISO Compose install requires a config database")
+		return fmt.Errorf("iso Compose install requires a config database")
 	}
 	type phase struct {
 		name string
@@ -382,15 +382,15 @@ func quarantineISOInstallFailure(ctx context.Context, steps isoComposeInstallSte
 func (i *FileInstaller) persistedISOAllocation() (*db.ISOAllocation, error) {
 	dv, err := i.s.cfg.DB.Get()
 	if err != nil {
-		return nil, fmt.Errorf("load persisted ISO allocation for %q: %w", i.cfg.ServiceName, err)
+		return nil, fmt.Errorf("load persisted iso allocation for %q: %w", i.cfg.ServiceName, err)
 	}
 	service, ok := dv.Services().GetOk(i.cfg.ServiceName)
 	if !ok || !service.ISO().Valid() {
-		return nil, fmt.Errorf("service %q has no persisted ISO allocation", i.cfg.ServiceName)
+		return nil, fmt.Errorf("service %q has no persisted iso allocation", i.cfg.ServiceName)
 	}
 	allocation := service.ISO().AsStruct()
 	if allocation == nil {
-		return nil, fmt.Errorf("service %q has no persisted ISO allocation", i.cfg.ServiceName)
+		return nil, fmt.Errorf("service %q has no persisted iso allocation", i.cfg.ServiceName)
 	}
 	return allocation, nil
 }
@@ -1035,7 +1035,7 @@ func (i *FileInstaller) tailscaleNetNSMode(env *netns.Service) (runTSInNetNS str
 	}
 	if i.isoAllocation != nil {
 		if exitNode := strings.TrimSpace(i.tsNet.ExitNode); exitNode != "" {
-			return "", "", false, fmt.Errorf("ISO Tailscale does not support exit node %q", exitNode)
+			return "", "", false, fmt.Errorf("iso Tailscale does not support exit node %q", exitNode)
 		}
 		if err := validateISOTailscaleAllocation(i.cfg.ServiceName, i.isoAllocation); err != nil {
 			return "", "", false, err
@@ -1054,14 +1054,14 @@ func (i *FileInstaller) tailscaleNetNSMode(env *netns.Service) (runTSInNetNS str
 func validateISOTailscaleAllocation(service string, allocation *db.ISOAllocation) error {
 	kind := iso.PayloadKind(allocation.Kind)
 	if kind != iso.PayloadCompose && kind != iso.PayloadContainer {
-		return fmt.Errorf("ISO Tailscale requires a non-VM container allocation, got %q", allocation.Kind)
+		return fmt.Errorf("iso Tailscale requires a non-VM container allocation, got %q", allocation.Kind)
 	}
 	if !slices.Equal(allocation.DesiredModes, []string{"iso", "ts"}) {
-		return fmt.Errorf("ISO Tailscale requires normalized persisted modes [iso ts], got %v", allocation.DesiredModes)
+		return fmt.Errorf("iso Tailscale requires normalized persisted modes [iso ts], got %v", allocation.DesiredModes)
 	}
 	want := isoRouterNamespace(service)
 	if allocation.NetNS != want {
-		return fmt.Errorf("persisted ISO router namespace %q does not belong to service %q (want %q)", allocation.NetNS, service, want)
+		return fmt.Errorf("persisted iso router namespace %q does not belong to service %q (want %q)", allocation.NetNS, service, want)
 	}
 	return nil
 }
@@ -1589,7 +1589,7 @@ func (i *FileInstaller) applyNetworkToSystemdUnit(su *svc.SystemdUnit) error {
 		gate := "yeet-" + i.cfg.ServiceName + "-ns.service"
 		resolver := i.artifacts[db.ArtifactNetNSResolv]
 		if strings.TrimSpace(resolver) == "" {
-			return fmt.Errorf("native ISO resolver artifact is missing")
+			return fmt.Errorf("native iso resolver artifact is missing")
 		}
 		su.NetNS = i.isoAllocation.NetNS
 		su.Requires = gate
@@ -1753,12 +1753,12 @@ func (i *FileInstaller) beginNativeSandboxISOTransaction() (*nativeSandboxISOTra
 	}
 	dv, err := i.s.cfg.DB.Get()
 	if err != nil {
-		return nil, fmt.Errorf("capture native ISO sandbox preflight record: %w", err)
+		return nil, fmt.Errorf("capture native iso sandbox preflight record: %w", err)
 	}
 	previous := dv.AsStruct().Services[i.cfg.ServiceName]
 	artifacts, err := beginRegularNetworkArtifactTransaction(i.serviceRoot, previous)
 	if err != nil {
-		return nil, fmt.Errorf("begin native ISO sandbox artifact transaction: %w", err)
+		return nil, fmt.Errorf("begin native iso sandbox artifact transaction: %w", err)
 	}
 	return &nativeSandboxISOTransaction{
 		installer: i, previousService: previous, artifacts: artifacts,
@@ -1818,7 +1818,7 @@ func (t *nativeSandboxISOTransaction) restoreService() error {
 	_, err := t.installer.s.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[t.installer.cfg.ServiceName]
 		if !serviceNetworkRecordsEqual(current, t.reservedService) {
-			return fmt.Errorf("service %q changed while rolling back native ISO sandbox preflight", t.installer.cfg.ServiceName)
+			return fmt.Errorf("service %q changed while rolling back native iso sandbox preflight", t.installer.cfg.ServiceName)
 		}
 		if t.previousService == nil {
 			delete(data.Services, t.installer.cfg.ServiceName)
@@ -1833,14 +1833,14 @@ func (t *nativeSandboxISOTransaction) restoreService() error {
 func (t *nativeSandboxISOTransaction) tombstoneCurrentReservation(cause error) error {
 	dv, err := t.installer.s.cfg.DB.Get()
 	if err != nil {
-		return fmt.Errorf("load conflicted native ISO sandbox reservation: %w", err)
+		return fmt.Errorf("load conflicted native iso sandbox reservation: %w", err)
 	}
 	current := dv.AsStruct().Services[t.installer.cfg.ServiceName]
 	if !nativeSandboxISOReservationOwned(current, t.reservedService) {
-		return fmt.Errorf("service %q no longer contains the attributable native ISO sandbox reservation", t.installer.cfg.ServiceName)
+		return fmt.Errorf("service %q no longer contains the attributable native iso sandbox reservation", t.installer.cfg.ServiceName)
 	}
 	return t.installer.s.markISOStateExact(
-		t.installer.cfg.ServiceName, current, string(iso.StateTombstoned), cause, "failing closed native ISO sandbox preflight",
+		t.installer.cfg.ServiceName, current, string(iso.StateTombstoned), cause, "failing closed native iso sandbox preflight",
 	)
 }
 
@@ -1927,7 +1927,7 @@ func (i *FileInstaller) prepareActiveNativeSandbox(ctx context.Context, payload 
 		return preparedNativeSandbox{}, fmt.Errorf("prepare native sandbox systemd unit: %w", err)
 	}
 	if err := transaction.registerCurrentArtifacts(); err != nil {
-		return preparedNativeSandbox{}, fmt.Errorf("track native ISO sandbox artifacts: %w", err)
+		return preparedNativeSandbox{}, fmt.Errorf("track native iso sandbox artifacts: %w", err)
 	}
 	plan, err := buildValidatedServiceSandboxPlan(request)
 	if err != nil {
@@ -1977,7 +1977,7 @@ func (i *FileInstaller) renderProbeAndVerifyNativeSandbox(ctx context.Context, p
 		return fmt.Errorf("write staged native sandbox systemd unit: %w", err)
 	}
 	if err := transaction.registerCurrentArtifacts(); err != nil {
-		return fmt.Errorf("track rendered native ISO sandbox artifacts: %w", err)
+		return fmt.Errorf("track rendered native iso sandbox artifacts: %w", err)
 	}
 	if err := i.probeServiceSandboxFunc(ctx, *sandboxPlan, prepared.identity.UID, prepared.identity.GID); err != nil {
 		return fmt.Errorf("probe native sandbox: %w", err)
@@ -1998,7 +1998,7 @@ func (i *FileInstaller) prepareNativeSandboxResolver() (string, error) {
 	if i.isoAllocation != nil && i.isoAllocation.Kind == string(iso.PayloadNative) {
 		resolver := i.artifacts[db.ArtifactNetNSResolv]
 		if strings.TrimSpace(resolver) == "" {
-			return "", errors.New("native ISO resolver artifact is missing")
+			return "", errors.New("native iso resolver artifact is missing")
 		}
 		i.sandboxResolver = resolver
 		return resolver, nil
@@ -2051,13 +2051,13 @@ func (i *FileInstaller) configureAndStageISOInstall(plan fileInstallPlan) error 
 	case db.ServiceTypeDockerCompose:
 		return i.configureAndStageComposeISOInstall(plan)
 	default:
-		return fmt.Errorf("ISO installation requires a Docker Compose or native systemd payload")
+		return fmt.Errorf("iso installation requires a Docker Compose or native systemd payload")
 	}
 }
 
 func (i *FileInstaller) configureAndStageNativeISOInstall(plan fileInstallPlan) error {
 	if i.isoAllocation == nil || i.isoAllocation.Kind != string(iso.PayloadNative) {
-		return fmt.Errorf("native ISO installation is missing its reserved allocation")
+		return fmt.Errorf("native iso installation is missing its reserved allocation")
 	}
 	return i.stageInstallPlan(plan)
 }
@@ -2067,7 +2067,7 @@ func (i *FileInstaller) configureAndStageComposeISOInstall(plan fileInstallPlan)
 		return err
 	}
 	if err := i.parseNetwork(); err != nil {
-		return fmt.Errorf("failed to parse ISO network: %w", err)
+		return fmt.Errorf("failed to parse iso network: %w", err)
 	}
 	if err := i.validateISOInstallTailscale(); err != nil {
 		return err
@@ -2097,7 +2097,7 @@ func (i *FileInstaller) validateISOInstallTailscale() error {
 	if viewErr != nil {
 		return errors.Join(err, viewErr)
 	}
-	return errors.Join(err, i.s.markISOStateExact(i.cfg.ServiceName, view.AsStruct(), string(iso.StateQuarantined), err, "rejecting invalid ISO Tailscale allocation"))
+	return errors.Join(err, i.s.markISOStateExact(i.cfg.ServiceName, view.AsStruct(), string(iso.StateQuarantined), err, "rejecting invalid iso Tailscale allocation"))
 }
 
 func (i *FileInstaller) configureAndStageRegularInstall(plan fileInstallPlan) error {
@@ -2157,12 +2157,12 @@ func (i *FileInstaller) transitionAwayFromISO(ctx context.Context, plan fileInst
 	if !native {
 		compose, err = i.s.dockerComposeService(i.cfg.ServiceName)
 		if err != nil {
-			return fmt.Errorf("load ISO Compose service for transition: %w", err)
+			return fmt.Errorf("load iso Compose service for transition: %w", err)
 		}
 	}
 	spec, err := i.s.loadISORuntimeSpec(i.cfg.ServiceName)
 	if err != nil {
-		return fmt.Errorf("load ISO network for transition: %w", err)
+		return fmt.Errorf("load iso network for transition: %w", err)
 	}
 	steps := &fileInstallerISOTransition{installer: i, plan: plan, prepared: prepared, compose: compose, native: native, spec: spec}
 	transition := i.transitionFromISO
@@ -2670,7 +2670,7 @@ func (i *FileInstaller) prepareNativeISO(ctx context.Context, transaction *nativ
 		allocation, err = i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, request)
 	}
 	if err != nil {
-		return fmt.Errorf("reserve native ISO allocation: %w", err)
+		return fmt.Errorf("reserve native iso allocation: %w", err)
 	}
 	i.isoAllocation = allocation.Clone()
 	failReserved := func(cause error) error {
@@ -2682,17 +2682,17 @@ func (i *FileInstaller) prepareNativeISO(ctx context.Context, transaction *nativ
 	}
 	resolver := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("iso-resolv.conf"))
 	if err := os.WriteFile(resolver, []byte("nameserver "+allocation.HostIP.String()+"\n"), 0o644); err != nil {
-		return failReserved(fmt.Errorf("write native ISO resolver: %w", err))
+		return failReserved(fmt.Errorf("write native iso resolver: %w", err))
 	}
 	mak.Set(&i.artifacts, db.ArtifactNetNSResolv, resolver)
 	if err := transaction.registerCurrentArtifacts(); err != nil {
-		return failReserved(fmt.Errorf("track native ISO resolver: %w", err))
+		return failReserved(fmt.Errorf("track native iso resolver: %w", err))
 	}
 	if err := i.stageISONetworkGate(); err != nil {
 		return failReserved(err)
 	}
 	if err := transaction.registerCurrentArtifacts(); err != nil {
-		return failReserved(fmt.Errorf("track native ISO network gate: %w", err))
+		return failReserved(fmt.Errorf("track native iso network gate: %w", err))
 	}
 	return nil
 }
@@ -3215,16 +3215,16 @@ func (i *FileInstaller) finalizeNativeISOInstall(ctx context.Context, service *d
 	steps := &isoConcreteReconcileSteps{server: i.s}
 	state, err := steps.InspectRuntime(ctx, service.Name)
 	if err == nil && state != isoReconcileRuntimeRunning {
-		err = fmt.Errorf("native ISO workload is %s after identity activation", state)
+		err = fmt.Errorf("native iso workload is %s after identity activation", state)
 	}
 	return err
 }
 
 func (i *FileInstaller) quarantineNativeISOExact(ctx context.Context, expected *db.Service, cause error) error {
 	if i == nil || i.s == nil || expected == nil {
-		return errors.New("quarantine native ISO without an exact expected service record")
+		return errors.New("quarantine native iso without an exact expected service record")
 	}
-	return i.s.quarantineNativeISORecordExact(ctx, expected, cause, "quarantining failed native ISO activation")
+	return i.s.quarantineNativeISORecordExact(ctx, expected, cause, "quarantining failed native iso activation")
 }
 
 type stagedNativeIdentityInstall struct {

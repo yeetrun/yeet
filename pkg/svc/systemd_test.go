@@ -1813,7 +1813,7 @@ func TestNewISONetworkUnitGatesServiceOnVerifiedBoundary(t *testing.T) {
 	}
 	got := string(raw)
 	for _, want := range []string{
-		"Description=yeet ISO network for app\n",
+		"Description=yeet iso network for app\n",
 		"Before=app.service\n",
 		"After=network-online.target docker.service\n",
 		"Wants=network-online.target\n",
@@ -1823,7 +1823,7 @@ func TestNewISONetworkUnitGatesServiceOnVerifiedBoundary(t *testing.T) {
 		"ExecStop=/usr/local/bin/catch -data-dir /var/lib/yeet iso-network-clean app\n",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("ISO network unit missing %q:\n%s", want, got)
+			t.Fatalf("iso network unit missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -1839,7 +1839,7 @@ func TestSystemdServiceRenderRewritesISONetworkGateToStableCatchRunner(t *testin
 		t.Fatal(err)
 	}
 	const oldRunner = "/srv/catch/bin/catch-old"
-	raw := "[Unit]\nDescription=yeet ISO network gate for app\n" +
+	raw := "[Unit]\nDescription=yeet iso network gate for app\n" +
 		"ConditionFileIsExecutable=" + oldRunner + "\n\n" +
 		"[Service]\nExecStart=" + oldRunner + " -data-dir /srv/yeet iso-network-ensure app\n" +
 		"ExecStop=" + oldRunner + " -data-dir /srv/yeet iso-network-clean app\n"
@@ -1854,11 +1854,11 @@ func TestSystemdServiceRenderRewritesISONetworkGateToStableCatchRunner(t *testin
 		"ExecStop=/srv/catch/run/catch -data-dir /srv/yeet iso-network-clean app",
 	} {
 		if !strings.Contains(string(rendered), want) {
-			t.Fatalf("rendered ISO gate missing %q:\n%s", want, rendered)
+			t.Fatalf("rendered iso gate missing %q:\n%s", want, rendered)
 		}
 	}
 	if strings.Contains(string(rendered), oldRunner) {
-		t.Fatalf("rendered ISO gate retained old Catch runner:\n%s", rendered)
+		t.Fatalf("rendered iso gate retained old Catch runner:\n%s", rendered)
 	}
 }
 

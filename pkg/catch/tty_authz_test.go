@@ -60,7 +60,6 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 		{name: "service set cron", args: []string{"service", "set", "--cron=30 2 * * *"}, want: permissionManage},
 		{name: "service set run as", args: []string{"service", "set", "--run-as=app"}, want: permissionManage},
 		{name: "service set sandbox", args: []string{"service", "set", "--sandbox=on"}, want: permissionManage},
-		{name: "service readmit", args: []string{"service", "readmit", "app"}, want: permissionManage},
 		{name: "tailscale status", args: []string{"tailscale", "status"}, want: permissionRead},
 		{name: "tailscale update", args: []string{"tailscale", "update"}, want: permissionManage},
 		{name: "vm images ls", args: []string{"vm", "images", "ls"}, want: permissionRead},
@@ -81,6 +80,10 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 		{name: "run as", args: []string{"run", "--run-as=app", "./api"}, want: permissionManage},
 		{name: "run cron", args: []string{"run", "--cron=0 3 * * *", "./job"}, want: permissionManage},
 		{name: "remove", args: []string{"remove", "--clean"}, want: permissionManage},
+	}
+
+	if _, err := ttyCommandPermissions([]string{"service", "readmit", "app"}); err == nil || !strings.Contains(err.Error(), `unclassified service command "readmit"`) {
+		t.Fatalf("service readmit permissions error = %v, want unclassified command", err)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

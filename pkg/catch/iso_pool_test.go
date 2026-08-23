@@ -108,7 +108,7 @@ func TestSelectISOPoolReportsExhaustion(t *testing.T) {
 		occupied = append(occupied, netip.MustParsePrefix(raw))
 	}
 	_, err := selectISOPool(context.Background(), &fakeISOPoolProbe{docker: occupied}, nil)
-	if err == nil || !strings.Contains(err.Error(), "no collision-free ISO /16") {
+	if err == nil || !strings.Contains(err.Error(), "no collision-free iso /16") {
 		t.Fatalf("error = %v, want exhaustion", err)
 	}
 }
@@ -546,7 +546,7 @@ func TestInfoCatchZeroISOSummaryPreservesJSONCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), `"iso"`) {
-		t.Fatalf("GetInfo JSON = %s, want omitted zero ISO summary", raw)
+		t.Fatalf("GetInfo JSON = %s, want omitted zero iso summary", raw)
 	}
 }
 

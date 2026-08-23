@@ -34,7 +34,7 @@ func TestISODNSFiltersAddressMatrixInEverySection(t *testing.T) {
 		"127.0.0.1",       // loopback
 		"169.254.1.1",     // link-local
 		"100.100.100.100", // CGNAT / Quad100
-		"172.30.128.2",    // current ISO pool
+		"172.30.128.2",    // current iso pool
 		"224.0.0.1",       // multicast
 		"192.0.2.1",       // documentation
 		"198.18.0.1",      // benchmarking/reserved
@@ -282,11 +282,11 @@ func TestISODNSForwardingRejectsISOListenerPort(t *testing.T) {
 		called = true
 		return nil, nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "ISO DNS listener port") {
-		t.Fatalf("error = %v, want ISO DNS listener self-recursion failure", err)
+	if err == nil || !strings.Contains(err.Error(), "iso DNS listener port") {
+		t.Fatalf("error = %v, want iso DNS listener self-recursion failure", err)
 	}
 	if called {
-		t.Fatal("exchange called for ISO DNS listener port")
+		t.Fatal("exchange called for iso DNS listener port")
 	}
 }
 

@@ -110,7 +110,7 @@ func vmNetworkStaleRouteFindings(routes []vmNetworkRoute, owned map[string]bool)
 	return findings
 }
 
-//nolint:cyclop // Reconciliation keeps ensure-before-cleanup ordering explicit across ordinary and ISO plans.
+//nolint:cyclop // Reconciliation keeps ensure-before-cleanup ordering explicit across ordinary and iso plans.
 func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 	dv, err := s.getDB()
 	if err != nil {
@@ -151,7 +151,7 @@ func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 			Server: s, DataRoot: s.cfg.RootDir, Service: service,
 			ServiceRoot: s.serviceRootFromService(sv.AsStruct()),
 		}); err != nil {
-			return fmt.Errorf("reconcile VM ISO network %q: %w", service, err)
+			return fmt.Errorf("reconcile VM iso network %q: %w", service, err)
 		}
 	}
 	return runVMNetworkLifecycleCommands(nil, cleanupCmds, "reconcile VM networks")
@@ -258,7 +258,7 @@ func ensureVMNetworkFromDataView(ctx context.Context, dv *db.DataView, input vmN
 		return attach(dv, plan, nil)
 	}
 	if input.Server == nil {
-		return fmt.Errorf("VM ISO network requires a server")
+		return fmt.Errorf("VM iso network requires a server")
 	}
 	return ensureVMISONetworkForReconcile(ctx, input.Server, input.Service, input.MarkReady, attach)
 }
@@ -269,7 +269,7 @@ func cleanupVMISONetworkPlan(plan vmNetworkPlan) error {
 		runner = execVMNetworkCommand
 	}
 	if err := plan.ExecuteCleanup(runner); err != nil {
-		return fmt.Errorf("clean up partial VM ISO network: %w", err)
+		return fmt.Errorf("clean up partial VM iso network: %w", err)
 	}
 	return nil
 }
@@ -286,7 +286,7 @@ func ensureVMISONetworkAttachment(ctx context.Context, server *Server, service s
 			return err
 		}
 		if allocation == nil {
-			return fmt.Errorf("VM %q lost its ISO allocation before attachment", service)
+			return fmt.Errorf("VM %q lost its iso allocation before attachment", service)
 		}
 		if markReady {
 			if err := validateVMISOStartState(current, service); err != nil {
@@ -321,14 +321,14 @@ func validateVMISOStartState(dv *db.DataView, service string) error {
 	}
 	allocation := sv.ISO()
 	if !allocation.Valid() {
-		return fmt.Errorf("VM %q has no ISO allocation", service)
+		return fmt.Errorf("VM %q has no iso allocation", service)
 	}
 	if allocation.RemoveRequested() || allocation.CleanupVerified() {
-		return fmt.Errorf("VM %q ISO removal or cleanup is in progress", service)
+		return fmt.Errorf("VM %q iso removal or cleanup is in progress", service)
 	}
 	switch iso.AllocationState(allocation.State()) {
 	case iso.StateRemoving, iso.StateTombstoned, iso.StateQuarantined:
-		return fmt.Errorf("VM %q ISO lifecycle state %q cannot start", service, allocation.State())
+		return fmt.Errorf("VM %q iso lifecycle state %q cannot start", service, allocation.State())
 	}
 	return nil
 }
@@ -389,7 +389,7 @@ func vmNetworkDesiredStateFromDBWithTransform(dv *db.DataView, transform vmNetwo
 		name := sv.Name()
 		plan := vmNetworkPlanFromDB(name, vm.Networks().AsSlice(), sv.ISO().AsStruct())
 		if allocation := sv.ISO().AsStruct(); allocation != nil && !vmNetworkMatchesISOAllocation(plan, allocation) {
-			return vmNetworkDesiredState{}, fmt.Errorf("service %q VM ISO network does not match its allocation", name)
+			return vmNetworkDesiredState{}, fmt.Errorf("service %q VM iso network does not match its allocation", name)
 		}
 		if transform != nil {
 			var err error
@@ -429,10 +429,10 @@ func vmNetworkPlanAndISOForService(dv *db.DataView, service string) (vmNetworkPl
 	allocation := sv.ISO().AsStruct()
 	plan := vmNetworkPlanFromDB(service, vm.Networks().AsSlice(), allocation)
 	if allocation != nil && !vmNetworkMatchesISOAllocation(plan, allocation) {
-		return vmNetworkPlan{}, nil, fmt.Errorf("service %q VM ISO network does not match its allocation", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q VM iso network does not match its allocation", service)
 	}
 	if allocation == nil && plan.hasNetworkMode("iso") {
-		return vmNetworkPlan{}, nil, fmt.Errorf("service %q has a VM ISO network but no ISO allocation", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q has a VM iso network but no iso allocation", service)
 	}
 	return plan, allocation, nil
 }
@@ -516,7 +516,7 @@ func ensureOwnedVMNetwork(plan vmNetworkPlan, service string) error {
 }
 
 func ensureRunningVMISOSecuritySysctls(plan vmNetworkPlan, service string) error {
-	return runVMNetworkLifecycleCommands(plan.isoInterfaceSysctlCommands(), nil, fmt.Sprintf("repair VM ISO security sysctls for %q", service))
+	return runVMNetworkLifecycleCommands(plan.isoInterfaceSysctlCommands(), nil, fmt.Sprintf("repair VM iso security sysctls for %q", service))
 }
 
 func verifyVMNetworkPlan(ctx context.Context, plan vmNetworkPlan) error {
@@ -555,22 +555,22 @@ func verifyVMISOInterface(ctx context.Context, iface vmNetworkInterfacePlan) err
 func loadVMISOAddressEvidence(ctx context.Context, tap string) (vmISOAddressEvidence, error) {
 	output, err := vmNetworkVerifyCommand(ctx, "ip", "-j", "address", "show", "dev", tap)
 	if err != nil {
-		return vmISOAddressEvidence{}, fmt.Errorf("verify VM ISO TAP %s: %w", tap, err)
+		return vmISOAddressEvidence{}, fmt.Errorf("verify VM iso TAP %s: %w", tap, err)
 	}
 	var links []vmISOAddressEvidence
 	if err := json.Unmarshal(output, &links); err != nil || len(links) != 1 || links[0].IfName != tap {
-		return vmISOAddressEvidence{}, fmt.Errorf("verify VM ISO TAP %s: invalid ip address evidence", tap)
+		return vmISOAddressEvidence{}, fmt.Errorf("verify VM iso TAP %s: invalid ip address evidence", tap)
 	}
 	return links[0], nil
 }
 
 func verifyVMISOAddressEvidence(iface vmNetworkInterfacePlan, link vmISOAddressEvidence) error {
 	if master := strings.TrimSpace(string(link.Master)); master != "" && master != "null" && master != "0" {
-		return fmt.Errorf("verify VM ISO TAP %s: unexpectedly attached to a bridge", iface.Tap)
+		return fmt.Errorf("verify VM iso TAP %s: unexpectedly attached to a bridge", iface.Tap)
 	}
 	want, err := netip.ParsePrefix(vmISOHostPrefix(iface))
 	if err != nil {
-		return fmt.Errorf("verify VM ISO TAP %s: invalid desired host address: %w", iface.Tap, err)
+		return fmt.Errorf("verify VM iso TAP %s: invalid desired host address: %w", iface.Tap, err)
 	}
 	return verifyVMISOAddresses(iface.Tap, want, link)
 }
@@ -579,19 +579,19 @@ func verifyVMISOAddresses(tap string, want netip.Prefix, link vmISOAddressEviden
 	matched := false
 	for _, address := range link.AddrInfo {
 		if address.Family == "inet6" {
-			return fmt.Errorf("verify VM ISO TAP %s: IPv6 address is present", tap)
+			return fmt.Errorf("verify VM iso TAP %s: IPv6 address is present", tap)
 		}
 		if address.Family != "inet" {
 			continue
 		}
 		got, err := netip.ParseAddr(address.Local)
 		if err != nil || got != want.Addr() || address.PrefixLen != want.Bits() || matched {
-			return fmt.Errorf("verify VM ISO TAP %s: unexpected IPv4 address evidence", tap)
+			return fmt.Errorf("verify VM iso TAP %s: unexpected IPv4 address evidence", tap)
 		}
 		matched = true
 	}
 	if !matched {
-		return fmt.Errorf("verify VM ISO TAP %s: host address is missing", tap)
+		return fmt.Errorf("verify VM iso TAP %s: host address is missing", tap)
 	}
 	return nil
 }
@@ -600,16 +600,16 @@ func verifyVMISOSysctls(ctx context.Context, tap string) error {
 	rpFilter := "net.ipv4.conf." + tap + ".rp_filter"
 	value, err := vmNetworkVerifyCommand(ctx, "sysctl", "-n", rpFilter)
 	if err != nil {
-		return fmt.Errorf("verify VM ISO TAP %s: read %s: %w", tap, rpFilter, err)
+		return fmt.Errorf("verify VM iso TAP %s: read %s: %w", tap, rpFilter, err)
 	}
 	mode := strings.TrimSpace(string(value))
 	if mode != "1" && mode != "2" {
-		return fmt.Errorf("verify VM ISO TAP %s: source validation is disabled or invalid (%s=%q)", tap, rpFilter, mode)
+		return fmt.Errorf("verify VM iso TAP %s: source validation is disabled or invalid (%s=%q)", tap, rpFilter, mode)
 	}
 	disableIPv6 := "net.ipv6.conf." + tap + ".disable_ipv6"
 	value, err = vmNetworkVerifyCommand(ctx, "sysctl", "-n", disableIPv6)
 	if err != nil || strings.TrimSpace(string(value)) != "1" {
-		return fmt.Errorf("verify VM ISO TAP %s: %s is not 1", tap, disableIPv6)
+		return fmt.Errorf("verify VM iso TAP %s: %s is not 1", tap, disableIPv6)
 	}
 	return nil
 }

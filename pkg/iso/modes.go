@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// ErrPublishedPorts reports that host-published ports are incompatible with ISO.
+// ErrPublishedPorts reports that host-published ports are incompatible with iso.
 var ErrPublishedPorts = errors.New("iso does not support published ports")
 
 type PayloadKind string
@@ -111,14 +111,14 @@ func validateVMISOModes(modes []string) error {
 
 func validateContainerISOModes(modes []string) error {
 	if len(modes) > 2 || len(modes) == 2 && !hasMode(modes, "ts") {
-		return fmt.Errorf("container ISO modes must be iso or iso,ts")
+		return fmt.Errorf("container iso modes must be iso or iso,ts")
 	}
 	return nil
 }
 
 func validateSingleISOMode(modes []string, payload string) error {
 	if len(modes) != 1 {
-		return fmt.Errorf("%s ISO supports only iso", payload)
+		return fmt.Errorf("%s iso supports only iso", payload)
 	}
 	return nil
 }

@@ -417,9 +417,9 @@ func serviceISOInfo(view db.ISOAllocationView) *catchrpc.ServiceISO {
 
 func publicIsolationText(text string) string {
 	text = strings.NewReplacer(
-		"ISO network", "isolated network",
-		"ISO pool", "isolated network pool",
-		"ISO allocation", "isolated-network allocation",
+		"iso network", "isolated network",
+		"iso pool", "isolated network pool",
+		"iso allocation", "isolated-network allocation",
 	).Replace(text)
 	return publicISONameRE.ReplaceAllString(text, "isolation")
 }

@@ -48,7 +48,7 @@ type isoIntegrationProject struct {
 
 func TestISOPacketPolicy(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("ISO integration test requires root")
+		t.Skip("iso integration test requires root")
 	}
 	if os.Getenv("YEET_ISO_INTEGRATION") != "1" {
 		t.Skip("set YEET_ISO_INTEGRATION=1")
@@ -117,7 +117,7 @@ func TestISOPacketPolicy(t *testing.T) {
 func requireISOIntegrationRootNamespace(t *testing.T) {
 	t.Helper()
 	if os.Getenv("YEET_ISO_INTEGRATION_ROOTNS") != "1" {
-		t.Fatal("run ISO integration tests through tools/test-iso-network.sh so policy is installed only in a disposable root network namespace")
+		t.Fatal("run iso integration tests through tools/test-iso-network.sh so policy is installed only in a disposable root network namespace")
 	}
 	self, selfErr := os.Readlink("/proc/self/ns/net")
 	init, initErr := os.Readlink("/proc/1/ns/net")
@@ -125,7 +125,7 @@ func requireISOIntegrationRootNamespace(t *testing.T) {
 		t.Fatalf("inspect network namespace identity: self=%v init=%v", selfErr, initErr)
 	}
 	if self == init {
-		t.Fatal("ISO integration test refused to modify the initial network namespace")
+		t.Fatal("iso integration test refused to modify the initial network namespace")
 	}
 }
 
@@ -177,7 +177,7 @@ func buildISOIntegrationEndpoint(t *testing.T) string {
 	cmd := exec.Command("go", "build", "-o", out, "./testdata/iso-endpoint")
 	cmd.Dir = filepath.Dir(filename)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build ISO endpoint helper: %v\n%s", err, output)
+		t.Fatalf("build iso endpoint helper: %v\n%s", err, output)
 	}
 	return out
 }
@@ -252,7 +252,7 @@ func (l *isoIntegrationLab) ensurePolicy(specs ...ISOTopologySpec) {
 	}
 	if err := EnsureISOPolicy(context.Background(), rules); err != nil {
 		live, liveErr := readLiveISOPolicy(context.Background(), l.backend)
-		l.t.Fatalf("ensure %s ISO policy: %v\nread live: %v\nwant IPv4:\n%s\nlive IPv4:\n%s\nwant IPv6:\n%s\nlive IPv6:\n%s\nwant ipset:\n%s\nlive ipset:\n%s",
+		l.t.Fatalf("ensure %s iso policy: %v\nread live: %v\nwant IPv4:\n%s\nlive IPv4:\n%s\nwant IPv6:\n%s\nlive IPv6:\n%s\nwant ipset:\n%s\nlive ipset:\n%s",
 			l.backend, err, liveErr,
 			canonicalISOFirewallText(l.backend, rules.IPv4), canonicalISOFirewallText(l.backend, live.IPv4),
 			canonicalISOFirewallText(l.backend, rules.IPv6), canonicalISOFirewallText(l.backend, live.IPv6),
@@ -380,7 +380,7 @@ func (l *isoIntegrationLab) startRootPrivateTargets(port int) {
 func (l *isoIntegrationLab) assertHostConnects(ip string, port int) {
 	l.t.Helper()
 	if output, err := l.runHelper("", "connect", "--address", fmt.Sprintf("%s:%d", ip, port)); err != nil {
-		l.t.Fatalf("host cannot connect to ISO endpoint %s: %v\n%s", ip, err, output)
+		l.t.Fatalf("host cannot connect to iso endpoint %s: %v\n%s", ip, err, output)
 	}
 }
 
@@ -584,7 +584,7 @@ func (l *isoIntegrationLab) runIgnoringError(name string, args ...string) {
 func requireISOIntegrationCommand(t *testing.T, name string) {
 	t.Helper()
 	if _, err := exec.LookPath(name); err != nil {
-		t.Skipf("ISO integration test requires %s", name)
+		t.Skipf("iso integration test requires %s", name)
 	}
 }
 

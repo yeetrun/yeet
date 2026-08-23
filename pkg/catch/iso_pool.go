@@ -246,7 +246,7 @@ func selectISOPool(ctx context.Context, probe isoPoolProbe, persisted []netip.Pr
 			return candidate, nil
 		}
 	}
-	return netip.Prefix{}, fmt.Errorf("no collision-free ISO /16 is available in 172.16.0.0/12")
+	return netip.Prefix{}, fmt.Errorf("no collision-free iso /16 is available in 172.16.0.0/12")
 }
 
 func overlapsAny(candidate netip.Prefix, occupied []netip.Prefix) bool {

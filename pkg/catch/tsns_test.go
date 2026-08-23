@@ -257,11 +257,11 @@ func TestNewTailscaleSystemdUnitUsesPersistedISONamespaceAndActualGateUnit(t *te
 		t.Fatalf("newTailscaleSystemdUnit: %v", err)
 	}
 	if unit.NetNS != "yeet-a172cedcae-ns" {
-		t.Fatalf("NetNS = %q, want persisted ISO namespace", unit.NetNS)
+		t.Fatalf("NetNS = %q, want persisted iso namespace", unit.NetNS)
 	}
 	if unit.Wants != "yeet-demo-ns.service" || unit.After != "yeet-demo-ns.service" ||
 		len(unit.ExecStartPre) != 1 || unit.ExecStartPre[0] != "/bin/systemctl is-active --quiet yeet-demo-ns.service" {
-		t.Fatalf("ISO gate ordering = wants %q after %q pre %#v", unit.Wants, unit.After, unit.ExecStartPre)
+		t.Fatalf("iso gate ordering = wants %q after %q pre %#v", unit.Wants, unit.After, unit.ExecStartPre)
 	}
 }
 
@@ -520,7 +520,7 @@ func TestISOTailscaleConfigKeepsAcceptDNSDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !cfg.AcceptDNS.EqualBool(false) {
-		t.Fatalf("ISO tailscale AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
+		t.Fatalf("iso tailscale AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
 	}
 }
 
@@ -557,7 +557,7 @@ func TestISOTailscaleTopologyKeepsPublicDefaultAndDelegatesTailnetToTS0(t *testi
 	text := rendered.String()
 	wantDefault := "ip netns exec " + allocation.NetNS + " ip route replace default via " + allocation.HostIP.String() + " dev " + allocation.PeerInterface
 	if !strings.Contains(text, wantDefault) {
-		t.Fatalf("topology missing ISO public default %q:\n%s", wantDefault, text)
+		t.Fatalf("topology missing iso public default %q:\n%s", wantDefault, text)
 	}
 	if strings.Contains(text, "default dev ts0") || strings.Contains(text, "default via ts0") {
 		t.Fatalf("topology moved ordinary default to ts0:\n%s", text)

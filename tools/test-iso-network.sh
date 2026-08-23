@@ -9,14 +9,14 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "ISO functional packet-policy integration tests require Linux" >&2
+  echo "iso functional packet-policy integration tests require Linux" >&2
   exit 1
 fi
 
 require_command() {
   local name=$1
   if ! command -v "$name" >/dev/null 2>&1; then
-    echo "ISO functional packet-policy integration tests require $name" >&2
+    echo "iso functional packet-policy integration tests require $name" >&2
     exit 1
   fi
 }

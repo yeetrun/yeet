@@ -918,7 +918,7 @@ func TestCloneVMRecoveryServiceStripsISOStateAndGeneratedArtifacts(t *testing.T)
 	cloned := cloneVMRecoveryService(source, "devbox-copy", "flash/yeet/vms/devbox-copy/vm/d-copy/root")
 
 	if cloned.ISO != nil {
-		t.Fatalf("cloned ISO allocation = %#v, want nil so addresses and component mappings are reallocated", cloned.ISO)
+		t.Fatalf("cloned iso allocation = %#v, want nil so addresses and component mappings are reallocated", cloned.ISO)
 	}
 	for _, name := range []db.ArtifactName{
 		db.ArtifactDockerComposeNetwork, db.ArtifactNetNSService, db.ArtifactNetNSEnv, db.ArtifactNetNSResolv,

@@ -58,7 +58,7 @@ func TestServiceISOJSONRoundTripPreservesPortPresence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.ISO == nil || !reflect.DeepEqual(*got.ISO, want) || !got.PortsPresent {
-		t.Fatalf("ServiceNetwork round trip = %#v, want ISO %#v with ports present", got, want)
+		t.Fatalf("ServiceNetwork round trip = %#v, want iso %#v with ports present", got, want)
 	}
 }
 

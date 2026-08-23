@@ -514,7 +514,7 @@ func TestInfoCatchRendersConfiguredISOPool(t *testing.T) {
 				Active:       2,
 				Quarantined:  1,
 				Tombstoned:   1,
-				Conflict:     "ISO pool aggregate route missing",
+				Conflict:     "iso pool aggregate route missing",
 			},
 		},
 	}
@@ -540,7 +540,7 @@ func TestInfoCatchZeroISOSummaryPreservesJSONCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), `"iso"`) {
-		t.Fatalf("serverInfo JSON = %s, want omitted zero ISO summary", raw)
+		t.Fatalf("serverInfo JSON = %s, want omitted zero iso summary", raw)
 	}
 }
 
@@ -886,7 +886,7 @@ func TestInfoServiceNetworkRowsRenderComposeEndpointsAndAbnormalState(t *testing
 				{Name: "api", IP: "172.30.128.2"},
 				{Name: "worker", IP: "172.30.128.3"},
 			},
-			LastError: "service MYISOAPP ISO network firewall digest mismatch",
+			LastError: "service MYISOAPP iso network firewall digest mismatch",
 		},
 	})
 	assertInfoRows(t, rows, []infoRow{

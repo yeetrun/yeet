@@ -1702,7 +1702,7 @@ func TestRegularNetworkISOAllocationPlanningUsesSharedAllocationLock(t *testing.
 	select {
 	case <-secondEntered:
 		close(releaseFirst)
-		t.Fatal("ISO allocation planning entered while the shared network allocation lock was held")
+		t.Fatal("iso allocation planning entered while the shared network allocation lock was held")
 	case <-time.After(25 * time.Millisecond):
 	}
 	close(releaseFirst)
@@ -1990,7 +1990,7 @@ func TestServiceSetNetworkPlanRetainsNativeAndTimerISOTopologyRejections(t *test
 			_, err := server.planServiceNetworkMutation(context.Background(), "api", cli.ServiceSetFlags{
 				Net: "iso,ts", NetSet: true, TsTags: []string{"tag:app"}, TsTagsSet: true,
 			})
-			if err == nil || !strings.Contains(err.Error(), "ISO supports only iso") {
+			if err == nil || !strings.Contains(err.Error(), "iso supports only iso") {
 				t.Fatalf("planServiceNetworkMutation error = %v, want topology rejection", err)
 			}
 		})
@@ -2004,9 +2004,9 @@ func TestServiceSetNetworkSelectsISOLifecycleForEveryTransitionDirection(t *test
 		flags   cli.ServiceSetFlags
 		want    serviceNetworkISOTransition
 	}{
-		{name: "regular to ISO", current: []string{"host"}, flags: cli.ServiceSetFlags{Net: "iso", NetSet: true}, want: serviceNetworkRegularToISO},
-		{name: "ISO to ISO", current: []string{"iso"}, flags: cli.ServiceSetFlags{Net: "iso", NetSet: true, TsAuthKey: "rotate", TsAuthKeySet: true}, want: serviceNetworkISOToISO},
-		{name: "ISO to regular", current: []string{"iso"}, flags: cli.ServiceSetFlags{Net: "host", NetSet: true}, want: serviceNetworkISOToRegular},
+		{name: "regular to iso", current: []string{"host"}, flags: cli.ServiceSetFlags{Net: "iso", NetSet: true}, want: serviceNetworkRegularToISO},
+		{name: "iso to iso", current: []string{"iso"}, flags: cli.ServiceSetFlags{Net: "iso", NetSet: true, TsAuthKey: "rotate", TsAuthKeySet: true}, want: serviceNetworkISOToISO},
+		{name: "iso to regular", current: []string{"iso"}, flags: cli.ServiceSetFlags{Net: "host", NetSet: true}, want: serviceNetworkISOToRegular},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newTestServer(t)
@@ -2027,13 +2027,13 @@ func TestServiceSetNetworkSelectsISOLifecycleForEveryTransitionDirection(t *test
 			})
 			isServiceRunningForNetworkMutation = func(*Server, string) (bool, error) { return false, nil }
 			newRegularServiceNetworkMutationSteps = func(*Server, *serviceNetworkMutationPlan) serviceNetworkMutationSteps {
-				t.Fatal("ISO transition selected the regular-only lifecycle")
+				t.Fatal("iso transition selected the regular-only lifecycle")
 				return nil
 			}
 			recorder := &recordingServiceNetworkMutationSteps{}
 			newISOServiceNetworkMutationSteps = func(_ *Server, plan *serviceNetworkMutationPlan, direction serviceNetworkISOTransition) serviceNetworkMutationSteps {
 				if direction != tt.want {
-					t.Fatalf("ISO transition direction = %q, want %q", direction, tt.want)
+					t.Fatalf("iso transition direction = %q, want %q", direction, tt.want)
 				}
 				if plan.name != "api" {
 					t.Fatalf("plan name = %q", plan.name)
@@ -2075,7 +2075,7 @@ func TestServiceSetISOLifecycleRestoresOrFailsClosedOnEveryPostStageFailure(t *t
 			}
 
 			if err := server.updateServiceNetworkLocked(context.Background(), "api", cli.ServiceSetFlags{Net: "iso", NetSet: true}, io.Discard); err == nil {
-				t.Fatal("ISO transition failure returned nil")
+				t.Fatal("iso transition failure returned nil")
 			}
 			if recorder.events[len(recorder.events)-1] != "restore" {
 				t.Fatalf("events = %v, want restore last", recorder.events)
@@ -2104,7 +2104,7 @@ func TestServiceSetISOLifecycleRestoresOrFailsClosedOnEveryPostStageFailure(t *t
 		return recorder
 	}
 	if err := server.updateServiceNetworkLocked(context.Background(), "api", cli.ServiceSetFlags{Net: "iso", NetSet: true}, io.Discard); err == nil {
-		t.Fatal("ISO transition failure returned nil")
+		t.Fatal("iso transition failure returned nil")
 	}
 	if want := []string{"stage", "stop-previous", "activate", "restore", "fail-closed"}; !slices.Equal(recorder.events, want) {
 		t.Fatalf("events = %v, want %v", recorder.events, want)
@@ -2150,10 +2150,10 @@ func TestStageNativeISOServiceNetworkReplacementPreservesPayloadAndUsesFreshOwne
 		t.Fatalf("payload generation changed: %#v", target)
 	}
 	if target.ISO == nil || target.ISO.Project.IsValid() || target.ISO.NetNS == "" {
-		t.Fatalf("native ISO allocation = %#v", target.ISO)
+		t.Fatalf("native iso allocation = %#v", target.ISO)
 	}
 	if staged == nil || !reflect.DeepEqual(staged.ISO, target.ISO) {
-		t.Fatalf("reserved DB record = %#v, target ISO = %#v", staged, target.ISO)
+		t.Fatalf("reserved DB record = %#v, target iso = %#v", staged, target.ISO)
 	}
 	for _, name := range []db.ArtifactName{db.ArtifactSystemdUnit, db.ArtifactNetNSService, db.ArtifactNetNSResolv} {
 		path, ok := target.Artifacts.Gen(name, target.Generation)
@@ -2180,12 +2180,12 @@ func TestStageNativeISOServiceNetworkReplacementPreservesPayloadAndUsesFreshOwne
 		"BindReadOnlyPaths=",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("native ISO unit missing %q:\n%s", want, text)
+			t.Fatalf("native iso unit missing %q:\n%s", want, text)
 		}
 	}
 	for _, forbidden := range []string{"NoNewPrivileges=", "CapabilityBoundingSet=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
 		if strings.Contains(text, forbidden) {
-			t.Fatalf("native ISO unit added privilege policy %q:\n%s", forbidden, text)
+			t.Fatalf("native iso unit added privilege policy %q:\n%s", forbidden, text)
 		}
 	}
 }
@@ -2219,10 +2219,10 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		}
 		got := view.AsStruct()
 		if got.ISO == nil || !reflect.DeepEqual(got.Network.Modes, []string{"iso"}) || got.ISO.State != string(iso.StateStopped) {
-			t.Fatalf("committed native ISO record = %#v", got)
+			t.Fatalf("committed native iso record = %#v", got)
 		}
 		if got.Generation != plan.previous.Generation || got.LatestGeneration != plan.previous.LatestGeneration {
-			t.Fatalf("generation changed during ISO commit: %#v", got)
+			t.Fatalf("generation changed during iso commit: %#v", got)
 		}
 		if _, err := os.Stat(originalUnit); !os.IsNotExist(err) {
 			t.Fatalf("superseded unit remains after committed artifact cleanup: %v", err)
@@ -2239,7 +2239,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		}
 		stagedUnit, ok := mutation.target.Artifacts.Gen(db.ArtifactSystemdUnit, mutation.target.Generation)
 		if !ok {
-			t.Fatal("staged ISO unit is missing")
+			t.Fatal("staged iso unit is missing")
 		}
 		if err := mutation.DiscardStagedArtifacts(); err != nil {
 			t.Fatal(err)
@@ -2249,7 +2249,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(view.AsStruct(), plan.previous) {
-			t.Fatalf("discarded ISO stage record = %#v, want previous %#v", view.AsStruct(), plan.previous)
+			t.Fatalf("discarded iso stage record = %#v, want previous %#v", view.AsStruct(), plan.previous)
 		}
 		if _, err := os.Stat(stagedUnit); !os.IsNotExist(err) {
 			t.Fatalf("discarded staged unit remains: %v", err)
@@ -2259,7 +2259,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		}
 	})
 
-	t.Run("discard conflict preserves concurrent ISO record", func(t *testing.T) {
+	t.Run("discard conflict preserves concurrent iso record", func(t *testing.T) {
 		stubServiceNetworkStaticVerification(t)
 		server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
@@ -2286,7 +2286,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		}
 	})
 
-	t.Run("reservation rollback conflict preserves concurrent ISO record", func(t *testing.T) {
+	t.Run("reservation rollback conflict preserves concurrent iso record", func(t *testing.T) {
 		server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 		stage, err := newISONativeNetworkStage(context.Background(), server, plan)
 		if err != nil {
@@ -2316,7 +2316,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		}
 	})
 
-	t.Run("commit conflict does not overwrite concurrent ISO record", func(t *testing.T) {
+	t.Run("commit conflict does not overwrite concurrent iso record", func(t *testing.T) {
 		stubServiceNetworkStaticVerification(t)
 		server, plan, _ := newNativeISOServiceNetworkMutationFixture(t, false)
 		stubNativeISOServiceNetworkMutationRuntime(t)
@@ -2344,7 +2344,7 @@ func TestNativeISOServiceNetworkMutationCommitsAndDiscardsStagedReplacement(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during ISO network mutation") {
+		if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during iso network mutation") {
 			t.Fatalf("commit conflict error = %v", err)
 		}
 		if err := mutation.Restore(context.Background()); err == nil || !strings.Contains(err.Error(), "changed while rolling back") {
@@ -2425,7 +2425,7 @@ func TestComposeISOCommitConflictRecoveryDoesNotStopConcurrentRuntime(t *testing
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"app": concurrent.Clone()}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during ISO network mutation") {
+	if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during iso network mutation") {
 		t.Fatalf("Commit error = %v, want exact-record conflict", err)
 	}
 	if err := mutation.Restore(context.Background()); err == nil || !strings.Contains(err.Error(), "changed while rolling back") {
@@ -2466,14 +2466,14 @@ func TestISOToISOCommitConflictRecoveryDoesNotStopConcurrentRuntime(t *testing.T
 	if err := mutation.Stage(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.markISOState("api", string(iso.StateQuarantined), errors.New("concurrent ISO replacement")); err != nil {
+	if err := server.markISOState("api", string(iso.StateQuarantined), errors.New("concurrent iso replacement")); err != nil {
 		t.Fatal(err)
 	}
 	concurrent, err := server.serviceView("api")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during ISO network mutation") {
+	if err := mutation.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "changed during iso network mutation") {
 		t.Fatalf("Commit error = %v, want exact-record conflict", err)
 	}
 	if err := mutation.Restore(context.Background()); err == nil || !strings.Contains(err.Error(), "changed while rolling back") {
@@ -2484,10 +2484,10 @@ func TestISOToISOCommitConflictRecoveryDoesNotStopConcurrentRuntime(t *testing.T
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got.AsStruct(), concurrent.AsStruct()) {
-		t.Fatalf("concurrent ISO record changed: got %#v, want %#v", got.AsStruct(), concurrent.AsStruct())
+		t.Fatalf("concurrent iso record changed: got %#v, want %#v", got.AsStruct(), concurrent.AsStruct())
 	}
 	if stopCalls != 0 || removeTopologyCalls != 0 {
-		t.Fatalf("ISO-to-ISO commit conflict invoked runtime cleanup: stops=%d topology-removals=%d", stopCalls, removeTopologyCalls)
+		t.Fatalf("iso-to-iso commit conflict invoked runtime cleanup: stops=%d topology-removals=%d", stopCalls, removeTopologyCalls)
 	}
 }
 
@@ -2511,7 +2511,7 @@ func TestISOServiceNetworkRestoreClaimsStagedRuntimeBeforeCleanup(t *testing.T) 
 			}
 			stagedUnit, ok := mutation.target.Artifacts.Gen(db.ArtifactSystemdUnit, mutation.target.Generation)
 			if !ok {
-				t.Fatal("staged ISO unit is missing")
+				t.Fatal("staged iso unit is missing")
 			}
 			oldRestore := activatePreviousISONetworkRuntimeForMutation
 			restoreCalls := 0
@@ -2537,7 +2537,7 @@ func TestISOServiceNetworkRestoreClaimsStagedRuntimeBeforeCleanup(t *testing.T) 
 						return nil, err
 					}
 					if current.ISO().State() != string(iso.StateTombstoned) {
-						return nil, fmt.Errorf("stop observed ISO state %q, want tombstoned", current.ISO().State())
+						return nil, fmt.Errorf("stop observed iso state %q, want tombstoned", current.ISO().State())
 					}
 					if tt.stopErr != nil {
 						return nil, tt.stopErr
@@ -2551,7 +2551,7 @@ func TestISOServiceNetworkRestoreClaimsStagedRuntimeBeforeCleanup(t *testing.T) 
 					return err
 				}
 				if current.ISO().State() != string(iso.StateTombstoned) {
-					return fmt.Errorf("topology cleanup observed ISO state %q, want tombstoned", current.ISO().State())
+					return fmt.Errorf("topology cleanup observed iso state %q, want tombstoned", current.ISO().State())
 				}
 				return nil
 			}
@@ -2599,7 +2599,7 @@ func TestISOServiceNetworkFailClosedPreservesConcurrentServiceRecords(t *testing
 		{name: "identity", mutate: func(_ *testing.T, service *db.Service) {
 			service.Identity = &db.ServiceIdentity{RequestedUser: "2000", RequestedGroup: "2001", UID: 2000, GID: 2001}
 		}},
-		{name: "concurrent non-ISO replacement", mutate: func(t *testing.T, service *db.Service) {
+		{name: "concurrent non-iso replacement", mutate: func(t *testing.T, service *db.Service) {
 			t.Helper()
 			regularUnit := filepath.Join(serviceBinDirForRoot(service.ServiceRoot), "api-concurrent-regular.service")
 			regularDefinition := "[Unit]\nDescription=concurrent regular replacement\n\n[Service]\nExecStart=/srv/api/bin/api-regular\n"
@@ -2625,7 +2625,7 @@ func TestISOServiceNetworkFailClosedPreservesConcurrentServiceRecords(t *testing
 			}
 			for name := range isoNetworkArtifactNames {
 				if _, exists := service.Artifacts[name]; exists {
-					t.Fatalf("concurrent regular record retained ISO artifact %q", name)
+					t.Fatalf("concurrent regular record retained iso artifact %q", name)
 				}
 			}
 			unit, ok := service.Artifacts.Gen(db.ArtifactSystemdUnit, service.Generation)
@@ -2646,7 +2646,7 @@ func TestISOServiceNetworkFailClosedPreservesConcurrentServiceRecords(t *testing
 		{name: "artifacts", mutate: func(_ *testing.T, service *db.Service) {
 			service.Artifacts[db.ArtifactBinary] = &db.Artifact{Refs: map[db.ArtifactRef]string{"latest": "/concurrent/api"}}
 		}},
-		{name: "concurrent ISO replacement", mutate: func(_ *testing.T, service *db.Service) {
+		{name: "concurrent iso replacement", mutate: func(_ *testing.T, service *db.Service) {
 			service.Network = &db.ServiceNetworkConfig{Modes: []string{"iso"}}
 			service.ISO = newDBISOAllocation("api", isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}}, netip.MustParsePrefix("172.30.4.0/30"))
 			service.ISO.State = string(iso.StateReady)
@@ -2672,7 +2672,7 @@ func TestISOServiceNetworkFailClosedPreservesConcurrentServiceRecords(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := mutation.FailClosed(context.Background()); err == nil || !strings.Contains(err.Error(), "changed before ISO fail-closed tombstone") {
+			if err := mutation.FailClosed(context.Background()); err == nil || !strings.Contains(err.Error(), "changed before iso fail-closed tombstone") {
 				t.Fatalf("FailClosed error = %v, want exact-record conflict", err)
 			}
 			got, err := server.serviceView("api")
@@ -2722,7 +2722,7 @@ func TestISOStageRollbackPreservesLiveReferencedOwnedArtifact(t *testing.T) {
 	}
 	stagedUnit, ok := mutation.target.Artifacts.Gen(db.ArtifactSystemdUnit, mutation.target.Generation)
 	if !ok {
-		t.Fatal("staged ISO unit is missing")
+		t.Fatal("staged iso unit is missing")
 	}
 	if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
 		service.Generation++
@@ -3023,7 +3023,7 @@ func TestNativeISOToRegularMutationRestoresAfterPostCommitActivationFailure(t *t
 		t.Fatalf("post-commit activation error = %v, want context canceled", err)
 	}
 	if !mutation.committed {
-		t.Fatal("ISO-to-regular DB commit was not recorded before activation failure")
+		t.Fatal("iso-to-regular DB commit was not recorded before activation failure")
 	}
 	committedView, err := server.serviceView("api")
 	if err != nil {
@@ -3046,7 +3046,7 @@ func TestNativeISOToRegularMutationRestoresAfterPostCommitActivationFailure(t *t
 		t.Fatalf("failed regular replacement artifact remains: %v", err)
 	}
 	if _, err := os.Stat(originalUnit); err != nil {
-		t.Fatalf("original ISO unit was not preserved: %v", err)
+		t.Fatalf("original iso unit was not preserved: %v", err)
 	}
 }
 
@@ -3103,9 +3103,9 @@ func TestISOToRegularCommittedRestoreStopFailureRetainsAttributedTombstone(t *te
 			record := got.AsStruct()
 			want := previous.Clone()
 			want.ISO.State = string(iso.StateTombstoned)
-			want.ISO.LastError = "rolling back staged ISO network"
+			want.ISO.LastError = "rolling back staged iso network"
 			if !reflect.DeepEqual(record, want) {
-				t.Fatalf("attributed ISO-to-regular rollback marker = %#v", got.AsStruct())
+				t.Fatalf("attributed iso-to-regular rollback marker = %#v", got.AsStruct())
 			}
 			if serviceType == db.ServiceTypeSystemd && len(*systemctlCalls) == 0 {
 				t.Fatal("attributed systemd rollback did not attempt replacement stop")
@@ -3222,14 +3222,14 @@ func TestISOServiceNetworkRestoreClaimsQuarantinedStagedRecord(t *testing.T) {
 	}
 	want := target.Clone()
 	want.ISO.State = string(iso.StateTombstoned)
-	want.ISO.LastError = "rolling back staged ISO network"
+	want.ISO.LastError = "rolling back staged iso network"
 	if !reflect.DeepEqual(view.AsStruct(), want) {
 		t.Fatalf("claimed record = %#v, want %#v", view.AsStruct(), want)
 	}
 }
 
 func TestISOToRegularRestoreHandlesPostPublicationClaimOutcomes(t *testing.T) {
-	publicationErr := errors.New("injected ISO-to-regular claim publication failure")
+	publicationErr := errors.New("injected iso-to-regular claim publication failure")
 	for _, serviceType := range []db.ServiceType{db.ServiceTypeSystemd, db.ServiceTypeDockerCompose} {
 		for _, committed := range []bool{true, false} {
 			name := string(serviceType) + "/uncommitted"
@@ -3250,7 +3250,7 @@ func TestISOToRegularRestoreHandlesPostPublicationClaimOutcomes(t *testing.T) {
 					return updated, &db.PostPublicationError{Err: publicationErr, MutationCommitted: true}
 				}
 				t.Cleanup(func() { mutateServiceNetworkRestoreData = oldMutate })
-				calls, dockerLog := recordRestoreOwnershipCallbacks(t, serviceType, errors.New("hold attributed ISO-to-regular marker"))
+				calls, dockerLog := recordRestoreOwnershipCallbacks(t, serviceType, errors.New("hold attributed iso-to-regular marker"))
 
 				err := mutation.Restore(context.Background())
 				if !errors.Is(err, publicationErr) {
@@ -3269,7 +3269,7 @@ func TestISOToRegularRestoreHandlesPostPublicationClaimOutcomes(t *testing.T) {
 				}
 				want := previous.Clone()
 				want.ISO.State = string(iso.StateTombstoned)
-				want.ISO.LastError = "rolling back staged ISO network"
+				want.ISO.LastError = "rolling back staged iso network"
 				if !reflect.DeepEqual(current.AsStruct(), want) {
 					t.Fatalf("committed claim marker = %#v, want %#v", current.AsStruct(), want)
 				}
@@ -3783,7 +3783,7 @@ func TestISOToRegularFailClosedRetriesAndVerifiesRegularComposeTarget(t *testing
 		t.Fatal(viewErr)
 	}
 	if view.ISO().State() != string(iso.StateTombstoned) {
-		t.Fatalf("ISO-to-regular fail-closed record = %#v, want tombstone", view.AsStruct())
+		t.Fatalf("iso-to-regular fail-closed record = %#v, want tombstone", view.AsStruct())
 	}
 }
 
@@ -3909,10 +3909,10 @@ func TestNativeISOServiceNetworkMutationFailClosedRetainsTombstone(t *testing.T)
 		t.Fatal(err)
 	}
 	if view.ISO().State() != string(iso.StateTombstoned) || !strings.Contains(view.ISO().LastError(), "restoration failed") {
-		t.Fatalf("fail-closed ISO state = %#v", view.ISO().AsStruct())
+		t.Fatalf("fail-closed iso state = %#v", view.ISO().AsStruct())
 	}
 	if stopCalls == 0 {
-		t.Fatal("attributable fail-closed tombstone did not stop the ISO runtime")
+		t.Fatal("attributable fail-closed tombstone did not stop the iso runtime")
 	}
 }
 
@@ -4285,11 +4285,11 @@ func TestISOToRegularCombinedIdentitySandboxPreflightPrecedesRuntimeBoundary(t *
 	err = operation.runAfterStage()
 	operation.finish(&err)
 	if !errors.Is(err, postBoundary) {
-		t.Fatalf("combined ISO-to-regular error = %v, want %v", err, postBoundary)
+		t.Fatalf("combined iso-to-regular error = %v, want %v", err, postBoundary)
 	}
 	wantPrefix := []string{"ensure", "validate", "probe", "verify", "stop", "migrate"}
 	if len(events) < len(wantPrefix) || !reflect.DeepEqual(events[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("combined ISO-to-regular events = %v, want prefix %v", events, wantPrefix)
+		t.Fatalf("combined iso-to-regular events = %v, want prefix %v", events, wantPrefix)
 	}
 	current, viewErr := server.serviceView(plan.name)
 	if viewErr != nil {
@@ -4301,10 +4301,10 @@ func TestISOToRegularCombinedIdentitySandboxPreflightPrecedesRuntimeBoundary(t *
 		t.Fatalf("render combined recovery records: want=%v got=%v", wantErr, gotErr)
 	}
 	if !bytes.Equal(gotJSON, wantJSON) {
-		t.Fatalf("combined ISO-to-regular recovery mismatch:\nwant %s\n got %s", wantJSON, gotJSON)
+		t.Fatalf("combined iso-to-regular recovery mismatch:\nwant %s\n got %s", wantJSON, gotJSON)
 	}
 	if _, statErr := os.Stat(originalUnit); statErr != nil {
-		t.Fatalf("combined ISO-to-regular recovery lost previous unit: %v", statErr)
+		t.Fatalf("combined iso-to-regular recovery lost previous unit: %v", statErr)
 	}
 }
 
@@ -4426,7 +4426,7 @@ func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRunti
 					return err
 				}
 				if !strings.Contains(string(raw), "NetworkNamespacePath=/var/run/netns/") || !strings.Contains(string(raw), bubblewrapPath) {
-					return errors.New("final combined unit omitted ISO namespace or Bubblewrap")
+					return errors.New("final combined unit omitted iso namespace or Bubblewrap")
 				}
 				if tt.concurrentAfterVerify {
 					concurrent = previous.Clone()
@@ -4514,7 +4514,7 @@ func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRunti
 			switch {
 			case tt.verifyErr != nil:
 				if !errors.Is(err, tt.verifyErr) {
-					t.Fatalf("regular-to-ISO preflight error = %v, want %v", err, tt.verifyErr)
+					t.Fatalf("regular-to-iso preflight error = %v, want %v", err, tt.verifyErr)
 				}
 				if topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0 {
 					t.Fatalf("preflight failure topology/runtime/migration calls = %d/%d/%d, want zero", topologyCalls, runtimeCalls, migrationCalls)
@@ -4538,13 +4538,13 @@ func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRunti
 					t.Fatalf("concurrent allocation claimant was not preserved: record=%#v error=%v", peer.AsStruct(), peerErr)
 				}
 			case !errors.Is(err, migrationFailure):
-				t.Fatalf("regular-to-ISO post-topology error = %v, want %v", err, migrationFailure)
+				t.Fatalf("regular-to-iso post-topology error = %v, want %v", err, migrationFailure)
 			}
 			if preflightViolation != nil {
 				t.Fatal(preflightViolation)
 			}
 			if !reflect.DeepEqual(events, tt.wantEvents) {
-				t.Fatalf("regular-to-ISO events = %v, want %v", events, tt.wantEvents)
+				t.Fatalf("regular-to-iso events = %v, want %v", events, tt.wantEvents)
 			}
 			current, viewErr := server.serviceView(previous.Name)
 			if viewErr != nil {
@@ -4555,7 +4555,7 @@ func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRunti
 				wantRecord = concurrent
 			}
 			if !reflect.DeepEqual(current.AsStruct(), wantRecord) {
-				t.Fatalf("regular-to-ISO failure record = %#v, want exact %#v (mutation error: %v)", current.AsStruct(), wantRecord, err)
+				t.Fatalf("regular-to-iso failure record = %#v, want exact %#v (mutation error: %v)", current.AsStruct(), wantRecord, err)
 			}
 			for _, pattern := range []string{"iso-resolv-*", "iso-gate-*", "api-network-*"} {
 				matches, globErr := filepath.Glob(filepath.Join(serviceBinDirForRoot(previous.ServiceRoot), pattern))
@@ -4563,7 +4563,7 @@ func TestRegularToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRunti
 					t.Fatal(globErr)
 				}
 				if len(matches) != 0 {
-					t.Fatalf("regular-to-ISO failure left staged %s artifacts: %v", pattern, matches)
+					t.Fatalf("regular-to-iso failure left staged %s artifacts: %v", pattern, matches)
 				}
 			}
 		})
@@ -4625,8 +4625,8 @@ func newRegularToISOCombinedSandboxFixture(t *testing.T) (*Server, *db.Service, 
 }
 
 func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t *testing.T) {
-	preflightFailure := errors.New("injected ISO-to-ISO final sandbox verification failure")
-	migrationFailure := errors.New("injected ISO-to-ISO post-publication migration failure")
+	preflightFailure := errors.New("injected iso-to-iso final sandbox verification failure")
+	migrationFailure := errors.New("injected iso-to-iso post-publication migration failure")
 	for _, tt := range []struct {
 		name             string
 		verifyErr        error
@@ -4647,7 +4647,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 			wantFinalSuccess: true,
 		},
 		{
-			name:         "post-publication failure restores previous ISO runtime",
+			name:         "post-publication failure restores previous iso runtime",
 			migrationErr: migrationFailure,
 			wantEvents:   []string{"ensure", "validate", "probe", "verify", "reservation", "topology", "migrate", "restore-topology"},
 		},
@@ -4709,10 +4709,10 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 					return
 				}
 				if preflightViolation == nil && !reflect.DeepEqual(current.AsStruct(), previous) {
-					preflightViolation = fmt.Errorf("%s: database changed before final ISO-to-ISO sandbox preflight completed", stage)
+					preflightViolation = fmt.Errorf("%s: database changed before final iso-to-iso sandbox preflight completed", stage)
 				}
 				if preflightViolation == nil && (topologyCalls != 0 || runtimeCalls != 0 || migrationCalls != 0) {
-					preflightViolation = fmt.Errorf("%s: topology/runtime/migration calls = %d/%d/%d before final ISO-to-ISO sandbox preflight completed", stage, topologyCalls, runtimeCalls, migrationCalls)
+					preflightViolation = fmt.Errorf("%s: topology/runtime/migration calls = %d/%d/%d before final iso-to-iso sandbox preflight completed", stage, topologyCalls, runtimeCalls, migrationCalls)
 				}
 			}
 			ensureBubblewrapForServiceSandboxMutation = func(context.Context) error {
@@ -4724,7 +4724,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				events = append(events, "validate")
 				observePreflight("validate")
 				if !active || req.Policy.State != "on" {
-					return serviceSandboxPolicy{}, fmt.Errorf("ISO-to-ISO validation active/state = %t/%q", active, req.Policy.State)
+					return serviceSandboxPolicy{}, fmt.Errorf("iso-to-iso validation active/state = %t/%q", active, req.Policy.State)
 				}
 				preflightResolver = req.ResolverSource
 				return req.Policy, nil
@@ -4733,14 +4733,14 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				events = append(events, "probe")
 				observePreflight("probe")
 				if uid != uint32(os.Geteuid()) || gid != uint32(os.Getegid()) {
-					return fmt.Errorf("ISO-to-ISO final sandbox probe identity = %d:%d", uid, gid)
+					return fmt.Errorf("iso-to-iso final sandbox probe identity = %d:%d", uid, gid)
 				}
 				for _, mount := range plan.Mounts {
 					if mount.Source == preflightResolver && mount.Destination == "/etc/resolv.conf" {
 						return nil
 					}
 				}
-				return fmt.Errorf("ISO-to-ISO final sandbox probe omitted resolver %q", preflightResolver)
+				return fmt.Errorf("iso-to-iso final sandbox probe omitted resolver %q", preflightResolver)
 			}
 			verifyGeneratedSystemdUnitForSandboxMutation = func(_ context.Context, path string) error {
 				events = append(events, "verify")
@@ -4750,7 +4750,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 					return err
 				}
 				if !strings.Contains(string(raw), bubblewrapPath) || !strings.Contains(string(raw), "NetworkNamespacePath=/var/run/netns/"+previous.ISO.NetNS) {
-					return errors.New("final ISO-to-ISO unit omitted Bubblewrap or stable namespace")
+					return errors.New("final iso-to-iso unit omitted Bubblewrap or stable namespace")
 				}
 				switch {
 				case tt.sameServiceRace:
@@ -4793,14 +4793,14 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 					return nil
 				}
 				if current.ISO().State() != string(iso.StateReserved) || !reflect.DeepEqual(current.ISO().AsStruct(), &spec.Allocation) {
-					return fmt.Errorf("published ISO-to-ISO record/topology mismatch: %#v / %#v", current.AsStruct(), spec.Allocation)
+					return fmt.Errorf("published iso-to-iso record/topology mismatch: %#v / %#v", current.AsStruct(), spec.Allocation)
 				}
 				if spec.Allocation.Link != previous.ISO.Link || spec.Allocation.NetNS != previous.ISO.NetNS || !reflect.DeepEqual(spec.Allocation.DesiredModes, []string{"iso"}) {
-					return fmt.Errorf("published ISO-to-ISO allocation was not the stable planned target: %#v", spec.Allocation)
+					return fmt.Errorf("published iso-to-iso allocation was not the stable planned target: %#v", spec.Allocation)
 				}
 				raw, err := os.ReadFile(preflightResolver)
 				if err != nil || string(raw) != "nameserver "+spec.Allocation.HostIP.String()+"\n" {
-					return fmt.Errorf("preflighted ISO-to-ISO resolver/allocation mismatch: %q: %w", raw, err)
+					return fmt.Errorf("preflighted iso-to-iso resolver/allocation mismatch: %q: %w", raw, err)
 				}
 				published = spec.Allocation
 				events = append(events, "reservation", "topology")
@@ -4823,7 +4823,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				events = append(events, "migrate")
 				migrationCalls++
 				if request.TargetService == nil || request.TargetService.ISO == nil || !reflect.DeepEqual(request.TargetService.ISO, &published) {
-					return serviceIdentityMigrationResult{}, fmt.Errorf("ISO-to-ISO migration target allocation differs from preflighted publication: %#v", request.TargetService)
+					return serviceIdentityMigrationResult{}, fmt.Errorf("iso-to-iso migration target allocation differs from preflighted publication: %#v", request.TargetService)
 				}
 				if tt.migrationErr != nil {
 					return serviceIdentityMigrationResult{}, tt.migrationErr
@@ -4832,7 +4832,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				_, err := server.cfg.DB.MutateData(func(data *db.Data) error {
 					current := data.Services[previous.Name]
 					if current == nil || current.ISO == nil || !reflect.DeepEqual(current.ISO, &published) {
-						return fmt.Errorf("migration observed unpreflighted ISO-to-ISO publication: %#v", current)
+						return fmt.Errorf("migration observed unpreflighted iso-to-iso publication: %#v", current)
 					}
 					data.Services[previous.Name] = migratedTarget.Clone()
 					return nil
@@ -4844,15 +4844,15 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 			switch {
 			case tt.verifyErr != nil:
 				if !errors.Is(err, tt.verifyErr) {
-					t.Fatalf("ISO-to-ISO preflight error = %v, want %v", err, tt.verifyErr)
+					t.Fatalf("iso-to-iso preflight error = %v, want %v", err, tt.verifyErr)
 				}
 			case tt.migrationErr != nil:
 				if !errors.Is(err, tt.migrationErr) {
-					t.Fatalf("ISO-to-ISO post-publication error = %v, want %v", err, tt.migrationErr)
+					t.Fatalf("iso-to-iso post-publication error = %v, want %v", err, tt.migrationErr)
 				}
 			case tt.sameServiceRace || tt.peerAllocation:
 				if err == nil {
-					t.Fatal("ISO-to-ISO publication race unexpectedly reached runtime")
+					t.Fatal("iso-to-iso publication race unexpectedly reached runtime")
 				}
 			case tt.wantFinalSuccess:
 				if err != nil {
@@ -4863,7 +4863,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				t.Fatal(preflightViolation)
 			}
 			if !reflect.DeepEqual(events, tt.wantEvents) {
-				t.Fatalf("ISO-to-ISO events = %v, want %v", events, tt.wantEvents)
+				t.Fatalf("iso-to-iso events = %v, want %v", events, tt.wantEvents)
 			}
 			current, viewErr := server.serviceView(previous.Name)
 			if viewErr != nil {
@@ -4875,7 +4875,7 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 				wantRecord = concurrent
 			case tt.wantFinalSuccess:
 				if migratedTarget == nil {
-					t.Fatal("successful ISO-to-ISO mutation did not migrate the preflighted target")
+					t.Fatal("successful iso-to-iso mutation did not migrate the preflighted target")
 				}
 				wantRecord = migratedTarget.Clone()
 				wantRecord.ISO.State = string(iso.StateStopped)
@@ -4883,20 +4883,20 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 			if !serviceNetworkRecordsEqual(current.AsStruct(), wantRecord) {
 				gotJSON, gotJSONErr := json.MarshalIndent(current.AsStruct(), "", "  ")
 				wantJSON, wantJSONErr := json.MarshalIndent(wantRecord, "", "  ")
-				t.Fatalf("ISO-to-ISO final record mismatch (mutation error: %v, JSON errors: %v/%v):\n got %s\nwant %s", err, gotJSONErr, wantJSONErr, gotJSON, wantJSON)
+				t.Fatalf("iso-to-iso final record mismatch (mutation error: %v, JSON errors: %v/%v):\n got %s\nwant %s", err, gotJSONErr, wantJSONErr, gotJSON, wantJSON)
 			}
 			if tt.peerAllocation {
 				peer, peerErr := server.serviceView("peer")
 				if peerErr != nil || peer.ISO().AsStruct() == nil {
-					t.Fatalf("ISO-to-ISO peer allocation race was not preserved: %#v, %v", peer.AsStruct(), peerErr)
+					t.Fatalf("iso-to-iso peer allocation race was not preserved: %#v, %v", peer.AsStruct(), peerErr)
 				}
 			}
 			if !tt.wantFinalSuccess {
 				if topologyCalls != 0 && tt.migrationErr == nil {
-					t.Fatalf("ISO-to-ISO failure reached topology %d times", topologyCalls)
+					t.Fatalf("iso-to-iso failure reached topology %d times", topologyCalls)
 				}
 				if migrationCalls != 0 && tt.migrationErr == nil {
-					t.Fatalf("ISO-to-ISO failure reached migration %d times", migrationCalls)
+					t.Fatalf("iso-to-iso failure reached migration %d times", migrationCalls)
 				}
 				for _, path := range []string{
 					exactServiceArtifact(previous, db.ArtifactSystemdUnit),
@@ -4904,13 +4904,13 @@ func TestISOToISOCombinedIdentitySandboxPreflightPrecedesReservationAndRuntime(t
 					exactServiceArtifact(previous, db.ArtifactNetNSService),
 				} {
 					if _, statErr := os.Stat(path); statErr != nil {
-						t.Fatalf("ISO-to-ISO recovery lost previous artifact %s: %v", path, statErr)
+						t.Fatalf("iso-to-iso recovery lost previous artifact %s: %v", path, statErr)
 					}
 				}
 				assertNoISOToISOProvisionalArtifacts(t, previous)
 			}
 			if tt.migrationErr != nil && (removeCalls == 0 || topologyCalls < 2) {
-				t.Fatalf("ISO-to-ISO post-publication recovery remove/topology calls = %d/%d, want removal and restored topology", removeCalls, topologyCalls)
+				t.Fatalf("iso-to-iso post-publication recovery remove/topology calls = %d/%d, want removal and restored topology", removeCalls, topologyCalls)
 			}
 		})
 	}
@@ -4933,7 +4933,7 @@ func newISOToISOCombinedSandboxFixture(t *testing.T) (*Server, *db.Service, cli.
 		t.Fatal(err)
 	}
 	gate := filepath.Join(serviceBinDirForRoot(root), "current-netns.service")
-	if err := os.WriteFile(gate, []byte("[Unit]\nDescription=api current ISO namespace\n"), 0o644); err != nil {
+	if err := os.WriteFile(gate, []byte("[Unit]\nDescription=api current iso namespace\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	previous.Artifacts[db.ArtifactNetNSResolv] = &db.Artifact{Refs: map[db.ArtifactRef]string{
@@ -4992,7 +4992,7 @@ func assertNoISOToISOProvisionalArtifacts(t *testing.T, service *db.Service) {
 			t.Fatal(err)
 		}
 		if len(matches) != 0 {
-			t.Fatalf("ISO-to-ISO failure left provisional %s artifacts: %v", pattern, matches)
+			t.Fatalf("iso-to-iso failure left provisional %s artifacts: %v", pattern, matches)
 		}
 	}
 }
@@ -5140,7 +5140,7 @@ func TestServiceSetRunAsAndISOCommitsOrRollsBackAtomically(t *testing.T) {
 			err := operation.runPrepared(request, false)
 			operation.finish(&err)
 			if tt.wantErr && err == nil {
-				t.Fatal("combined run-as and ISO mutation succeeded, want failure")
+				t.Fatal("combined run-as and iso mutation succeeded, want failure")
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatal(err)

@@ -507,15 +507,15 @@ yeet rm <svc>
 
 If a native `--net=iso` service is quarantined, `start` and `restart` leave it
 stopped and preserve the recorded diagnostic. Correct the reported isolation
-failure, then explicitly revalidate and readmit it:
+failure, then inspect the service before recovering the quarantined record
+manually on the Catch host:
 
 ```bash
 yeet info <svc>
-yeet service readmit <svc>
 ```
 
-Readmission verifies the isolation boundary, installs and restarts the current
-generation, and confirms the runtime is active before clearing quarantine.
+`yeet stop <svc>` does not clear quarantine. Recovery requires the operator to
+verify the isolation boundary and runtime before clearing the record by hand.
 
 ## Targeting hosts
 

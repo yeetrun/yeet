@@ -32,7 +32,7 @@ type ISOInspectOptions struct {
 	run isoInspectRunner
 }
 
-// ISOInspection records the observed ISO Compose runtime and every drift
+// ISOInspection records the observed iso Compose runtime and every drift
 // finding. Call Verify before treating the workload as ready.
 type ISOInspection struct {
 	Containers []string
@@ -44,7 +44,7 @@ func (i ISOInspection) Verify() error {
 	if len(i.Findings) == 0 {
 		return nil
 	}
-	return fmt.Errorf("ISO runtime differs from admitted model: %s", strings.Join(i.Findings, "; "))
+	return fmt.Errorf("iso runtime differs from admitted model: %s", strings.Join(i.Findings, "; "))
 }
 
 type isoComposePSContainer = dockerComposePSRow
@@ -104,11 +104,11 @@ func InspectISOProject(ctx context.Context, opts ISOInspectOptions) (ISOInspecti
 	}
 	psRaw, err := run(ctx, "compose-ps")
 	if err != nil {
-		return inspection, fmt.Errorf("inspect ISO Compose project containers: %w", err)
+		return inspection, fmt.Errorf("inspect iso Compose project containers: %w", err)
 	}
 	ps, err := parseComposePSJSON(psRaw)
 	if err != nil {
-		return inspection, fmt.Errorf("decode ISO Compose project containers: %w", err)
+		return inspection, fmt.Errorf("decode iso Compose project containers: %w", err)
 	}
 	ids := inspectISOComposePS(&inspection, opts, ps)
 	if len(ids) == 0 {
@@ -116,14 +116,14 @@ func InspectISOProject(ctx context.Context, opts ISOInspectOptions) (ISOInspecti
 	}
 	inspectRaw, err := run(ctx, "inspect", ids...)
 	if err != nil {
-		return inspection, fmt.Errorf("inspect ISO Docker containers: %w", err)
+		return inspection, fmt.Errorf("inspect iso Docker containers: %w", err)
 	}
 	var containers []isoDockerInspectContainer
 	if err := json.Unmarshal(inspectRaw, &containers); err != nil {
-		return inspection, fmt.Errorf("decode ISO Docker containers: %w", err)
+		return inspection, fmt.Errorf("decode iso Docker containers: %w", err)
 	}
 	if err := validateISODockerInspectEvidence(inspectRaw); err != nil {
-		return inspection, fmt.Errorf("validate ISO Docker inspection evidence: %w", err)
+		return inspection, fmt.Errorf("validate iso Docker inspection evidence: %w", err)
 	}
 	inspectISODockerContainers(&inspection, opts, ps, containers)
 	return inspection, nil
@@ -263,20 +263,20 @@ func requiredISOInspectJSONField(object map[string]json.RawMessage, path, field 
 
 func validateISOInspectOptions(opts ISOInspectOptions) error {
 	if strings.TrimSpace(opts.ProjectName) == "" {
-		return fmt.Errorf("ISO inspection requires a Compose project name")
+		return fmt.Errorf("iso inspection requires a Compose project name")
 	}
 	if strings.TrimSpace(opts.NetworkName) == "" {
-		return fmt.Errorf("ISO inspection requires a generated network name")
+		return fmt.Errorf("iso inspection requires a generated network name")
 	}
 	if strings.TrimSpace(opts.ServiceRoot) == "" || !filepath.IsAbs(opts.ServiceRoot) {
-		return fmt.Errorf("ISO inspection requires an absolute service root")
+		return fmt.Errorf("iso inspection requires an absolute service root")
 	}
 	if len(opts.Components) == 0 {
-		return fmt.Errorf("ISO inspection requires admitted components")
+		return fmt.Errorf("iso inspection requires admitted components")
 	}
 	for name, address := range opts.Components {
 		if strings.TrimSpace(name) == "" || !address.Is4() {
-			return fmt.Errorf("ISO inspection component %q has invalid IPv4 address %v", name, address)
+			return fmt.Errorf("iso inspection component %q has invalid IPv4 address %v", name, address)
 		}
 	}
 	return nil
@@ -299,7 +299,7 @@ func inspectISOComposePS(inspection *ISOInspection, opts ISOInspectOptions, ps [
 			}
 		}
 		if _, ok := opts.Components[container.Service]; !ok {
-			inspection.Findings = append(inspection.Findings, fmt.Sprintf("unexpected ISO component %q", container.Service))
+			inspection.Findings = append(inspection.Findings, fmt.Sprintf("unexpected iso component %q", container.Service))
 			continue
 		}
 		counts[container.Service]++
@@ -457,7 +457,7 @@ func inspectISOMounts(inspection *ISOInspection, opts ISOInspectOptions, compone
 }
 
 // ValidateISOHostSource resolves the service root and source before applying
-// the canonical ISO host-boundary rule shared by admission and runtime
+// the canonical iso host-boundary rule shared by admission and runtime
 // inspection. It returns the resolved source only when it stays beneath the
 // service root and does not overlap host-managed control state.
 func ValidateISOHostSource(serviceRoot, source string) (string, error) {
@@ -576,7 +576,7 @@ func defaultISOInspectRunner(opts ISOInspectOptions) isoInspectRunner {
 		case "inspect":
 			args = append([]string{"inspect"}, ids...)
 		default:
-			return nil, fmt.Errorf("unknown ISO Docker inspection operation %q", operation)
+			return nil, fmt.Errorf("unknown iso Docker inspection operation %q", operation)
 		}
 		var cmd *exec.Cmd
 		if opts.NewCmd != nil {

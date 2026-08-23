@@ -37,7 +37,7 @@ func TestRenderISOComposeOverlayAssignsOnlyISOAddresses(t *testing.T) {
 		}
 	}
 	if strings.Contains(raw, "192.168.100.1") || strings.Contains(raw, "yeet.internal") {
-		t.Fatalf("ISO overlay contains the svc DNS overlay:\n%s", raw)
+		t.Fatalf("iso overlay contains the svc DNS overlay:\n%s", raw)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestRenderISOComposeOverlayRejectsIncompleteAllocation(t *testing.T) {
 
 func TestRenderISOComposeOverlayRejectsUnallocatedComponent(t *testing.T) {
 	_, err := renderISOComposeOverlay(testISOComposeOverlayAllocation(), ISOComposeModel{Components: []string{"missing"}})
-	if err == nil || !strings.Contains(err.Error(), `ISO component "missing" has no reserved address`) {
+	if err == nil || !strings.Contains(err.Error(), `iso component "missing" has no reserved address`) {
 		t.Fatalf("error = %v, want missing component allocation", err)
 	}
 }

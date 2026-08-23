@@ -64,55 +64,28 @@ type Installer struct {
 // record is intentionally supplied only after activation succeeds.
 func (s *Server) markNativeISOReadyExact(expected *db.Service, desired *db.ServiceNetworkConfig) error {
 	if expected == nil {
-		return errors.New("mark native ISO ready without an exact expected service record")
+		return errors.New("mark native iso ready without an exact expected service record")
 	}
 	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[expected.Name]
 		if !nativeISOActivationRecordsEqual(current, expected) {
-			return fmt.Errorf("service %q record changed before native ISO ready commit", expected.Name)
+			return fmt.Errorf("service %q record changed before native iso ready commit", expected.Name)
 		}
 		if data.ISOPool == nil {
-			return fmt.Errorf("ISO pool disappeared while marking %q ready", expected.Name)
+			return fmt.Errorf("iso pool disappeared while marking %q ready", expected.Name)
 		}
 		if current.ISO == nil {
-			return fmt.Errorf("service %q has no ISO allocation", expected.Name)
+			return fmt.Errorf("service %q has no iso allocation", expected.Name)
 		}
 		if current.ISO.RemoveRequested || current.ISO.CleanupVerified {
-			return fmt.Errorf("service %q ISO removal or cleanup is in progress", expected.Name)
+			return fmt.Errorf("service %q iso removal or cleanup is in progress", expected.Name)
 		}
 		switch iso.AllocationState(current.ISO.State) {
 		case iso.StateRemoving, iso.StateTombstoned, iso.StateQuarantined:
-			return fmt.Errorf("service %q ISO lifecycle state %q cannot become ready", expected.Name, current.ISO.State)
+			return fmt.Errorf("service %q iso lifecycle state %q cannot become ready", expected.Name, current.ISO.State)
 		}
 		if desired != nil {
 			current.Network = desired.Clone()
-		}
-		data.ISOPool.AggregateRouteState = "ready"
-		data.ISOPool.LastConflict = ""
-		current.ISO.State = string(iso.StateReady)
-		current.ISO.LastError = ""
-		return nil
-	})
-	return err
-}
-
-func (s *Server) markNativeISOReadmittedExact(expected *db.Service) error {
-	if expected == nil || expected.ISO == nil || iso.AllocationState(expected.ISO.State) != iso.StateQuarantined {
-		return errors.New("readmit native ISO without an exact quarantined service record")
-	}
-	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
-		current := data.Services[expected.Name]
-		if !serviceNetworkRecordsEqual(current, expected) {
-			return fmt.Errorf("service %q record changed before native ISO readmission", expected.Name)
-		}
-		if data.ISOPool == nil {
-			return fmt.Errorf("ISO pool disappeared while readmitting %q", expected.Name)
-		}
-		if current.ISO == nil || iso.AllocationState(current.ISO.State) != iso.StateQuarantined {
-			return fmt.Errorf("service %q is no longer quarantined", expected.Name)
-		}
-		if current.ISO.RemoveRequested || current.ISO.CleanupVerified {
-			return fmt.Errorf("service %q ISO removal or cleanup is in progress", expected.Name)
 		}
 		data.ISOPool.AggregateRouteState = "ready"
 		data.ISOPool.LastConflict = ""
@@ -186,11 +159,11 @@ func (si *Installer) installISOTailscale(ctx context.Context, service *db.Servic
 	serviceRoot := si.s.serviceRootFromView(service.View())
 	resolverPath := filepath.Join(serviceBinDirForRoot(serviceRoot), fmt.Sprintf("iso-resolv.gen-%d.conf", service.Generation))
 	if err := os.WriteFile(resolverPath, []byte("nameserver "+service.ISO.Gateway.String()+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write ISO Tailscale resolver: %w", err)
+		return fmt.Errorf("write iso Tailscale resolver: %w", err)
 	}
 	artifacts, err := install(serviceRoot, service.Name, service.ISO.NetNS, service.TSNet.Clone(), si.isoTailscaleAuthKey, resolverPath)
 	if err != nil {
-		return fmt.Errorf("install ISO Tailscale sidecar: %w", err)
+		return fmt.Errorf("install iso Tailscale sidecar: %w", err)
 	}
 	if artifacts == nil {
 		artifacts = map[db.ArtifactName]string{}
@@ -198,7 +171,7 @@ func (si *Installer) installISOTailscale(ctx context.Context, service *db.Servic
 	artifacts[db.ArtifactNetNSResolv] = resolverPath
 	_, _, err = si.s.cfg.DB.MutateService(service.Name, func(_ *db.Data, record *db.Service) error {
 		if record.Generation != service.Generation || record.ISO == nil {
-			return fmt.Errorf("service %q changed during ISO Tailscale installation", service.Name)
+			return fmt.Errorf("service %q changed during iso Tailscale installation", service.Name)
 		}
 		for name, path := range artifacts {
 			artifact := record.Artifacts[name]
@@ -840,18 +813,6 @@ type isoNativeInstallSteps interface {
 	Quarantine(context.Context, error) error
 }
 
-type isoNativeReadmitSteps interface {
-	isoNativeInstallSteps
-	RevalidateBoundary(context.Context) error
-}
-
-func readmitISONativeWith(ctx context.Context, steps isoNativeReadmitSteps) error {
-	if err := steps.RevalidateBoundary(ctx); err != nil {
-		return errors.Join(err, steps.Quarantine(ctx, err))
-	}
-	return installISONativeWith(ctx, steps)
-}
-
 func installISONativeWith(ctx context.Context, steps isoNativeInstallSteps) error {
 	if err := steps.Install(ctx); err != nil {
 		return errors.Join(err, steps.Quarantine(ctx, err))
@@ -861,7 +822,7 @@ func installISONativeWith(ctx context.Context, steps isoNativeInstallSteps) erro
 	}
 	state, err := steps.Inspect(ctx)
 	if err == nil && state != isoReconcileRuntimeRunning {
-		err = fmt.Errorf("native ISO workload is %s after activation", state)
+		err = fmt.Errorf("native iso workload is %s after activation", state)
 	}
 	if err != nil {
 		return errors.Join(err, steps.Quarantine(ctx, err))
@@ -876,68 +837,6 @@ type isoNativeSystemdInstallSteps struct {
 	si      *Installer
 	record  *db.Service
 	service *svc.SystemdService
-}
-
-type isoNativeSystemdReadmitSteps struct {
-	*isoNativeSystemdInstallSteps
-}
-
-var newNativeISOReadmitSteps = func(server *Server, record *db.Service) (isoNativeReadmitSteps, error) {
-	installer := &Installer{s: server}
-	service, err := newSystemdInstallService(installer, record)
-	if err != nil {
-		return nil, err
-	}
-	return &isoNativeSystemdReadmitSteps{isoNativeSystemdInstallSteps: &isoNativeSystemdInstallSteps{
-		si: installer, record: record, service: service,
-	}}, nil
-}
-
-func (s *isoNativeSystemdReadmitSteps) RevalidateBoundary(ctx context.Context) error {
-	if err := installISODNSServiceForServer(s.si.s.cfg.RootDir, s.si.s.catchRunnerPath()); err != nil {
-		return fmt.Errorf("install ISO DNS for readmission: %w", err)
-	}
-	return s.si.s.ensureISONetworkBoundaryLocked(ctx, s.record.Name)
-}
-
-func (s *isoNativeSystemdReadmitSteps) MarkReady(context.Context) error {
-	return s.si.s.markNativeISOReadmittedExact(s.record)
-}
-
-func (s *isoNativeSystemdReadmitSteps) Restart(context.Context) error {
-	return s.service.RestartIgnoringDependencies()
-}
-
-func (s *Server) readmitNativeISO(ctx context.Context, record *db.Service) error {
-	if s == nil {
-		return errors.New("native ISO readmission requires a service allocation")
-	}
-	if err := validateNativeISOReadmission(record); err != nil {
-		return err
-	}
-	steps, err := newNativeISOReadmitSteps(s, record)
-	if err != nil {
-		return err
-	}
-	return s.withISOOperationLock(ctx, func() error {
-		return readmitISONativeWith(ctx, steps)
-	})
-}
-
-func validateNativeISOReadmission(record *db.Service) error {
-	if record == nil || record.ISO == nil {
-		return errors.New("native ISO readmission requires a service allocation")
-	}
-	if record.ServiceType != db.ServiceTypeSystemd || record.ISO.Kind != string(iso.PayloadNative) {
-		return fmt.Errorf("service %q is not a native ISO service", record.Name)
-	}
-	if iso.AllocationState(record.ISO.State) != iso.StateQuarantined {
-		return fmt.Errorf("service %q ISO allocation is not quarantined", record.Name)
-	}
-	if record.ISO.RemoveRequested || record.ISO.CleanupVerified {
-		return fmt.Errorf("service %q ISO removal or cleanup is in progress", record.Name)
-	}
-	return nil
 }
 
 func (s *isoNativeSystemdInstallSteps) Install(context.Context) error {
@@ -962,12 +861,12 @@ func (s *isoNativeSystemdInstallSteps) MarkReady(context.Context) error {
 }
 
 func (s *isoNativeSystemdInstallSteps) Quarantine(ctx context.Context, cause error) error {
-	return s.si.s.quarantineNativeISORecordExact(ctx, s.record, cause, "quarantining failed native ISO install")
+	return s.si.s.quarantineNativeISORecordExact(ctx, s.record, cause, "quarantining failed native iso install")
 }
 
 func (s *Server) quarantineNativeISORecordExact(ctx context.Context, expected *db.Service, cause error, operation string) error {
 	if s == nil || expected == nil {
-		return errors.New("quarantine native ISO without an exact expected service record")
+		return errors.New("quarantine native iso without an exact expected service record")
 	}
 	if err := s.markNativeISOStateExact(expected, string(iso.StateQuarantined), cause, operation); err != nil {
 		return err
@@ -986,7 +885,7 @@ func (s *Server) markNativeISOStateExact(expected *db.Service, state string, cau
 			return fmt.Errorf("service %q changed while %s", expected.Name, operation)
 		}
 		if current.ISO == nil {
-			return fmt.Errorf("service %q has no ISO allocation while %s", expected.Name, operation)
+			return fmt.Errorf("service %q has no iso allocation while %s", expected.Name, operation)
 		}
 		current.ISO.State = state
 		current.ISO.LastError = ""
@@ -1059,22 +958,22 @@ func installDockerComposeService(si *Installer, s *db.Service) error {
 }
 
 type isoComposeLifecycle struct {
-	si             *Installer
-	record         *db.Service
-	compose        *svc.DockerComposeService
-	pullCompose    func(context.Context) error
-	createCompose  func(context.Context) error
-	readmitCompose func(context.Context) error
-	downCompose    func(context.Context) error
-	upCompose      func(context.Context) error
-	startAux       func() error
-	stopAux        func() error
-	baseJSON       []byte
-	mergedJSON     []byte
-	base           ISOComposeModel
-	merged         ISOComposeModel
-	allocation     *db.ISOAllocation
-	isoUnlock      func()
+	si                *Installer
+	record            *db.Service
+	compose           *svc.DockerComposeService
+	pullCompose       func(context.Context) error
+	createCompose     func(context.Context) error
+	revalidateCompose func(context.Context) error
+	downCompose       func(context.Context) error
+	upCompose         func(context.Context) error
+	startAux          func() error
+	stopAux           func() error
+	baseJSON          []byte
+	mergedJSON        []byte
+	base              ISOComposeModel
+	merged            ISOComposeModel
+	allocation        *db.ISOAllocation
+	isoUnlock         func()
 }
 
 func (si *Installer) installISOComposeService(record *db.Service) error {
@@ -1083,7 +982,7 @@ func (si *Installer) installISOComposeService(record *db.Service) error {
 	}
 	compose, err := si.newDockerComposeService(record)
 	if err != nil {
-		return fmt.Errorf("load ISO Compose service: %w", err)
+		return fmt.Errorf("load iso Compose service: %w", err)
 	}
 	lifecycle := &isoComposeLifecycle{si: si, record: record.Clone(), compose: compose}
 	loader := &FileInstaller{
@@ -1110,7 +1009,7 @@ func (l *isoComposeLifecycle) resolveOptions(files []string) svc.ComposeResolveO
 func (l *isoComposeLifecycle) baseComposePath() (string, error) {
 	path, ok := l.record.Artifacts.Gen(db.ArtifactDockerComposeFile, l.record.Generation)
 	if !ok {
-		return "", fmt.Errorf("ISO Compose base artifact is missing for generation %d", l.record.Generation)
+		return "", fmt.Errorf("iso Compose base artifact is missing for generation %d", l.record.Generation)
 	}
 	return path, nil
 }
@@ -1118,7 +1017,7 @@ func (l *isoComposeLifecycle) baseComposePath() (string, error) {
 func (l *isoComposeLifecycle) overlayComposePath() (string, error) {
 	path, ok := l.record.Artifacts.Gen(db.ArtifactDockerComposeNetwork, l.record.Generation)
 	if !ok {
-		return "", fmt.Errorf("ISO Compose overlay artifact is missing for generation %d", l.record.Generation)
+		return "", fmt.Errorf("iso Compose overlay artifact is missing for generation %d", l.record.Generation)
 	}
 	return path, nil
 }
@@ -1172,7 +1071,7 @@ func (s *Server) persistedISOAllocationForService(service string) (*db.ISOAlloca
 	}
 	view, ok := dv.Services().GetOk(service)
 	if !ok || !view.ISO().Valid() {
-		return nil, fmt.Errorf("service %q has no persisted ISO allocation", service)
+		return nil, fmt.Errorf("service %q has no persisted iso allocation", service)
 	}
 	return view.ISO().AsStruct(), nil
 }
@@ -1211,7 +1110,7 @@ func (l *isoComposeLifecycle) AdmitMerged(context.Context) error {
 		return err
 	}
 	if !slices.Equal(l.base.Components, model.Components) {
-		return fmt.Errorf("ISO overlay changed Compose components: base %v, merged %v", l.base.Components, model.Components)
+		return fmt.Errorf("iso overlay changed Compose components: base %v, merged %v", l.base.Components, model.Components)
 	}
 	l.merged = model
 	return nil
@@ -1338,7 +1237,7 @@ func (l *isoComposeLifecycle) AttachNetwork(ctx context.Context) error {
 
 func (l *isoComposeLifecycle) StartAux(ctx context.Context) error {
 	// A gate unit can call back into iso-network-ensure, so never start it while
-	// this process still owns the same host-wide ISO operation lock.
+	// this process still owns the same host-wide iso operation lock.
 	l.releaseISOLock()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1367,7 +1266,7 @@ func (l *isoComposeLifecycle) reacquireAndVerifyForMutation(ctx context.Context)
 }
 
 //nolint:cyclop // Lock reacquisition and boundary verification must remain visibly ordered.
-func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Context, readmit bool) error {
+func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Context, revalidateInputs bool) error {
 	unlock, err := acquireISOOperationLockForRuntime(ctx, l.si.s.cfg.RootDir)
 	if err != nil {
 		return err
@@ -1383,7 +1282,7 @@ func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Cont
 	}
 	current := view.AsStruct()
 	if current.Generation != l.record.Generation || current.ISO == nil || current.ISO.RemoveRequested || !reflect.DeepEqual(current.ISO, l.allocation) {
-		return fail(fmt.Errorf("service %q changed while the ISO network gate was starting", l.record.Name))
+		return fail(fmt.Errorf("service %q changed while the iso network gate was starting", l.record.Name))
 	}
 	spec, err := l.runtimeSpec()
 	if err != nil {
@@ -1399,7 +1298,7 @@ func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Cont
 	if err := verifyISOTopologyForRuntime(ctx, spec.Topology); err != nil {
 		return fail(err)
 	}
-	if readmit {
+	if revalidateInputs {
 		if err := l.revalidateComposeInputs(ctx); err != nil {
 			return fail(err)
 		}
@@ -1408,20 +1307,20 @@ func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Cont
 }
 
 func (l *isoComposeLifecycle) revalidateComposeInputs(ctx context.Context) error {
-	if l.readmitCompose != nil {
-		return l.readmitCompose(ctx)
+	if l.revalidateCompose != nil {
+		return l.revalidateCompose(ctx)
 	}
 	if err := l.ResolveBase(ctx); err != nil {
-		return fmt.Errorf("re-resolve base ISO Compose model: %w", err)
+		return fmt.Errorf("re-resolve base iso Compose model: %w", err)
 	}
 	if err := l.AdmitBase(ctx); err != nil {
-		return fmt.Errorf("re-admit base ISO Compose model: %w", err)
+		return fmt.Errorf("re-admit base iso Compose model: %w", err)
 	}
 	if err := l.ResolveMerged(ctx); err != nil {
-		return fmt.Errorf("re-resolve merged ISO Compose model: %w", err)
+		return fmt.Errorf("re-resolve merged iso Compose model: %w", err)
 	}
 	if err := l.AdmitMerged(ctx); err != nil {
-		return fmt.Errorf("re-admit merged ISO Compose model: %w", err)
+		return fmt.Errorf("re-admit merged iso Compose model: %w", err)
 	}
 	return nil
 }

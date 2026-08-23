@@ -902,12 +902,6 @@ var remoteGroupInfos = map[string]GroupInfo{
 				Usage:       "service rollback <svc>",
 				ArgsSchema:  ServiceArgs{},
 			},
-			"readmit": {
-				Name:        "readmit",
-				Description: "Revalidate and readmit a quarantined native ISO service",
-				Usage:       "service readmit <svc>",
-				ArgsSchema:  ServiceArgs{},
-			},
 			"generations": {
 				Name:        "generations",
 				Description: "Show service generation rollback state",
@@ -1047,7 +1041,6 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"service": {
 		"set":         flagSpecsFromStruct(serviceSetFlagsParsed{}),
 		"rollback":    {},
-		"readmit":     {},
 		"generations": flagSpecsFromStruct(serviceGenerationsFlagsParsed{}),
 		"sync":        flagSpecsFromStruct(serviceSyncFlagsParsed{}),
 	},
@@ -2522,16 +2515,6 @@ func ParseServiceRollback(args []string) ([]string, error) {
 	}
 	if len(args) != 1 {
 		return nil, fmt.Errorf("service rollback requires exactly one service")
-	}
-	return args, nil
-}
-
-func ParseServiceReadmit(args []string) ([]string, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("service readmit requires a service")
-	}
-	if len(args) != 1 {
-		return nil, fmt.Errorf("service readmit requires exactly one service")
 	}
 	return args, nil
 }

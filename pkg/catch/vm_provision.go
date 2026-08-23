@@ -226,7 +226,7 @@ func (e *ttyExecer) validateAndCheckVMProvisionRequest(flags cli.RunFlags) (bool
 	return serviceExisted, snapshotPolicyFlags, nil
 }
 
-//nolint:cyclop // Existing incomplete ISO reservations require explicit recovery decisions.
+//nolint:cyclop // Existing incomplete iso reservations require explicit recovery decisions.
 func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool, error) {
 	if err := validateVMProvisionFlags(flags); err != nil {
 		return false, err
@@ -245,7 +245,7 @@ func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool
 		vm := sv.VM()
 		if vm.Valid() && vm.SetupState() != "ready" && sv.ISO().Valid() && !sv.ISO().RemoveRequested() {
 			if !vmNetworkModeRequested(flags.Net, "iso") {
-				return true, fmt.Errorf("VM %q has an incomplete ISO provision; retry with --net=iso or remove it", e.sn)
+				return true, fmt.Errorf("VM %q has an incomplete iso provision; retry with --net=iso or remove it", e.sn)
 			}
 			return false, nil
 		}
@@ -1174,7 +1174,7 @@ func (e *ttyExecer) rollbackNewVMProvisionReservation() error {
 		if s.ISO != nil && s.ISO.RemoveRequested {
 			return nil
 		}
-		// Preserve an incomplete ISO VM reservation so a retry retains the same
+		// Preserve an incomplete iso VM reservation so a retry retains the same
 		// /30. The minimal VM record also makes crash recovery and removal
 		// type-safe before the complete provision commit exists.
 		if s.ISO != nil && s.ISO.Kind == string(iso.PayloadVM) {
@@ -1626,10 +1626,10 @@ func (e *ttyExecer) applyVMProvisionNetwork(ctx context.Context, plan vmNetworkP
 			return err
 		}
 		if err := plan.ExecuteSetup(vmProvisionNetworkRunner); err != nil {
-			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("set up VM ISO TAP: %w", err))
+			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("set up VM iso TAP: %w", err))
 		}
 		if err := verifyVMNetworkPlanForProvision(ctx, plan); err != nil {
-			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("verify VM ISO TAP: %w", err))
+			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("verify VM iso TAP: %w", err))
 		}
 		return nil
 	})
@@ -1771,18 +1771,18 @@ func stageVMProvisionVerifiedFile(source io.Reader, parent, target, label string
 	return tmp.Name(), nil
 }
 
-//nolint:cyclop // Generation and ISO allocation checks stay adjacent to the atomic DB mutation.
+//nolint:cyclop // Generation and iso allocation checks stay adjacent to the atomic DB mutation.
 func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snapshotPolicyFlags *cli.ServiceSetFlags) error {
 	_, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
 		if plan.Network.hasNetworkMode("iso") {
 			if s.ISO == nil || s.ISO.Kind != string(iso.PayloadVM) || s.ISO.RemoveRequested || s.ISO.State != string(iso.StateReserved) {
-				return fmt.Errorf("service %q no longer has its reserved VM ISO allocation", e.sn)
+				return fmt.Errorf("service %q no longer has its reserved VM iso allocation", e.sn)
 			}
 			if !vmNetworkMatchesISOAllocation(plan.Network, s.ISO) {
-				return fmt.Errorf("service %q ISO allocation changed before provision commit", e.sn)
+				return fmt.Errorf("service %q iso allocation changed before provision commit", e.sn)
 			}
 		} else if s.ISO != nil {
-			return fmt.Errorf("service %q has an ISO allocation but the VM plan is not ISO", e.sn)
+			return fmt.Errorf("service %q has an iso allocation but the VM plan is not iso", e.sn)
 		}
 		applyVMServiceRoot(s, e.s.defaultServiceRootDir(e.sn), plan.ServiceRoot)
 		s.ServiceType = db.ServiceTypeVM

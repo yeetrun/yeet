@@ -206,7 +206,7 @@ func (s *DockerComposeService) InstallWithPull(pull bool) error {
 	return s.sd.Install()
 }
 
-// InstallDefinition installs only the generated auxiliary systemd units. ISO
+// InstallDefinition installs only the generated auxiliary systemd units. iso
 // lifecycle orchestration calls this after policy/topology verification and
 // keeps container creation and execution in later explicit phases.
 func (s *DockerComposeService) InstallDefinition() error {
@@ -217,7 +217,7 @@ func (s *DockerComposeService) InstallDefinition() error {
 }
 
 // Create materializes the admitted Compose project without starting workload
-// processes. This is the ISO network-attachment boundary.
+// processes. This is the iso network-attachment boundary.
 func (s *DockerComposeService) Create(ctx context.Context) error {
 	return s.runCommandContext(ctx, "create")
 }
@@ -252,7 +252,7 @@ func (s *DockerComposeService) UpDetached(ctx context.Context, pull bool) error 
 	return s.runCommandContext(ctx, args...)
 }
 
-// DownRemoveOrphans is the bounded cleanup primitive used after ISO runtime
+// DownRemoveOrphans is the bounded cleanup primitive used after iso runtime
 // inspection fails. Compose down is idempotent when the project is absent.
 func (s *DockerComposeService) DownRemoveOrphans(ctx context.Context) error {
 	return s.runCommandContext(ctx, "down", "--remove-orphans")

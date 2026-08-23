@@ -1213,7 +1213,7 @@ func TestTask6FNativeISOPreflightRollbackConflictTombstonesCurrentReservation(t 
 		}
 	}
 	err := h.run()
-	if err == nil || !strings.Contains(err.Error(), "changed while rolling back native ISO sandbox preflight") {
+	if err == nil || !strings.Contains(err.Error(), "changed while rolling back native iso sandbox preflight") {
 		t.Fatalf("Close error = %v, want exact rollback conflict", err)
 	}
 	current := testService(t, h.server, h.serviceName)
@@ -1221,7 +1221,7 @@ func TestTask6FNativeISOPreflightRollbackConflictTombstonesCurrentReservation(t 
 		t.Fatalf("rollback overwrote concurrent generation: %#v", current)
 	}
 	if current.ISO == nil || current.ISO.State != string(iso.StateTombstoned) {
-		t.Fatalf("rollback conflict ISO = %#v, want fail-closed tombstone", current.ISO)
+		t.Fatalf("rollback conflict iso = %#v, want fail-closed tombstone", current.ISO)
 	}
 }
 
@@ -1243,7 +1243,7 @@ func task6FNewISOFailureHarness(t *testing.T, existing bool, failAt string) *tas
 	t.Helper()
 	h := &task6FISOFailureHarness{
 		t: t, server: newTestServer(t), serviceName: "iso-preflight-rollback", failAt: failAt,
-		failure: errors.New("injected native ISO sandbox " + failAt + " failure"),
+		failure: errors.New("injected native iso sandbox " + failAt + " failure"),
 	}
 	task6FConfigureISOPool(t, h.server)
 	if existing {
@@ -1328,7 +1328,7 @@ func (h *task6FISOFailureHarness) captureReservedState() {
 	h.t.Helper()
 	current := testService(h.t, h.server, h.serviceName)
 	if current.ISO == nil || current.ISO.State != string(iso.StateReserved) {
-		h.t.Fatalf("preflight phase observed ISO record %#v, want reserved", current.ISO)
+		h.t.Fatalf("preflight phase observed iso record %#v, want reserved", current.ISO)
 	}
 	h.reserved = current.Clone()
 	for name, path := range h.installer.artifacts {
@@ -1381,7 +1381,7 @@ func (h *task6FISOFailureHarness) assertServiceRolledBack() {
 func (h *task6FISOFailureHarness) assertInstallerStateRolledBack() {
 	h.t.Helper()
 	if h.installer.isoAllocation != nil {
-		h.t.Fatalf("installer ISO allocation after rollback = %#v, want nil", h.installer.isoAllocation)
+		h.t.Fatalf("installer iso allocation after rollback = %#v, want nil", h.installer.isoAllocation)
 	}
 	if !reflect.DeepEqual(h.installer.artifacts, h.beforeArtifacts) {
 		h.t.Fatalf("installer artifacts after rollback = %#v, want %#v", h.installer.artifacts, h.beforeArtifacts)
@@ -1392,7 +1392,7 @@ func (h *task6FISOFailureHarness) assertStagedArtifactsRemoved() {
 	h.t.Helper()
 	for _, path := range h.stagedPaths {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			h.t.Fatalf("new staged ISO artifact remains at %q: %v", path, err)
+			h.t.Fatalf("new staged iso artifact remains at %q: %v", path, err)
 		}
 	}
 }
@@ -1400,10 +1400,10 @@ func (h *task6FISOFailureHarness) assertStagedArtifactsRemoved() {
 func (h *task6FISOFailureHarness) assertExistingPayloadPreserved() {
 	h.t.Helper()
 	if payload := h.beforeArtifacts[db.ArtifactBinary]; payload == "" {
-		h.t.Fatal("immutable payload was absent before ISO reservation")
+		h.t.Fatal("immutable payload was absent before iso reservation")
 	} else if h.before != nil {
 		if _, err := os.Stat(payload); err != nil {
-			h.t.Fatalf("immutable payload removed during ISO rollback: %v", err)
+			h.t.Fatalf("immutable payload removed during iso rollback: %v", err)
 		}
 	}
 }
@@ -1475,7 +1475,7 @@ func task6DAssertNoBinarySandbox(t *testing.T, after *db.Service, payload string
 }
 
 func TestTask6DNativeISOUsesBubblewrapResolverAndHelpersRemainDirect(t *testing.T) {
-	t.Run("fresh native ISO", task6DRunNativeISO)
+	t.Run("fresh native iso", task6DRunNativeISO)
 
 	for _, serviceName := range []string{CatchService, SystemService} {
 		t.Run("helper "+serviceName, func(t *testing.T) { task6DRunHelper(t, serviceName) })
@@ -1516,10 +1516,10 @@ func task6DAssertNativeISO(t *testing.T, service *db.Service) {
 	argv := task6BExecStart(t, string(unitRaw))
 	resolver := service.Artifacts[db.ArtifactNetNSResolv].Refs["staged"]
 	if len(argv) == 0 || argv[0] != bubblewrapPath || task6BCount(argv, "--") != 1 {
-		t.Fatalf("native ISO ExecStart = %#v", argv)
+		t.Fatalf("native iso ExecStart = %#v", argv)
 	}
 	if !slices.Contains(argv, resolver) || strings.Contains(string(unitRaw), "BindReadOnlyPaths="+resolver+":/etc/resolv.conf") {
-		t.Fatalf("native ISO resolver was not moved into Bubblewrap argv:\n%s\nargv=%#v", unitRaw, argv)
+		t.Fatalf("native iso resolver was not moved into Bubblewrap argv:\n%s\nargv=%#v", unitRaw, argv)
 	}
 }
 
@@ -1995,9 +1995,9 @@ func TestParseNetworkISO(t *testing.T) {
 		{raw: "iso,ts", kind: iso.PayloadCompose, wantISO: true},
 		{raw: "iso,svc", kind: iso.PayloadCompose, wantErr: "cannot combine"},
 		{raw: "iso", kind: iso.PayloadNative, wantISO: true},
-		{raw: "iso,ts", kind: iso.PayloadNative, wantErr: "native ISO supports only iso"},
+		{raw: "iso,ts", kind: iso.PayloadNative, wantErr: "native iso supports only iso"},
 		{raw: "iso", kind: iso.PayloadCron, wantISO: true},
-		{raw: "iso,ts", kind: iso.PayloadCron, wantErr: "timer ISO supports only iso"},
+		{raw: "iso,ts", kind: iso.PayloadCron, wantErr: "timer iso supports only iso"},
 	} {
 		opts, err := parseNetworkForPayload(NetworkOpts{Interfaces: tt.raw, Tailscale: tailscale, Macvlan: macvlan}, tt.kind, false)
 		if tt.wantErr == "" {
@@ -2052,10 +2052,10 @@ func TestPreparePayloadISOValidationPrecedesComposeRewrite(t *testing.T) {
 		t.Fatalf("read compose after rejection: %v", err)
 	}
 	if !reflect.DeepEqual(after, original) {
-		t.Fatalf("compose was rewritten before ISO validation:\n%s", after)
+		t.Fatalf("compose was rewritten before iso validation:\n%s", after)
 	}
 	if len(installer.artifacts) != 0 {
-		t.Fatalf("artifacts = %#v, want none before ISO validation", installer.artifacts)
+		t.Fatalf("artifacts = %#v, want none before iso validation", installer.artifacts)
 	}
 }
 
@@ -2149,7 +2149,7 @@ func TestPrepareNoBinaryPublishResetUsesPersistedISONetwork(t *testing.T) {
 		service.ISO = &db.ISOAllocation{DesiredModes: []string{"iso"}}
 		return nil
 	}); err != nil {
-		t.Fatalf("seed ISO service: %v", err)
+		t.Fatalf("seed iso service: %v", err)
 	}
 	view, err := server.serviceView("svc-reset")
 	if err != nil {
@@ -2168,7 +2168,7 @@ func TestPrepareNoBinaryPublishResetUsesPersistedISONetwork(t *testing.T) {
 		t.Fatalf("prepareNoBinaryInstall error = %v, want ErrPublishedPorts", err)
 	}
 	if len(installer.artifacts) != 0 {
-		t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+		t.Fatalf("artifacts = %#v, want none before iso rejection", installer.artifacts)
 	}
 }
 
@@ -2179,7 +2179,7 @@ func TestPrepareNoBinaryPublishUsesPersistedISONetwork(t *testing.T) {
 		service.ISO = &db.ISOAllocation{DesiredModes: []string{"iso"}}
 		return nil
 	}); err != nil {
-		t.Fatalf("seed ISO service: %v", err)
+		t.Fatalf("seed iso service: %v", err)
 	}
 	view, err := server.serviceView("svc-publish")
 	if err != nil {
@@ -2198,7 +2198,7 @@ func TestPrepareNoBinaryPublishUsesPersistedISONetwork(t *testing.T) {
 		t.Fatalf("prepareNoBinaryInstall error = %v, want ErrPublishedPorts", err)
 	}
 	if len(installer.artifacts) != 0 {
-		t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+		t.Fatalf("artifacts = %#v, want none before iso rejection", installer.artifacts)
 	}
 	service := testService(t, server, "svc-publish")
 	if len(service.Publish) != 0 {
@@ -3633,17 +3633,17 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 				"WorkingDirectory=/\n",
 			} {
 				if !strings.Contains(unit, want) {
-					t.Errorf("native ISO unit missing %q:\n%s", want, unit)
+					t.Errorf("native iso unit missing %q:\n%s", want, unit)
 				}
 			}
 			argv := task6BExecStart(t, unit)
 			resolver := stagedArtifactPath(t, service, db.ArtifactNetNSResolv)
 			if len(argv) == 0 || argv[0] != bubblewrapPath || task6BCount(argv, "--") != 1 || !slices.Contains(argv, resolver) {
-				t.Errorf("native ISO sandbox argv = %#v, want Bubblewrap with resolver %q", argv, resolver)
+				t.Errorf("native iso sandbox argv = %#v, want Bubblewrap with resolver %q", argv, resolver)
 			}
 			for _, forbidden := range []string{"BindReadOnlyPaths=" + resolver + ":/etc/resolv.conf", "NoNewPrivileges=", "CapabilityBoundingSet=", "AmbientCapabilities=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
 				if strings.Contains(unit, forbidden) {
-					t.Errorf("native ISO networking added privilege policy %q:\n%s", forbidden, unit)
+					t.Errorf("native iso networking added privilege policy %q:\n%s", forbidden, unit)
 				}
 			}
 			assertInstallerFileContent(t, stagedArtifactPath(t, service, db.ArtifactNetNSResolv), "nameserver "+service.ISO.HostIP.String()+"\n")
@@ -3924,7 +3924,7 @@ func TestISOComposeOverlayBypassesLegacyDNSOverlay(t *testing.T) {
 	}
 	if path, ok := installer.artifacts[db.ArtifactDockerComposeNetwork]; ok {
 		raw, readErr := os.ReadFile(path)
-		t.Fatalf("ISO generated legacy DNS overlay %q (%q, %v)", path, raw, readErr)
+		t.Fatalf("iso generated legacy DNS overlay %q (%q, %v)", path, raw, readErr)
 	}
 }
 
@@ -4150,7 +4150,7 @@ func TestPersistentCatchUnitsSurviveTransientInstallerRemoval(t *testing.T) {
 		"catch.service":        catchFiles[db.ArtifactSystemdUnit],
 		"yeet-dns.service":     filepath.Join(systemdDir, "yeet-dns.service"),
 		"yeet-iso-dns.service": filepath.Join(systemdDir, "yeet-iso-dns.service"),
-		"ISO network gate":     gateInstaller.artifacts[db.ArtifactNetNSService],
+		"iso network gate":     gateInstaller.artifacts[db.ArtifactNetNSService],
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -4335,7 +4335,7 @@ func TestNewNativeISOIdentityInstallFinalizesRuntimeAfterMigration(t *testing.T)
 		completeNativeISOInstall: func(_ context.Context, target *db.Service) error {
 			events = append(events, "finalize")
 			if target.Identity == nil || *target.Identity != identity || target.ISO == nil {
-				t.Fatalf("native ISO target = %#v", target)
+				t.Fatalf("native iso target = %#v", target)
 			}
 			return nil
 		},
@@ -4344,7 +4344,7 @@ func TestNewNativeISOIdentityInstallFinalizesRuntimeAfterMigration(t *testing.T)
 		t.Fatal(err)
 	}
 	if !slices.Equal(events, []string{"migrate", "finalize"}) {
-		t.Fatalf("native ISO identity events = %#v", events)
+		t.Fatalf("native iso identity events = %#v", events)
 	}
 }
 
@@ -4473,7 +4473,7 @@ func TestInitialNativeISOIdentityInstallCommitsReadyAndDesiredAtomically(t *test
 				t.Fatal(viewErr)
 			}
 			if got := iso.AllocationState(current.ISO().State()); got != tt.wantState {
-				t.Fatalf("ISO state = %q, want %q", got, tt.wantState)
+				t.Fatalf("iso state = %q, want %q", got, tt.wantState)
 			}
 			if tt.wantConcurrentMode != "" {
 				if got := current.Network().AsStruct().Modes; !slices.Equal(got, []string{tt.wantConcurrentMode}) {
@@ -4734,13 +4734,13 @@ func TestISOTailscaleUsesPersistedRouterNamespaceWithoutChangingOrdinaryModes(t 
 		t.Fatal(err)
 	}
 	if runIn != allocation.NetNS || resolvConf != "" || tapMode {
-		t.Fatalf("ISO tailscale mode = run %q resolv %q tap %v, want persisted router namespace", runIn, resolvConf, tapMode)
+		t.Fatalf("iso tailscale mode = run %q resolv %q tap %v, want persisted router namespace", runIn, resolvConf, tapMode)
 	}
 	if env.TailscaleTAPInterface != "" {
-		t.Fatalf("ISO router unexpectedly configured TAP interface %q", env.TailscaleTAPInterface)
+		t.Fatalf("iso router unexpectedly configured TAP interface %q", env.TailscaleTAPInterface)
 	}
 	if installer.tsNet.Interface != "ts0" {
-		t.Fatalf("ISO tailscaled interface = %q, want Task 7 policy identity ts0", installer.tsNet.Interface)
+		t.Fatalf("iso tailscaled interface = %q, want Task 7 policy identity ts0", installer.tsNet.Interface)
 	}
 	unit, err := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service: "app", runDir: "/srv/app/run", serviceTSDir: "/srv/app/tailscale",
@@ -4751,12 +4751,12 @@ func TestISOTailscaleUsesPersistedRouterNamespaceWithoutChangingOrdinaryModes(t 
 		t.Fatalf("newTailscaleSystemdUnit: %v", err)
 	}
 	if got := strings.Join(unit.Arguments, " "); !strings.Contains(got, "--tun=ts0") || strings.Contains(got, "--tun=yts-") {
-		t.Fatalf("ISO tailscaled unit args = %q, want persisted ts0 TUN", got)
+		t.Fatalf("iso tailscaled unit args = %q, want persisted ts0 TUN", got)
 	}
 
 	plainISO := &FileInstaller{isoAllocation: &db.ISOAllocation{Kind: string(iso.PayloadCompose), NetNS: "yeet-plain-ns", DesiredModes: []string{"iso"}}}
 	if runIn, resolvConf, tapMode, err := plainISO.tailscaleNetNSMode(&netns.Service{}); err != nil || runIn != "" || resolvConf != "" || tapMode {
-		t.Fatalf("ordinary ISO without tailscale changed mode: %q %q %v", runIn, resolvConf, tapMode)
+		t.Fatalf("ordinary iso without tailscale changed mode: %q %q %v", runIn, resolvConf, tapMode)
 	}
 }
 
@@ -4824,8 +4824,8 @@ func TestISOTailscaleRejectsCorruptPersistedRouterNamespace(t *testing.T) {
 		{name: "malformed namespace", namespace: "yeet-wrong-ns", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
 		{name: "sibling namespace", namespace: "yeet-deadbeef00-ns", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
 		{name: "VM allocation", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadVM, modes: []string{"iso", "ts"}},
-		{name: "plain ISO", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"iso"}},
-		{name: "missing ISO", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"ts"}},
+		{name: "plain iso", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"iso"}},
+		{name: "missing iso", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"ts"}},
 		{name: "unnormalized modes", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"ts", "iso"}},
 	}
 	for _, tt := range tests {
@@ -5311,7 +5311,7 @@ func TestConfigureAndStageInstallTransitionsISOToSvcTailscaleAndHost(t *testing.
 			}
 			service := dv.Services().Get("app")
 			if service.ISO().Valid() {
-				t.Fatalf("successful transition retained ISO: %#v", service.ISO().AsStruct())
+				t.Fatalf("successful transition retained iso: %#v", service.ISO().AsStruct())
 			}
 			tt.assert(t, service)
 			artifact := service.AsStruct().Artifacts[db.ArtifactDockerComposeFile]
@@ -5354,7 +5354,7 @@ func TestConfigureAndStageInstallRetainsISOWhenConcreteTransitionCleanupFails(t 
 	}
 	service := dv.Services().Get("app")
 	if !service.ISO().Valid() || service.ISO().State() != string(iso.StateTombstoned) || service.SvcNetwork().Valid() {
-		t.Fatalf("failed concrete transition state = %#v, want ISO tombstone and no replacement", service.AsStruct())
+		t.Fatalf("failed concrete transition state = %#v, want iso tombstone and no replacement", service.AsStruct())
 	}
 	if _, staged := service.AsStruct().Artifacts[db.ArtifactDockerComposeFile].Refs["staged"]; staged {
 		t.Fatalf("replacement payload staged after cleanup failure: %#v", service.AsStruct().Artifacts)
@@ -5978,7 +5978,7 @@ func TestPrepareISOComposeRunsCanonicalAdmissionBeforeReservationAndStagesExactO
 	}
 	overlayPath := installer.artifacts[db.ArtifactDockerComposeNetwork]
 	if overlayPath == "" {
-		t.Fatal("ISO Compose overlay was not staged")
+		t.Fatal("iso Compose overlay was not staged")
 	}
 	if raw, err := os.ReadFile(overlayPath); err != nil || !strings.Contains(string(raw), allocation.Components["api"].Address.String()) {
 		t.Fatalf("overlay = %q, %v; want persisted component address", raw, err)

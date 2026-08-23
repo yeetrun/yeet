@@ -137,7 +137,7 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 		t.Fatal("new component VM has no component state before legacy-adoption simulation")
 	}
 	if initialService.ISO == nil || !initialService.ISO.Link.IsValid() || !initialService.ISO.HostIP.IsValid() || !initialService.ISO.PeerIP.IsValid() {
-		t.Fatalf("integration VM does not have a dedicated ISO network: %#v", initialService.ISO)
+		t.Fatalf("integration VM does not have a dedicated iso network: %#v", initialService.ISO)
 	}
 	initialArtifact := initialService.VM.Components.Runtime.Configured
 	initialVersion, err := probeMatchingVMRuntimePair(ctx, guestAsset.Paths.FirecrackerPath, guestAsset.Paths.JailerPath)
@@ -379,16 +379,16 @@ func prepareVMRuntimeIntegrationISOPool(t *testing.T, ctx context.Context, serve
 	t.Helper()
 	if err := server.ensureISOPool(ctx); err == nil {
 		return
-	} else if !strings.Contains(err.Error(), "no collision-free ISO /16") {
-		t.Fatalf("select integration ISO pool: %v", err)
+	} else if !strings.Contains(err.Error(), "no collision-free iso /16") {
+		t.Fatalf("select integration iso pool: %v", err)
 	}
 	raw, err := exec.CommandContext(ctx, "ip", "-j", "route", "show", "table", "all").Output()
 	if err != nil {
-		t.Fatalf("inspect live ISO routes: %v", err)
+		t.Fatalf("inspect live iso routes: %v", err)
 	}
 	pool, occupied, err := vmRuntimeIntegrationLiveISOPool(raw)
 	if err != nil {
-		t.Fatalf("reuse live Yeet ISO pool: %v", err)
+		t.Fatalf("reuse live Yeet iso pool: %v", err)
 	}
 	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
 		data.ISOPool = &db.ISOPool{
@@ -413,7 +413,7 @@ func prepareVMRuntimeIntegrationISOPool(t *testing.T, ctx context.Context, serve
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("seed live ISO allocation occupancy: %v", err)
+		t.Fatalf("seed live iso allocation occupancy: %v", err)
 	}
 }
 
@@ -455,7 +455,7 @@ func vmRuntimeIntegrationLiveISOPool(raw []byte) (netip.Prefix, []netip.Prefix, 
 		slices.SortFunc(occupied, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr()) })
 		return candidate, occupied, nil
 	}
-	return netip.Prefix{}, nil, fmt.Errorf("no live Yeet ISO pool with allocated /30 routes found")
+	return netip.Prefix{}, nil, fmt.Errorf("no live Yeet iso pool with allocated /30 routes found")
 }
 
 func TestVMRuntimeIntegrationLiveISOPool(t *testing.T) {

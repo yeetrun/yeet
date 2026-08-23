@@ -2566,11 +2566,11 @@ func TestReserveVMISONetworkAllocatesBeforePlanRendering(t *testing.T) {
 		t.Fatalf("vmNetworkPlanFromFlags: %v", err)
 	}
 	if got := plan.Interfaces[0]; got.Tap != allocation.Interface || got.GuestIP != "172.30.0.2/30" || got.Gateway != "172.30.0.1" {
-		t.Fatalf("ISO plan = %#v", got)
+		t.Fatalf("iso plan = %#v", got)
 	}
 	stored := getTestService(t, server, "devbox")
 	if stored.ISO == nil || stored.ISO.Link != allocation.Link {
-		t.Fatalf("stored ISO allocation = %#v", stored.ISO)
+		t.Fatalf("stored iso allocation = %#v", stored.ISO)
 	}
 	if stored.ServiceType != db.ServiceTypeVM || stored.VM == nil || stored.VM.SetupState != "reserved" {
 		t.Fatalf("reserved VM identity = %#v, want typed incomplete VM", stored)
@@ -2582,10 +2582,10 @@ func TestReserveVMISONetworkAllocatesBeforePlanRendering(t *testing.T) {
 		t.Fatal(err)
 	}
 	if retryExisting, err := execer.validateAndCheckVMProvisionService(cli.RunFlags{Net: "iso"}); err != nil || retryExisting {
-		t.Fatalf("ISO retry = (%v, %v), want incomplete reservation retry", retryExisting, err)
+		t.Fatalf("iso retry = (%v, %v), want incomplete reservation retry", retryExisting, err)
 	}
-	if _, err := execer.validateAndCheckVMProvisionService(cli.RunFlags{Net: "svc"}); err == nil || !strings.Contains(err.Error(), "incomplete ISO provision") {
-		t.Fatalf("non-ISO retry error = %v", err)
+	if _, err := execer.validateAndCheckVMProvisionService(cli.RunFlags{Net: "svc"}); err == nil || !strings.Contains(err.Error(), "incomplete iso provision") {
+		t.Fatalf("non-iso retry error = %v", err)
 	}
 }
 
@@ -2605,7 +2605,7 @@ func TestCommitVMProvisionAtomicallyStopsExactISOPlan(t *testing.T) {
 	}
 	stored := getTestService(t, server, "devbox")
 	if stored.VM == nil || stored.VM.SetupState != "ready" || stored.ISO == nil || stored.ISO.State != string(iso.StateStopped) {
-		t.Fatalf("committed VM = %#v, want ready config with stopped ISO lifecycle", stored)
+		t.Fatalf("committed VM = %#v, want ready config with stopped iso lifecycle", stored)
 	}
 }
 
@@ -2617,7 +2617,7 @@ func TestCommitVMProvisionRejectsMissingISOAllocation(t *testing.T) {
 		ISOLink: netip.MustParsePrefix("172.30.0.0/30"), ISOTap: "yi-devbox",
 	})}
 	err := execer.commitVMProvision(plan, "oci://debian/13", nil)
-	if err == nil || !strings.Contains(err.Error(), "reserved VM ISO allocation") {
+	if err == nil || !strings.Contains(err.Error(), "reserved VM iso allocation") {
 		t.Fatalf("commitVMProvision error = %v", err)
 	}
 	assertNoReadyVM(t, server, "devbox")

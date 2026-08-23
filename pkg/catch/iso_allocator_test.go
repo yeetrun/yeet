@@ -298,7 +298,7 @@ func TestISOAllocationMutationErrors(t *testing.T) {
 	if _, err := server.reserveISOAllocation(context.Background(), "app", isoReservationRequest{Kind: iso.PayloadVM, Modes: []string{"iso"}}); !errors.Is(err, probeErr) {
 		t.Fatalf("probe error = %v, want %v", err, probeErr)
 	}
-	if err := server.markISOState("app", string(iso.StateReady), nil); err == nil || !strings.Contains(err.Error(), "has no ISO allocation") {
+	if err := server.markISOState("app", string(iso.StateReady), nil); err == nil || !strings.Contains(err.Error(), "has no iso allocation") {
 		t.Fatalf("missing allocation error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -348,7 +348,7 @@ func readISOAllocation(t *testing.T, server *Server, name string) *db.ISOAllocat
 	t.Helper()
 	allocation := readISOService(t, server, name).ISO
 	if allocation == nil {
-		t.Fatalf("service %q has no ISO allocation", name)
+		t.Fatalf("service %q has no iso allocation", name)
 	}
 	return allocation
 }

@@ -526,7 +526,7 @@ func TestISODNSLocalCommandUsesSignalCancellationContext(t *testing.T) {
 	}
 	runISODNSFn = func(got context.Context, _ *catch.Config) error {
 		if !errors.Is(got.Err(), context.Canceled) {
-			t.Fatalf("ISO DNS context error = %v, want signal cancellation", got.Err())
+			t.Fatalf("iso DNS context error = %v, want signal cancellation", got.Err())
 		}
 		return got.Err()
 	}

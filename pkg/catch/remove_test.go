@@ -173,11 +173,11 @@ func TestRemoveServiceISOCleanDataZFSFailureRetainsVerifiedTombstoneWithoutDelet
 	}
 	allocation := dv.Services().Get("app").ISO()
 	if !allocation.RemoveRequested() || !allocation.CleanupVerified() || allocation.State() != string(iso.StateTombstoned) {
-		t.Fatalf("ISO state after ZFS failure = %#v, want verified tombstone", allocation.AsStruct())
+		t.Fatalf("iso state after ZFS failure = %#v, want verified tombstone", allocation.AsStruct())
 	}
 	select {
 	case event := <-events:
-		t.Fatalf("published event after failed ISO removal: %#v", event)
+		t.Fatalf("published event after failed iso removal: %#v", event)
 	default:
 	}
 }
@@ -288,7 +288,7 @@ func TestRemoveISODeletesOnlyAfterAbsenceAndPolicyVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := dv.Services().GetOk("app"); ok {
-		t.Fatal("ISO service record survived fully verified removal")
+		t.Fatal("iso service record survived fully verified removal")
 	}
 }
 

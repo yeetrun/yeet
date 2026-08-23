@@ -30,7 +30,7 @@ const (
 func PlanComponents(project netip.Prefix, current map[string]netip.Addr, desired []string) (ComponentPlan, error) {
 	project = project.Masked()
 	if !project.IsValid() || !project.Addr().Is4() || project.Bits() != 27 {
-		return ComponentPlan{}, fmt.Errorf("ISO project must be an IPv4 /27: %v", project)
+		return ComponentPlan{}, fmt.Errorf("iso project must be an IPv4 /27: %v", project)
 	}
 	names, err := normalizeComponentNames(desired)
 	if err != nil {
@@ -52,7 +52,7 @@ func normalizeComponentNames(desired []string) ([]string, error) {
 	sort.Strings(names)
 	for i, name := range names {
 		if name == "" || i > 0 && name == names[i-1] {
-			return nil, fmt.Errorf("ISO component names must be non-empty and unique")
+			return nil, fmt.Errorf("iso component names must be non-empty and unique")
 		}
 	}
 	if len(names) > MaxComponents {
@@ -65,14 +65,14 @@ func validateCurrentComponents(project netip.Prefix, current map[string]netip.Ad
 	used := map[netip.Addr]bool{}
 	for name, addr := range current {
 		if name == "" || !project.Contains(addr) {
-			return nil, fmt.Errorf("current ISO component %q has address %v outside %v", name, addr, project)
+			return nil, fmt.Errorf("current iso component %q has address %v outside %v", name, addr, project)
 		}
 		offset := uint32(addr.As4()[3] - project.Addr().As4()[3])
 		if offset < 2 || offset > 30 {
-			return nil, fmt.Errorf("current ISO component %q uses reserved address %v", name, addr)
+			return nil, fmt.Errorf("current iso component %q uses reserved address %v", name, addr)
 		}
 		if used[addr] {
-			return nil, fmt.Errorf("current ISO component address %v is duplicated", addr)
+			return nil, fmt.Errorf("current iso component address %v is duplicated", addr)
 		}
 		used[addr] = true
 	}

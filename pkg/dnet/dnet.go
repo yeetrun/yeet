@@ -51,7 +51,7 @@ type SuccessResponse struct {
 
 const dockerNetworkModeISO = "iso"
 
-var errISOPortMaps = errors.New("ISO network does not support port maps")
+var errISOPortMaps = errors.New("iso network does not support port maps")
 
 // runInNetNS runs the given function in the given network namespace.
 func (p *plugin) runInNetNS(nsName string, f func() error) error {

@@ -116,7 +116,6 @@ func buildGroupHandlers() map[string]yargs.Group {
 			Commands: map[string]yargs.SubcommandHandler{
 				"set":         handleServiceGroup,
 				"rollback":    handleServiceGroup,
-				"readmit":     handleServiceGroup,
 				"generations": handleServiceGroup,
 				"sync":        handleServiceGroup,
 			},
@@ -249,7 +248,7 @@ func buildHelpConfig() yargs.HelpConfig {
 		groups["docker"] = docker
 	}
 	if service, ok := groups["service"]; ok {
-		for _, name := range []string{"rollback", "readmit", "generations"} {
+		for _, name := range []string{"rollback", "generations"} {
 			cmd := service.Commands[name]
 			cmd.Description = fmt.Sprintf("%s - %s", cmd.Usage, cmd.Description)
 			service.Commands[name] = cmd

@@ -188,7 +188,7 @@ func TestAdmitISOComposeRejectsNonGeneratedDNSAfterOverlay(t *testing.T) {
 		dnsJSON string
 		want    string
 	}{
-		{name: "wrong resolver", dnsJSON: `["8.8.8.8"]`, want: "does not match generated ISO resolver"},
+		{name: "wrong resolver", dnsJSON: `["8.8.8.8"]`, want: "does not match generated iso resolver"},
 		{name: "multiple resolvers", dnsJSON: `["172.30.128.1","8.8.8.8"]`, want: "requires exactly one generated DNS resolver"},
 		{name: "empty resolvers", dnsJSON: `[]`, want: "requires exactly one generated DNS resolver"},
 		{name: "null", dnsJSON: `null`, want: "invalid canonical DNS representation"},
@@ -233,7 +233,7 @@ func TestAdmitISOComposeRejectsCustomDNSBeforeOverlay(t *testing.T) {
 		ServiceRoot: t.TempDir(),
 	})
 	assertISOAdmissionPath(t, err, "services.api.dns")
-	if !strings.Contains(err.Error(), "custom DNS bypasses the ISO resolver") {
+	if !strings.Contains(err.Error(), "custom DNS bypasses the iso resolver") {
 		t.Fatalf("error = %v, want pre-overlay custom DNS rejection", err)
 	}
 }

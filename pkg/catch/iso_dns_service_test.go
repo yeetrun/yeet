@@ -33,10 +33,10 @@ func TestISODNSUnitIsDeterministicAndRunsLocalCommand(t *testing.T) {
 		rendered = append(rendered, string(raw))
 	}
 	if rendered[0] != rendered[1] {
-		t.Fatalf("ISO DNS unit is nondeterministic:\nfirst:\n%s\nsecond:\n%s", rendered[0], rendered[1])
+		t.Fatalf("iso DNS unit is nondeterministic:\nfirst:\n%s\nsecond:\n%s", rendered[0], rendered[1])
 	}
 	for _, want := range []string{
-		"Description=yeet public-only ISO DNS\n",
+		"Description=yeet public-only iso DNS\n",
 		"ConditionFileIsExecutable=/usr/local/bin/catch\n",
 		"Requires=yeet-ns.service\n",
 		"After=yeet-ns.service\n",
@@ -111,7 +111,7 @@ func TestInstallISODNSServiceInstallsStartsAndReusesUnit(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !strings.Contains(string(raw), "ExecStart=/usr/local/bin/catch -data-dir /srv/yeet iso-dns\n") {
-				t.Fatalf("installed unit missing ISO DNS command:\n%s", raw)
+				t.Fatalf("installed unit missing iso DNS command:\n%s", raw)
 			}
 		})
 	}
@@ -126,8 +126,8 @@ func TestInstallISODNSServicePropagatesLifecycleErrors(t *testing.T) {
 		wantError string
 	}{
 		{name: "reload", failAt: "daemon-reload", wantError: "reload systemd"},
-		{name: "enable", failAt: "enable", wantError: "enable ISO DNS"},
-		{name: "start", failAt: "start", wantError: "start ISO DNS"},
+		{name: "enable", failAt: "enable", wantError: "enable iso DNS"},
+		{name: "start", failAt: "start", wantError: "start iso DNS"},
 		{name: "restart", failAt: "try-restart", active: true, wantError: "systemctl failed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

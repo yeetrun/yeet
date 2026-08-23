@@ -214,17 +214,17 @@ func NewISONetworkUnit(service, catchBin, dataDir string) (*SystemdUnit, error) 
 	catchBin = strings.TrimSpace(catchBin)
 	dataDir = strings.TrimSpace(dataDir)
 	if service == "" || strings.ContainsAny(service, "/\\ \t\r\n") {
-		return nil, fmt.Errorf("invalid ISO service name %q", service)
+		return nil, fmt.Errorf("invalid iso service name %q", service)
 	}
 	if catchBin == "" || dataDir == "" {
-		return nil, fmt.Errorf("ISO network unit requires catch and data-dir paths")
+		return nil, fmt.Errorf("iso network unit requires catch and data-dir paths")
 	}
 	if strings.ContainsAny(catchBin+dataDir, " \t\r\n") {
-		return nil, fmt.Errorf("ISO network unit paths cannot contain whitespace")
+		return nil, fmt.Errorf("iso network unit paths cannot contain whitespace")
 	}
 	return &SystemdUnit{
 		Name:        "yeet-" + service + "-ns",
-		Description: "yeet ISO network for " + service,
+		Description: "yeet iso network for " + service,
 		Executable:  catchBin,
 		Arguments:   []string{"-data-dir", dataDir, "iso-network-ensure", service},
 		StopCmd:     catchBin + " -data-dir " + dataDir + " iso-network-clean " + service,
@@ -881,12 +881,12 @@ func (s *SystemdService) Install() error {
 
 // ConvergeISONetworkGate repairs the persisted gate definition without
 // starting, restarting, or enabling the workload. Startup reconciliation uses
-// this before trusting an existing ISO boundary.
+// this before trusting an existing iso boundary.
 func (s *SystemdService) ConvergeISONetworkGate() error {
 	installer := s.artifactInstaller()[db.ArtifactNetNSService]
 	step := installStep{artifact: db.ArtifactNetNSService, artifactInstall: installer}
 	if _, ok := s.cfg.AsStruct().Artifacts.Gen(db.ArtifactNetNSService, s.cfg.Generation()); !ok {
-		return fmt.Errorf("service %q has no ISO network gate artifact for generation %d", s.Name(), s.cfg.Generation())
+		return fmt.Errorf("service %q has no iso network gate artifact for generation %d", s.Name(), s.cfg.Generation())
 	}
 	rollback, err := captureInstallDestinationRollback([]installStep{step})
 	if err != nil {
@@ -901,7 +901,7 @@ func (s *SystemdService) ConvergeISONetworkGate() error {
 		if reloadErr != nil {
 			reloadErr = fmt.Errorf("reload restored systemd definitions: %w", reloadErr)
 		}
-		return errors.Join(fmt.Errorf("reload converged ISO network gate: %w", err), restoreErr, reloadErr)
+		return errors.Join(fmt.Errorf("reload converged iso network gate: %w", err), restoreErr, reloadErr)
 	}
 	return nil
 }

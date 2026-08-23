@@ -206,7 +206,7 @@ func TestRunWebBootstrapISOCompatibilityEnums(t *testing.T) {
 			gotISO = gotISO || mode == "iso"
 		}
 		if gotISO != wantISO[workload.Kind] {
-			t.Fatalf("workload %q networks = %#v, ISO = %v, want %v", workload.Kind, workload.Networks, gotISO, wantISO[workload.Kind])
+			t.Fatalf("workload %q networks = %#v, iso = %v, want %v", workload.Kind, workload.Networks, gotISO, wantISO[workload.Kind])
 		}
 	}
 }

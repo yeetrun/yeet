@@ -1039,7 +1039,7 @@ func TestPrepareNetworkRuntimeOrdersISOReconcileAfterDockerDNSAndReadiness(t *te
 	installDockerPrereqs = func(*Server) error { events = append(events, "docker-prereqs"); return nil }
 	installISODNSServiceForServer = func(_ string, runner string) error {
 		if runner != wantCatchRunner {
-			t.Fatalf("ISO DNS runner = %q, want stable runner %q", runner, wantCatchRunner)
+			t.Fatalf("iso DNS runner = %q, want stable runner %q", runner, wantCatchRunner)
 		}
 		events = append(events, "iso-dns")
 		return nil
@@ -1076,8 +1076,8 @@ func TestPrepareNetworkRuntimeSkipsDockerWaitWithoutContainerISO(t *testing.T) {
 	installYeetDNSServiceForServer = func(string, string) error { return nil }
 	installDockerPrereqs = func(*Server) error { return nil }
 	installISODNSServiceForServer = func(string, string) error { return nil }
-	waitDockerReadyForISOForServer = func(context.Context) error { t.Fatal("waited for Docker without container ISO work"); return nil }
-	reconcileISONetworksForServer = func(context.Context, *Server) error { t.Fatal("reconciled ISO state with no records"); return nil }
+	waitDockerReadyForISOForServer = func(context.Context) error { t.Fatal("waited for Docker without container iso work"); return nil }
+	reconcileISONetworksForServer = func(context.Context, *Server) error { t.Fatal("reconciled iso state with no records"); return nil }
 	t.Cleanup(func() {
 		installYeetNSService = oldNS
 		installYeetDNSServiceForServer = oldDNS

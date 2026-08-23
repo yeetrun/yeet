@@ -690,7 +690,7 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 // vmISOInterfaceSysctlCommands is safe to replay against a running VM TAP.
 // The dedicated /30 route is symmetric, so Yeet prefers strict reverse-path
 // validation. Verification also permits the kernel's documented loose mode:
-// host-wide rp_filter uses max(all, interface), while the verified ISO firewall
+// host-wide rp_filter uses max(all, interface), while the verified iso firewall
 // independently pins this TAP to the allocation's exact guest source address.
 func vmISOInterfaceSysctlCommands(iface vmNetworkInterfacePlan) [][]string {
 	return [][]string{
@@ -852,15 +852,15 @@ func validateVMNetworkInterfaceExecutable(iface vmNetworkInterfacePlan) error {
 
 func validateVMISONetworkInterface(iface vmNetworkInterfacePlan) error {
 	if !vmISOHasDedicatedTap(iface) {
-		return fmt.Errorf("VM ISO network requires one unbridged dedicated TAP")
+		return fmt.Errorf("VM iso network requires one unbridged dedicated TAP")
 	}
 	guest, err := netip.ParsePrefix(iface.GuestIP)
 	if err != nil || !validVMISOGuestPrefix(guest) {
-		return fmt.Errorf("VM ISO network requires a canonical IPv4 guest /30")
+		return fmt.Errorf("VM iso network requires a canonical IPv4 guest /30")
 	}
 	host, err := netip.ParseAddr(iface.Gateway)
 	if err != nil || !validVMISOHostGateway(guest, host) {
-		return fmt.Errorf("VM ISO network requires a host gateway inside the guest /30")
+		return fmt.Errorf("VM iso network requires a host gateway inside the guest /30")
 	}
 	return nil
 }

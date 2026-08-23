@@ -31,7 +31,7 @@ type isoDNSServer interface {
 
 func RunISODNSServer(ctx context.Context, cfg *Config) error {
 	if cfg == nil || cfg.DB == nil {
-		return fmt.Errorf("ISO DNS server requires a DB")
+		return fmt.Errorf("iso DNS server requires a DB")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -82,19 +82,19 @@ type isoDNSListenFunc func(network, address string) (net.Listener, error)
 func bindISODNSListeners(addr string, listenPacket isoDNSListenPacketFunc, listen isoDNSListenFunc) (net.PacketConn, net.Listener, error) {
 	packetConn, err := listenPacket("udp", addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bind ISO DNS UDP listener %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("bind iso DNS UDP listener %s: %w", addr, err)
 	}
 	listener, err := listen("tcp", addr)
 	if err != nil {
 		closeErr := packetConn.Close()
-		return nil, nil, errors.Join(fmt.Errorf("bind ISO DNS TCP listener %s: %w", addr, err), closeErr)
+		return nil, nil, errors.Join(fmt.Errorf("bind iso DNS TCP listener %s: %w", addr, err), closeErr)
 	}
 	return packetConn, listener, nil
 }
 
 func runISODNSServers(ctx context.Context, servers []isoDNSServer) error {
 	if len(servers) != 2 || servers[0] == nil || servers[1] == nil {
-		return fmt.Errorf("ISO DNS requires exactly one UDP and one TCP server")
+		return fmt.Errorf("iso DNS requires exactly one UDP and one TCP server")
 	}
 	errCh := startISODNSServers(servers)
 	received, serveErr := waitForISODNSServerStop(ctx, errCh)
@@ -103,7 +103,7 @@ func runISODNSServers(ctx context.Context, servers []isoDNSServer) error {
 	shutdownErr := shutdownISODNSServers(shutdownCtx, servers)
 	joinErr := waitForISODNSServerExits(shutdownCtx, errCh, received, len(servers))
 	if serveErr != nil {
-		log.Printf("ISO DNS server stopped after listener failure: %v", serveErr)
+		log.Printf("iso DNS server stopped after listener failure: %v", serveErr)
 	}
 	return errors.Join(serveErr, shutdownErr, joinErr)
 }
@@ -124,7 +124,7 @@ func waitForISODNSServerStop(ctx context.Context, errCh <-chan error) (int, erro
 		return 0, nil
 	case err := <-errCh:
 		if err == nil && ctx.Err() == nil {
-			err = fmt.Errorf("ISO DNS listener stopped unexpectedly")
+			err = fmt.Errorf("iso DNS listener stopped unexpectedly")
 		}
 		return 1, err
 	}
@@ -150,7 +150,7 @@ func waitForISODNSServerExits(ctx context.Context, errCh <-chan error, received,
 		case <-errCh:
 			received++
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for ISO DNS listeners to exit: %w", ctx.Err())
+			return fmt.Errorf("timed out waiting for iso DNS listeners to exit: %w", ctx.Err())
 		}
 	}
 	return nil
@@ -166,15 +166,15 @@ func newConfigISODNSPoolStore(cfg *Config) isoDNSPoolStore {
 
 func (s configISODNSPoolStore) ISOPool(context.Context) (netip.Prefix, error) {
 	if s.store == nil {
-		return netip.Prefix{}, fmt.Errorf("ISO DNS pool store is unavailable")
+		return netip.Prefix{}, fmt.Errorf("iso DNS pool store is unavailable")
 	}
 	dv, err := s.store.Get()
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("load ISO DNS pool: %w", err)
+		return netip.Prefix{}, fmt.Errorf("load iso DNS pool: %w", err)
 	}
 	pool := dv.ISOPool()
 	if !pool.Valid() || !validISODNSPool(pool.Prefix()) {
-		return netip.Prefix{}, fmt.Errorf("ISO DNS pool is not configured")
+		return netip.Prefix{}, fmt.Errorf("iso DNS pool is not configured")
 	}
 	return pool.Prefix(), nil
 }

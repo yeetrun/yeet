@@ -44,10 +44,10 @@ type isoComposeIPAMConfig struct {
 
 func renderISOComposeOverlay(allocation *db.ISOAllocation, model ISOComposeModel) (string, error) {
 	if allocation == nil {
-		return "", fmt.Errorf("ISO container allocation is incomplete")
+		return "", fmt.Errorf("iso container allocation is incomplete")
 	}
 	if err := validateISOPersistedOverlay("networks.default", allocation); err != nil {
-		return "", fmt.Errorf("ISO container allocation is incomplete: %w", err)
+		return "", fmt.Errorf("iso container allocation is incomplete: %w", err)
 	}
 
 	resolver := isoComposeResolver(allocation)
@@ -71,7 +71,7 @@ func renderISOComposeOverlay(allocation *db.ISOAllocation, model ISOComposeModel
 	for _, name := range model.Components {
 		component, ok := allocation.Components[name]
 		if !ok || !component.Address.IsValid() {
-			return "", fmt.Errorf("ISO component %q has no reserved address", name)
+			return "", fmt.Errorf("iso component %q has no reserved address", name)
 		}
 		overlay.Services[name] = isoComposeOverlayService{
 			Networks: map[string]isoComposeServiceNetwork{
@@ -82,7 +82,7 @@ func renderISOComposeOverlay(allocation *db.ISOAllocation, model ISOComposeModel
 	}
 	raw, err := yaml.Marshal(overlay)
 	if err != nil {
-		return "", fmt.Errorf("marshal ISO Compose overlay: %w", err)
+		return "", fmt.Errorf("marshal iso Compose overlay: %w", err)
 	}
 	return string(raw), nil
 }

@@ -204,8 +204,8 @@ func TestInspectISOProjectRejectsMalformedDockerJSON(t *testing.T) {
 	for _, tt := range []struct {
 		name, operation, want string
 	}{
-		{name: "Compose ps", operation: "compose-ps", want: "decode ISO Compose project containers"},
-		{name: "Docker inspect", operation: "inspect", want: "decode ISO Docker containers"},
+		{name: "Compose ps", operation: "compose-ps", want: "decode iso Compose project containers"},
+		{name: "Docker inspect", operation: "inspect", want: "decode iso Docker containers"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			opts, _ := newISOInspectTestOptions(t)
@@ -533,7 +533,7 @@ func (r *isoInspectTestRunner) run(_ context.Context, operation string, _ ...str
 	case "inspect":
 		return json.Marshal(r.inspect)
 	default:
-		return nil, fmt.Errorf("unexpected ISO inspection operation %q", operation)
+		return nil, fmt.Errorf("unexpected iso inspection operation %q", operation)
 	}
 }
 

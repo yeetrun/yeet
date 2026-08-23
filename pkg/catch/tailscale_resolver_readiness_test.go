@@ -381,13 +381,13 @@ func TestNonTailscaleISOVMActivationBypassesResolverRecoveryBlock(t *testing.T) 
 			}
 
 			if err := test.run(execer); err != nil {
-				t.Fatalf("non-Tailscale ISO VM %s: %v", test.name, err)
+				t.Fatalf("non-Tailscale iso VM %s: %v", test.name, err)
 			}
 			if runtimeCalls != 1 || ensureCalls != 1 {
-				t.Fatalf("non-Tailscale ISO VM %s runtime=%d ensure=%d, want 1 each", test.name, runtimeCalls, ensureCalls)
+				t.Fatalf("non-Tailscale iso VM %s runtime=%d ensure=%d, want 1 each", test.name, runtimeCalls, ensureCalls)
 			}
 			if !reflect.DeepEqual(runner.calls, []string{test.want}) {
-				t.Fatalf("non-Tailscale ISO VM %s runner calls = %v, want [%s]", test.name, runner.calls, test.want)
+				t.Fatalf("non-Tailscale iso VM %s runner calls = %v, want [%s]", test.name, runner.calls, test.want)
 			}
 		})
 	}

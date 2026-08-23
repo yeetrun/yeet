@@ -1255,7 +1255,7 @@ func TestIPCmdFuncPrintsPersistedISOComponentsWithoutRuntimeDiscovery(t *testing
 	}
 	oldList := listIPv4AddrsFn
 	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) {
-		t.Fatal("ISO endpoint listing used runtime discovery")
+		t.Fatal("iso endpoint listing used runtime discovery")
 		return nil, nil
 	}
 	t.Cleanup(func() { listIPv4AddrsFn = oldList })

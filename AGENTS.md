@@ -120,6 +120,9 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Go code is formatted with `gofmt` and follows standard Go conventions.
 - Package names are lowercase; exported identifiers use `PascalCase`.
 - CLI flags use kebab-case in tags (e.g., `flag:"ts-auth-key"`).
+- In user-facing text, write `iso` lowercase because it names the isolated
+  network mode. Preserve established Go and schema identifiers such as
+  `ServiceISO` where compatibility or Go naming requires them.
 - Keep functions small and explicit; avoid hidden side effects in CLI parsing.
 - Avoid magic strings; use constants or shared registries for command names/keywords.
 

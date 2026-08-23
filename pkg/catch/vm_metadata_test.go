@@ -68,7 +68,7 @@ func TestVMISOMetadataUsesPublicOnlyDNSAndDisablesIPv6(t *testing.T) {
 		}
 	}
 	if strings.Contains(unit, "yeet.internal") || strings.Contains(unit, "192.168.100.1") || strings.Contains(unit, "Domains=") {
-		t.Fatalf("ISO networkd unit leaked fallback DNS/search:\n%s", unit)
+		t.Fatalf("iso networkd unit leaked fallback DNS/search:\n%s", unit)
 	}
 
 	yaml := renderVMNetworkYAML([]vmGuestNetwork{network})
@@ -83,7 +83,7 @@ func TestVMISOMetadataUsesPublicOnlyDNSAndDisablesIPv6(t *testing.T) {
 		}
 	}
 	if strings.Contains(yaml, "yeet.internal") || strings.Contains(yaml, "192.168.100.1") || strings.Contains(yaml, "search:") {
-		t.Fatalf("ISO netplan leaked fallback DNS/search:\n%s", yaml)
+		t.Fatalf("iso netplan leaked fallback DNS/search:\n%s", yaml)
 	}
 }
 

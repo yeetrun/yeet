@@ -507,7 +507,7 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 func TestVMISOSSHAlwaysUsesCatchProxy(t *testing.T) {
 	oldReachable := vmSSHLANReachableFunc
 	vmSSHLANReachableFunc = func(string) bool {
-		t.Fatal("ISO VM SSH must not probe workstation reachability")
+		t.Fatal("iso VM SSH must not probe workstation reachability")
 		return false
 	}
 	t.Cleanup(func() { vmSSHLANReachableFunc = oldReachable })

@@ -705,7 +705,7 @@ func (m *isoServiceNetworkMutation) publishPlannedISOReservation(ctx context.Con
 		return err
 	}
 	if !m.reservationPending || m.staged == nil || m.staged.ISO == nil {
-		return fmt.Errorf("service %q has no pending preflighted ISO reservation", m.plan.name)
+		return fmt.Errorf("service %q has no pending preflighted iso reservation", m.plan.name)
 	}
 	request := isoReservationRequest{Kind: iso.PayloadNative, Modes: slices.Clone(m.plan.desired.Modes)}
 	_, err := m.server.cfg.DB.MutateData(func(data *db.Data) error {
@@ -725,10 +725,10 @@ func (m *isoServiceNetworkMutation) publishPlannedISOReservation(ctx context.Con
 func (m *isoServiceNetworkMutation) publishPlannedISOReservationInData(data *db.Data, request isoReservationRequest) error {
 	current := data.Services[m.plan.name]
 	if !serviceNetworkRecordsEqual(current, m.plan.previous) {
-		return fmt.Errorf("service %q changed before publishing preflighted ISO reservation", m.plan.name)
+		return fmt.Errorf("service %q changed before publishing preflighted iso reservation", m.plan.name)
 	}
 	if isoAllocationClaimedByPeer(data.Services, m.plan.name, m.staged.ISO) {
-		return fmt.Errorf("service %q ISO allocation was claimed after sandbox preflight", m.plan.name)
+		return fmt.Errorf("service %q iso allocation was claimed after sandbox preflight", m.plan.name)
 	}
 	candidate := current.Clone()
 	allocation, err := reserveISOAllocationInData(m.plan.name, request, data, candidate)
@@ -736,7 +736,7 @@ func (m *isoServiceNetworkMutation) publishPlannedISOReservationInData(data *db.
 		return err
 	}
 	if !serviceNetworkRecordsEqual(candidate, m.staged) || !reflect.DeepEqual(allocation, m.staged.ISO) {
-		return fmt.Errorf("service %q ISO allocation changed after sandbox preflight", m.plan.name)
+		return fmt.Errorf("service %q iso allocation changed after sandbox preflight", m.plan.name)
 	}
 	data.Services[m.plan.name] = m.staged.Clone()
 	return nil
@@ -783,7 +783,7 @@ func (m *isoServiceNetworkMutation) restorePreviousAfterISOReservation() error {
 
 func (m *isoServiceNetworkMutation) validateStagedISOReservation(current *db.Service) error {
 	if m.staged == nil || !serviceNetworkRecordsEqual(current, m.staged) {
-		return fmt.Errorf("service %q changed while rolling back staged ISO network", m.plan.name)
+		return fmt.Errorf("service %q changed while rolling back staged iso network", m.plan.name)
 	}
 	return nil
 }
@@ -792,12 +792,12 @@ func (m *isoServiceNetworkMutation) tombstoneFailedISOStageRestore(restoreErr er
 	if restoreErr == nil {
 		return nil
 	}
-	return m.server.markISOStateExact(m.plan.name, m.staged, string(iso.StateTombstoned), restoreErr, "rolling back staged ISO network")
+	return m.server.markISOStateExact(m.plan.name, m.staged, string(iso.StateTombstoned), restoreErr, "rolling back staged iso network")
 }
 
 func (s *Server) markISOStateExact(name string, expected *db.Service, state string, cause error, operation string) error {
 	if expected == nil {
-		return fmt.Errorf("service %q cannot update ISO state during %s without an exact expected record", name, operation)
+		return fmt.Errorf("service %q cannot update iso state during %s without an exact expected record", name, operation)
 	}
 	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[name]
@@ -805,7 +805,7 @@ func (s *Server) markISOStateExact(name string, expected *db.Service, state stri
 			return fmt.Errorf("service %q changed while %s", name, operation)
 		}
 		if current.ISO == nil {
-			return fmt.Errorf("service %q has no ISO allocation while %s", name, operation)
+			return fmt.Errorf("service %q has no iso allocation while %s", name, operation)
 		}
 		current.ISO.State = state
 		current.ISO.LastError = ""
@@ -851,7 +851,7 @@ func (m *isoServiceNetworkMutation) stopISORecord(ctx context.Context, record *d
 		}
 		return errors.Join(compose.StopProjectContainers(ctx), stopAndVerifyISOAuxiliaryUnits(ctx, record))
 	default:
-		return fmt.Errorf("stop ISO service type %q", record.ServiceType)
+		return fmt.Errorf("stop iso service type %q", record.ServiceType)
 	}
 }
 
@@ -869,7 +869,7 @@ func (m *isoServiceNetworkMutation) Activate(ctx context.Context) error {
 	case db.ServiceTypeDockerCompose:
 		return m.activateISOCompose(ctx)
 	default:
-		return fmt.Errorf("activate ISO service type %q", m.target.ServiceType)
+		return fmt.Errorf("activate iso service type %q", m.target.ServiceType)
 	}
 }
 
@@ -910,7 +910,7 @@ func (m *isoServiceNetworkMutation) verifyDesiredISORuntime(ctx context.Context)
 	case db.ServiceTypeDockerCompose:
 		return m.verifyDesiredISOComposeRuntime(ctx)
 	default:
-		return fmt.Errorf("verify ISO service type %q", m.target.ServiceType)
+		return fmt.Errorf("verify iso service type %q", m.target.ServiceType)
 	}
 }
 
@@ -992,7 +992,7 @@ func (m *isoServiceNetworkMutation) desiredISOState() string {
 
 func (m *isoServiceNetworkMutation) validateStagedISOCommit(current *db.Service) error {
 	if m.staged == nil || !serviceNetworkRecordsEqual(current, m.staged) {
-		return fmt.Errorf("service %q changed during ISO network mutation", m.plan.name)
+		return fmt.Errorf("service %q changed during iso network mutation", m.plan.name)
 	}
 	return nil
 }
@@ -1053,7 +1053,7 @@ func (m *isoServiceNetworkMutation) claimReplacementBeforeISORestore() (bool, er
 	}
 	_, err = mutateServiceNetworkRestoreData(m.server.cfg.DB, func(data *db.Data) error {
 		if !serviceNetworkISOClaimRecordsEqual(data.Services[m.plan.name], expected, data.ISOPool, m.boundaryFailure) {
-			return fmt.Errorf("service %q changed while rolling back staged ISO network; cannot claim exact record", m.plan.name)
+			return fmt.Errorf("service %q changed while rolling back staged iso network; cannot claim exact record", m.plan.name)
 		}
 		data.Services[m.plan.name] = claimed.Clone()
 		return nil
@@ -1074,20 +1074,20 @@ func (m *isoServiceNetworkMutation) isoRestoreClaimRecords() (expected, claimed 
 		expected = m.target
 	}
 	if expected == nil || m.target == nil {
-		return nil, nil, fmt.Errorf("service %q cannot claim ISO network rollback without an exact staged record", m.plan.name)
+		return nil, nil, fmt.Errorf("service %q cannot claim iso network rollback without an exact staged record", m.plan.name)
 	}
 	claimed = m.target.Clone()
 	if m.direction == serviceNetworkISOToRegular {
 		if m.plan.previous == nil || m.plan.previous.ISO == nil {
-			return nil, nil, fmt.Errorf("service %q cannot claim ISO-to-regular rollback without the previous ISO allocation", m.plan.name)
+			return nil, nil, fmt.Errorf("service %q cannot claim iso-to-regular rollback without the previous iso allocation", m.plan.name)
 		}
 		claimed = m.plan.previous.Clone()
 	}
 	if claimed.ISO == nil {
-		return nil, nil, fmt.Errorf("service %q cannot claim ISO network rollback without an ISO allocation", m.plan.name)
+		return nil, nil, fmt.Errorf("service %q cannot claim iso network rollback without an iso allocation", m.plan.name)
 	}
 	claimed.ISO.State = string(iso.StateTombstoned)
-	claimed.ISO.LastError = "rolling back staged ISO network"
+	claimed.ISO.LastError = "rolling back staged iso network"
 	return expected, claimed, nil
 }
 
@@ -1141,7 +1141,7 @@ func (m *isoServiceNetworkMutation) restorePreviousRecord() error {
 			data.Services[m.plan.name] = m.plan.previous.Clone()
 			return nil
 		default:
-			return fmt.Errorf("service %q changed while restoring ISO network mutation", m.plan.name)
+			return fmt.Errorf("service %q changed while restoring iso network mutation", m.plan.name)
 		}
 	})
 	return err
@@ -1161,7 +1161,7 @@ func (m *isoServiceNetworkMutation) restorePreviousISO(ctx context.Context) erro
 	case db.ServiceTypeDockerCompose:
 		return restored.activateISOCompose(ctx)
 	default:
-		return fmt.Errorf("restore ISO service type %q", m.plan.previous.ServiceType)
+		return fmt.Errorf("restore iso service type %q", m.plan.previous.ServiceType)
 	}
 }
 
@@ -1203,11 +1203,11 @@ func (m *isoServiceNetworkMutation) markISOTransitionTombstone() error {
 	_, err := m.server.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[m.plan.name]
 		if !m.failClosedRecordIsAttributable(current) {
-			return fmt.Errorf("service %q changed before ISO fail-closed tombstone", m.plan.name)
+			return fmt.Errorf("service %q changed before iso fail-closed tombstone", m.plan.name)
 		}
 		record := m.failClosedISORecord(current)
 		if record == nil {
-			return fmt.Errorf("service %q has no ISO record for fail-closed recovery", m.plan.name)
+			return fmt.Errorf("service %q has no iso record for fail-closed recovery", m.plan.name)
 		}
 		data.Services[m.plan.name] = record
 		if record.ISO != nil {
@@ -1785,7 +1785,7 @@ func setRegularNetworkTargetArtifact(target *db.Service, name db.ArtifactName, p
 
 func (s *Server) stageISOServiceNetworkReplacement(ctx context.Context, plan *serviceNetworkMutationPlan) (target, staged *db.Service, retErr error) {
 	if plan == nil || plan.previous == nil {
-		return nil, nil, errors.New("stage ISO service network replacement without a plan")
+		return nil, nil, errors.New("stage iso service network replacement without a plan")
 	}
 	switch plan.previous.ServiceType {
 	case db.ServiceTypeSystemd:
@@ -1793,7 +1793,7 @@ func (s *Server) stageISOServiceNetworkReplacement(ctx context.Context, plan *se
 	case db.ServiceTypeDockerCompose:
 		return s.stageComposeISOServiceNetworkReplacement(ctx, plan)
 	default:
-		return nil, nil, fmt.Errorf("stage ISO network for service type %q", plan.previous.ServiceType)
+		return nil, nil, fmt.Errorf("stage iso network for service type %q", plan.previous.ServiceType)
 	}
 }
 
@@ -1845,7 +1845,7 @@ type isoNativeNetworkStage struct {
 
 func newISONativeNetworkStage(ctx context.Context, server *Server, plan *serviceNetworkMutationPlan) (*isoNativeNetworkStage, error) {
 	if plan == nil || plan.previous == nil {
-		return nil, errors.New("stage ISO service network replacement without a plan")
+		return nil, errors.New("stage iso service network replacement without a plan")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1853,7 +1853,7 @@ func newISONativeNetworkStage(ctx context.Context, server *Server, plan *service
 	root := server.serviceRootFromView(plan.previous.View())
 	txn, err := beginRegularNetworkArtifactTransaction(root, plan.previous)
 	if err != nil {
-		return nil, fmt.Errorf("begin ISO service network artifact transaction: %w", err)
+		return nil, fmt.Errorf("begin iso service network artifact transaction: %w", err)
 	}
 	plan.artifactTxn = txn
 	return &isoNativeNetworkStage{server: server, ctx: ctx, plan: plan, root: root, txn: txn}, nil
@@ -1879,7 +1879,7 @@ func (s *isoNativeNetworkStage) reserve(ctx context.Context) error {
 		Kind: iso.PayloadNative, Modes: slices.Clone(s.plan.desired.Modes),
 	})
 	if err != nil {
-		return fmt.Errorf("reserve native ISO allocation: %w", err)
+		return fmt.Errorf("reserve native iso allocation: %w", err)
 	}
 	s.allocation = allocation
 	s.staged = staged
@@ -1901,7 +1901,7 @@ func (s *isoNativeNetworkStage) planReservation(ctx context.Context) (*db.Data, 
 	data := dv.AsStruct()
 	current := data.Services[s.plan.name]
 	if !serviceNetworkRecordsEqual(current, s.plan.previous) {
-		return nil, fmt.Errorf("service %q changed while planning ISO allocation", s.plan.name)
+		return nil, fmt.Errorf("service %q changed while planning iso allocation", s.plan.name)
 	}
 	staged := current.Clone()
 	allocation, err := reserveISOAllocationInData(s.plan.name, isoReservationRequest{
@@ -1920,7 +1920,7 @@ func (s *isoNativeNetworkStage) renderArtifacts() error {
 	s.artifacts = map[db.ArtifactName]string{}
 	resolver, err := writeOwnedRegularNetworkArtifact(s.txn, db.ArtifactNetNSResolv, s.root, "bin", "iso-resolv-", ".conf", []byte("nameserver "+s.allocation.HostIP.String()+"\n"), 0o644)
 	if err != nil {
-		return fmt.Errorf("stage native ISO resolver: %w", err)
+		return fmt.Errorf("stage native iso resolver: %w", err)
 	}
 	s.artifacts[db.ArtifactNetNSResolv] = resolver
 	gate, err := stageFreshISOServiceNetworkGate(s.server, s.root, s.plan.name, s.txn)
@@ -2004,7 +2004,7 @@ func newISOComposeNetworkStage(ctx context.Context, server *Server, plan *servic
 	root := server.serviceRootFromView(plan.previous.View())
 	txn, err := beginRegularNetworkArtifactTransaction(root, plan.previous)
 	if err != nil {
-		return nil, fmt.Errorf("begin ISO service network artifact transaction: %w", err)
+		return nil, fmt.Errorf("begin iso service network artifact transaction: %w", err)
 	}
 	plan.artifactTxn = txn
 	return &isoComposeNetworkStage{server: server, plan: plan, root: root, txn: txn}, nil
@@ -2027,12 +2027,12 @@ func (s *isoComposeNetworkStage) rollbackOnError(retErr *error) {
 
 func restoreISOStageReservation(server *Server, plan *serviceNetworkMutationPlan, staged *db.Service, cause error) error {
 	if staged == nil {
-		return fmt.Errorf("service %q cannot roll back ISO reservation without an exact reserved record", plan.name)
+		return fmt.Errorf("service %q cannot roll back iso reservation without an exact reserved record", plan.name)
 	}
 	_, restoreErr := server.cfg.DB.MutateData(func(data *db.Data) error {
 		current := data.Services[plan.name]
 		if !serviceNetworkRecordsEqual(current, staged) {
-			return fmt.Errorf("service %q changed while rolling back ISO reservation", plan.name)
+			return fmt.Errorf("service %q changed while rolling back iso reservation", plan.name)
 		}
 		data.Services[plan.name] = plan.previous.Clone()
 		return nil
@@ -2040,7 +2040,7 @@ func restoreISOStageReservation(server *Server, plan *serviceNetworkMutationPlan
 	if restoreErr == nil {
 		return nil
 	}
-	tombstoneErr := server.markISOStateExact(plan.name, staged, string(iso.StateTombstoned), errors.Join(cause, restoreErr), "rolling back ISO reservation")
+	tombstoneErr := server.markISOStateExact(plan.name, staged, string(iso.StateTombstoned), errors.Join(cause, restoreErr), "rolling back iso reservation")
 	return errors.Join(restoreErr, tombstoneErr)
 }
 
@@ -2055,19 +2055,19 @@ func (s *isoComposeNetworkStage) resolveBaseAndReserve(ctx context.Context) erro
 	}
 	baseJSON, err := resolveISOComposeForNetworkMutation(ctx, s.options)
 	if err != nil {
-		return fmt.Errorf("resolve base ISO Compose model: %w", err)
+		return fmt.Errorf("resolve base iso Compose model: %w", err)
 	}
 	s.model, err = AdmitISOCompose(baseJSON, ISOComposeAdmissionOptions{
 		ServiceRoot: s.root, ProjectName: svc.ComposeProjectName(s.plan.name), MaxComponents: iso.MaxComponents,
 	})
 	if err != nil {
-		return fmt.Errorf("admit base ISO Compose model: %w", err)
+		return fmt.Errorf("admit base iso Compose model: %w", err)
 	}
 	s.allocation, s.staged, err = s.server.reserveISOAllocationExact(ctx, s.plan.name, isoReservationRequest{
 		Kind: iso.PayloadCompose, Modes: slices.Clone(s.plan.desired.Modes), Components: slices.Clone(s.model.Components),
 	})
 	if err != nil {
-		return fmt.Errorf("reserve ISO Compose allocation: %w", err)
+		return fmt.Errorf("reserve iso Compose allocation: %w", err)
 	}
 	s.reserved = true
 	return nil
@@ -2087,16 +2087,16 @@ func (s *isoComposeNetworkStage) renderAndAdmitOverlay(ctx context.Context) erro
 	s.options.Files = []string{s.base, overlayPath}
 	mergedJSON, err := resolveISOComposeForNetworkMutation(ctx, s.options)
 	if err != nil {
-		return fmt.Errorf("resolve merged ISO Compose model: %w", err)
+		return fmt.Errorf("resolve merged iso Compose model: %w", err)
 	}
 	merged, err := AdmitISOCompose(mergedJSON, ISOComposeAdmissionOptions{
 		ServiceRoot: s.root, ProjectName: svc.ComposeProjectName(s.plan.name), MaxComponents: iso.MaxComponents, RequireISOOverlay: s.allocation,
 	})
 	if err != nil {
-		return fmt.Errorf("admit merged ISO Compose model: %w", err)
+		return fmt.Errorf("admit merged iso Compose model: %w", err)
 	}
 	if !slices.Equal(s.model.Components, merged.Components) {
-		return fmt.Errorf("ISO overlay changed Compose components: base %v, merged %v", s.model.Components, merged.Components)
+		return fmt.Errorf("iso overlay changed Compose components: base %v, merged %v", s.model.Components, merged.Components)
 	}
 	gate, err := stageFreshISOServiceNetworkGate(s.server, s.root, s.plan.name, s.txn)
 	if err != nil {
@@ -2157,11 +2157,11 @@ func stageFreshISOServiceNetworkGate(server *Server, root, service string, txn *
 	defer func() { _ = os.RemoveAll(tempDir) }()
 	files, err := unit.WriteOutUnitFiles(tempDir)
 	if err != nil {
-		return "", fmt.Errorf("render ISO network gate unit: %w", err)
+		return "", fmt.Errorf("render iso network gate unit: %w", err)
 	}
 	source := files[db.ArtifactSystemdUnit]
 	if source == "" {
-		return "", errors.New("ISO network gate did not render a systemd unit")
+		return "", errors.New("iso network gate did not render a systemd unit")
 	}
 	raw, err := os.ReadFile(source)
 	if err != nil {
@@ -3596,21 +3596,21 @@ func (m *isoNetworkIdentityMutation) run() error {
 		return m.runPlannedDesiredISO()
 	}
 	if err := m.mutation.Stage(m.ctx); err != nil {
-		return fmt.Errorf("stage ISO service network replacement: %w", err)
+		return fmt.Errorf("stage iso service network replacement: %w", err)
 	}
 	return m.runAfterStage()
 }
 
 func (m *isoNetworkIdentityMutation) runPlannedDesiredISO() error {
 	if err := m.mutation.stagePlannedDesiredISO(m.ctx); err != nil {
-		return fmt.Errorf("plan ISO service network replacement: %w", err)
+		return fmt.Errorf("plan iso service network replacement: %w", err)
 	}
 	request, guarded, err := m.buildMigrationRequest()
 	if err != nil {
 		return err
 	}
 	if err := m.mutation.publishPlannedISOReservation(m.ctx); err != nil {
-		return fmt.Errorf("publish preflighted ISO service network reservation: %w", err)
+		return fmt.Errorf("publish preflighted iso service network reservation: %w", err)
 	}
 	if err := m.prepareBoundary(); err != nil {
 		return m.recover(err)
@@ -3648,20 +3648,20 @@ func (m *isoNetworkIdentityMutation) prepareBoundary() error {
 		return m.prepareISOToRegularBoundary()
 	}
 	if err := m.server.EnsureISONetworkBoundary(m.ctx, m.plan.name); err != nil {
-		return fmt.Errorf("verify ISO boundary before identity replacement: %w", err)
+		return fmt.Errorf("verify iso boundary before identity replacement: %w", err)
 	}
 	return nil
 }
 
 func (m *isoNetworkIdentityMutation) prepareISOToRegularBoundary() error {
 	if err := m.mutation.StopPrevious(m.ctx); err != nil {
-		return fmt.Errorf("stop ISO service before identity replacement: %w", err)
+		return fmt.Errorf("stop iso service before identity replacement: %w", err)
 	}
 	if err := m.mutation.Activate(m.ctx); err != nil {
-		return fmt.Errorf("clean ISO service before identity replacement: %w", err)
+		return fmt.Errorf("clean iso service before identity replacement: %w", err)
 	}
 	if err := m.mutation.Verify(m.ctx); err != nil {
-		return fmt.Errorf("verify ISO absence before identity replacement: %w", err)
+		return fmt.Errorf("verify iso absence before identity replacement: %w", err)
 	}
 	return nil
 }
@@ -3689,7 +3689,7 @@ func (m *isoNetworkIdentityMutation) buildMigrationRequest() (serviceIdentityMig
 
 func (m *isoNetworkIdentityMutation) runPrepared(request serviceIdentityMigrationRequest, guarded bool) error {
 	if err := runServiceNetworkIdentityMigration(m.ctx, m.server, request, m.out, guarded); err != nil {
-		return m.recover(fmt.Errorf("mutate ISO service network and identity atomically: %w", err))
+		return m.recover(fmt.Errorf("mutate iso service network and identity atomically: %w", err))
 	}
 	if err := m.commitISOState(); err != nil {
 		return err
@@ -3709,7 +3709,7 @@ func (m *isoNetworkIdentityMutation) commitISOState() error {
 	if m.plan.previousRunning || serviceIdentityAnyRuntimeActive(m.plan.previousRuntime) {
 		state = string(iso.StateReady)
 	}
-	if err := m.server.markISOStateExact(m.plan.name, m.mutation.target, state, nil, "committing combined ISO network and identity state"); err != nil {
+	if err := m.server.markISOStateExact(m.plan.name, m.mutation.target, state, nil, "committing combined iso network and identity state"); err != nil {
 		return errors.Join(err, m.mutation.FailClosed(context.WithoutCancel(m.ctx)))
 	}
 	return nil

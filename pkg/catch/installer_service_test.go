@@ -162,7 +162,7 @@ func TestInstallISONativeOrdersActivationInspectionAndReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(recorder.events, []string{"install", "restart", "inspect", "ready"}) {
-		t.Fatalf("native ISO install events = %v", recorder.events)
+		t.Fatalf("native iso install events = %v", recorder.events)
 	}
 
 	recorder = &isoNativeInstallRecorder{failAt: "restart"}
@@ -171,112 +171,7 @@ func TestInstallISONativeOrdersActivationInspectionAndReady(t *testing.T) {
 		t.Fatalf("installISONativeWith error = %v, want restart failure", err)
 	}
 	if !reflect.DeepEqual(recorder.events, []string{"install", "restart", "quarantine"}) {
-		t.Fatalf("failed native ISO install events = %v", recorder.events)
-	}
-}
-
-func TestReadmitISONativeRevalidatesBoundaryAndRuntimeBeforeReady(t *testing.T) {
-	recorder := &isoNativeInstallRecorder{}
-	if err := readmitISONativeWith(context.Background(), recorder); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "ready"}) {
-		t.Fatalf("native ISO readmission events = %v", recorder.events)
-	}
-
-	recorder = &isoNativeInstallRecorder{failAt: "inspect"}
-	err := readmitISONativeWith(context.Background(), recorder)
-	if err == nil || !strings.Contains(err.Error(), "inspect") {
-		t.Fatalf("readmitISONativeWith error = %v, want inspection failure", err)
-	}
-	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "quarantine"}) {
-		t.Fatalf("failed native ISO readmission events = %v", recorder.events)
-	}
-}
-
-func TestMarkNativeISOReadmittedExactClearsQuarantineOnlyAfterExactMatch(t *testing.T) {
-	server := newTestServer(t)
-	record := &db.Service{
-		Name: "api", ServiceType: db.ServiceTypeSystemd,
-		ISO: testISONativeRuntimeAllocation("api", iso.StateQuarantined),
-	}
-	record.ISO.LastError = "runtime boundary missing"
-	if err := server.cfg.DB.Set(&db.Data{
-		ISOPool:  &db.ISOPool{AggregateRouteState: "conflict", LastConflict: record.ISO.LastError},
-		Services: map[string]*db.Service{"api": record.Clone()},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := server.markNativeISOReadmittedExact(record.Clone()); err != nil {
-		t.Fatal(err)
-	}
-	view, err := server.cfg.DB.Get()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := view.Services().Get("api").ISO()
-	if got.State() != string(iso.StateReady) || got.LastError() != "" {
-		t.Fatalf("readmitted allocation = %#v, want ready without diagnostic", got.AsStruct())
-	}
-	if view.ISOPool().AggregateRouteState() != "ready" || view.ISOPool().LastConflict() != "" {
-		t.Fatalf("readmitted pool = %#v, want ready without conflict", view.ISOPool().AsStruct())
-	}
-}
-
-func TestServerReadmitNativeISOValidatesAndRunsUnderISOOperationLock(t *testing.T) {
-	server := newTestServer(t)
-	record := &db.Service{
-		Name: "api", ServiceType: db.ServiceTypeSystemd,
-		ISO: testISONativeRuntimeAllocation("api", iso.StateQuarantined),
-	}
-	oldFactory := newNativeISOReadmitSteps
-	oldAcquire := acquireISOOperationLockForRuntime
-	locked := false
-	recorder := &isoNativeInstallRecorder{assertLocked: func() {
-		if !locked {
-			t.Fatal("readmission phase ran outside the host ISO lock")
-		}
-	}}
-	newNativeISOReadmitSteps = func(gotServer *Server, gotRecord *db.Service) (isoNativeReadmitSteps, error) {
-		if gotServer != server || gotRecord != record {
-			t.Fatalf("readmission factory = (%p, %p), want (%p, %p)", gotServer, gotRecord, server, record)
-		}
-		return recorder, nil
-	}
-	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
-		locked = true
-		return func() { locked = false }, nil
-	}
-	t.Cleanup(func() {
-		newNativeISOReadmitSteps = oldFactory
-		acquireISOOperationLockForRuntime = oldAcquire
-	})
-
-	if err := server.readmitNativeISO(context.Background(), record); err != nil {
-		t.Fatal(err)
-	}
-	if locked {
-		t.Fatal("host ISO lock remained held after readmission")
-	}
-	if !reflect.DeepEqual(recorder.events, []string{"boundary", "install", "restart", "inspect", "ready"}) {
-		t.Fatalf("readmission events = %v", recorder.events)
-	}
-
-	invalid := []*db.Service{
-		nil,
-		{Name: "api", ServiceType: db.ServiceTypeSystemd},
-		{Name: "api", ServiceType: db.ServiceTypeDockerCompose, ISO: record.ISO.Clone()},
-		{Name: "api", ServiceType: db.ServiceTypeSystemd, ISO: testISORuntimeAllocation("api", iso.StateQuarantined)},
-		{Name: "api", ServiceType: db.ServiceTypeSystemd, ISO: testISONativeRuntimeAllocation("api", iso.StateStopped)},
-	}
-	removing := record.Clone()
-	removing.ISO.RemoveRequested = true
-	invalid = append(invalid, removing)
-	for _, candidate := range invalid {
-		if err := server.readmitNativeISO(context.Background(), candidate); err == nil {
-			t.Fatalf("readmitNativeISO(%#v) returned nil, want validation error", candidate)
-		}
+		t.Fatalf("failed native iso install events = %v", recorder.events)
 	}
 }
 
@@ -434,15 +329,11 @@ func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *test
 }
 
 type isoNativeInstallRecorder struct {
-	events       []string
-	failAt       string
-	assertLocked func()
+	events []string
+	failAt string
 }
 
 func (r *isoNativeInstallRecorder) step(name string) error {
-	if r.assertLocked != nil {
-		r.assertLocked()
-	}
 	r.events = append(r.events, name)
 	if name == r.failAt {
 		return errors.New(name + " failed")
@@ -451,9 +342,6 @@ func (r *isoNativeInstallRecorder) step(name string) error {
 }
 
 func (r *isoNativeInstallRecorder) Install(context.Context) error { return r.step("install") }
-func (r *isoNativeInstallRecorder) RevalidateBoundary(context.Context) error {
-	return r.step("boundary")
-}
 func (r *isoNativeInstallRecorder) Restart(context.Context) error { return r.step("restart") }
 func (r *isoNativeInstallRecorder) Inspect(context.Context) (isoReconcileRuntimeState, error) {
 	if err := r.step("inspect"); err != nil {
@@ -1229,7 +1117,7 @@ func TestInstallDockerComposeServiceRoutesISOThroughSecurityLifecycle(t *testing
 		isoComposeInstall: func(service *db.Service) error {
 			called = true
 			if service.ISO == nil {
-				t.Fatal("ISO lifecycle received service without allocation")
+				t.Fatal("iso lifecycle received service without allocation")
 			}
 			return nil
 		},
@@ -1240,7 +1128,7 @@ func TestInstallDockerComposeServiceRoutesISOThroughSecurityLifecycle(t *testing
 		t.Fatal(err)
 	}
 	if !called {
-		t.Fatal("ISO Compose install bypassed security lifecycle")
+		t.Fatal("iso Compose install bypassed security lifecycle")
 	}
 }
 
@@ -1276,7 +1164,7 @@ func TestInstallerStagesISOTailscaleResolverAndCurrentGenerationArtifactsWithExp
 		}
 		raw, err := os.ReadFile(resolvConf)
 		if err != nil || string(raw) != "nameserver "+allocation.Gateway.String()+"\n" {
-			t.Fatalf("ISO resolver = %q, %v", raw, err)
+			t.Fatalf("iso resolver = %q, %v", raw, err)
 		}
 		return map[db.ArtifactName]string{
 			db.ArtifactTSService: filepath.Join(serviceRoot, "bin", "tailscale.service"),
@@ -1288,7 +1176,7 @@ func TestInstallerStagesISOTailscaleResolverAndCurrentGenerationArtifactsWithExp
 		t.Fatal(err)
 	}
 	if !called {
-		t.Fatal("ISO Tailscale installer was not called")
+		t.Fatal("iso Tailscale installer was not called")
 	}
 	dv, err := server.cfg.DB.Get()
 	if err != nil {
@@ -1321,10 +1209,10 @@ func TestISOComposeLifecyclePolicyPhaseAcquiresAndReleasesOperationLockOnFailure
 	}
 
 	if err := lifecycle.EnsurePolicy(context.Background()); err == nil {
-		t.Fatal("EnsurePolicy unexpectedly succeeded without persisted ISO state")
+		t.Fatal("EnsurePolicy unexpectedly succeeded without persisted iso state")
 	}
 	if acquired != 1 || released != 1 {
-		t.Fatalf("ISO operation lock acquire/release = %d/%d, want 1/1 on failure", acquired, released)
+		t.Fatalf("iso operation lock acquire/release = %d/%d, want 1/1 on failure", acquired, released)
 	}
 }
 
@@ -1403,7 +1291,7 @@ func TestISOComposeLifecycleStartAuxReleasesOperationLockOnCancellationAndError(
 				isoUnlock: func() { released = true },
 				startAux: func() error {
 					if !released {
-						t.Fatal("gate start ran while ISO operation lock was held")
+						t.Fatal("gate start ran while iso operation lock was held")
 					}
 					return tc.start()
 				},
@@ -1413,7 +1301,7 @@ func TestISOComposeLifecycleStartAuxReleasesOperationLockOnCancellationAndError(
 				t.Fatalf("StartAux error = %v, want %v", err, tc.wantErr)
 			}
 			if !released {
-				t.Fatal("StartAux did not release ISO operation lock")
+				t.Fatal("StartAux did not release iso operation lock")
 			}
 		})
 	}
@@ -1443,7 +1331,7 @@ func TestISOComposeLifecycleRechecksAllocationAfterGateBeforeComposeUp(t *testin
 		isoUnlock:  func() { releasedBeforeGate = true },
 		startAux: func() error {
 			if !releasedBeforeGate {
-				t.Fatal("gate started before releasing the initial ISO lock")
+				t.Fatal("gate started before releasing the initial iso lock")
 			}
 			_, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
 				service.ISO.RemoveRequested = true
@@ -1462,14 +1350,14 @@ func TestISOComposeLifecycleRechecksAllocationAfterGateBeforeComposeUp(t *testin
 		t.Fatal(err)
 	}
 	err = lifecycle.ComposeUp(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "changed while the ISO network gate was starting") {
+	if err == nil || !strings.Contains(err.Error(), "changed while the iso network gate was starting") {
 		t.Fatalf("ComposeUp error = %v, want changed-allocation rejection", err)
 	}
 	if composeUpCalled {
-		t.Fatal("Compose up ran after a concurrent ISO removal/state change")
+		t.Fatal("Compose up ran after a concurrent iso removal/state change")
 	}
 	if reacquired != 1 || releasedAfterGate != 1 {
-		t.Fatalf("post-gate ISO lock acquire/release = %d/%d, want 1/1", reacquired, releasedAfterGate)
+		t.Fatalf("post-gate iso lock acquire/release = %d/%d, want 1/1", reacquired, releasedAfterGate)
 	}
 }
 
@@ -1509,18 +1397,18 @@ func TestISOComposeLifecycleRechecksAllocationBeforeComposeCreate(t *testing.T) 
 	}
 
 	err = lifecycle.AttachNetwork(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "changed while the ISO network gate was starting") {
+	if err == nil || !strings.Contains(err.Error(), "changed while the iso network gate was starting") {
 		t.Fatalf("AttachNetwork error = %v, want changed-allocation rejection", err)
 	}
 	if createCalled {
-		t.Fatal("Compose create ran after a concurrent ISO removal/state change")
+		t.Fatal("Compose create ran after a concurrent iso removal/state change")
 	}
 	if reacquired != 1 || released != 1 {
-		t.Fatalf("pre-create ISO lock acquire/release = %d/%d, want 1/1", reacquired, released)
+		t.Fatalf("pre-create iso lock acquire/release = %d/%d, want 1/1", reacquired, released)
 	}
 }
 
-func TestISOComposeLifecycleReadmitsExactInputsBeforeComposeCreate(t *testing.T) {
+func TestISOComposeLifecycleRevalidatesExactInputsBeforeComposeCreate(t *testing.T) {
 	allocation := testISORuntimeAllocation("app", iso.StateReserved)
 	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
 	view, err := server.serviceView("app")
@@ -1548,8 +1436,8 @@ func TestISOComposeLifecycleReadmitsExactInputsBeforeComposeCreate(t *testing.T)
 		si:         &Installer{s: server},
 		record:     view.AsStruct(),
 		allocation: allocation.Clone(),
-		readmitCompose: func(context.Context) error {
-			events = append(events, "readmit")
+		revalidateCompose: func(context.Context) error {
+			events = append(events, "revalidate")
 			return nil
 		},
 		createCompose: func(context.Context) error {
@@ -1562,7 +1450,7 @@ func TestISOComposeLifecycleReadmitsExactInputsBeforeComposeCreate(t *testing.T)
 		t.Fatal(err)
 	}
 	lifecycle.releaseISOLock()
-	want := []string{"lock", "readmit", "create", "unlock"}
+	want := []string{"lock", "revalidate", "create", "unlock"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("pre-create events = %#v, want %#v", events, want)
 	}

@@ -649,7 +649,7 @@ func TestISOOperationFileLockSerializesIndependentClientsAndHonorsContext(t *tes
 		t.Fatal(err)
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("ISO operation lock mode = %o, want 600", got)
+		t.Fatalf("iso operation lock mode = %o, want 600", got)
 	}
 }
 
@@ -961,7 +961,7 @@ func TestISONetworkOperationsFailClosedWhenProcessLockAcquisitionFails(t *testin
 	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
 		"app": testISORuntimeAllocation("app", iso.StateReady),
 	})
-	want := errors.New("ISO operation flock denied")
+	want := errors.New("iso operation flock denied")
 	oldAcquire := acquireISOOperationLockForRuntime
 	oldEnsurePolicy := ensureISOPolicyForRuntime
 	oldEnsureTopology := ensureISOTopologyForRuntime
@@ -1264,7 +1264,7 @@ func TestISOReconcileStopsDriftBeforeQuarantineAndVerifiesGlobalPolicyLast(t *te
 	}
 	got := dv.Services().Get("app").ISO()
 	if got.State() != string(iso.StateQuarantined) || !strings.Contains(got.LastError(), "inspect-runtime") {
-		t.Fatalf("reconciled ISO state = %#v, want quarantined runtime drift", got.AsStruct())
+		t.Fatalf("reconciled iso state = %#v, want quarantined runtime drift", got.AsStruct())
 	}
 }
 
@@ -1278,10 +1278,10 @@ func TestISOReconcileStoppedTailscaleServiceVerifiesStoppedWithoutActiveTSCheck(
 		t.Fatal(err)
 	}
 	if slices.Contains(recorder.events, "verify-tailscale:app") {
-		t.Fatalf("stopped ISO service required active Tailscale: %#v", recorder.events)
+		t.Fatalf("stopped iso service required active Tailscale: %#v", recorder.events)
 	}
 	if !slices.Contains(recorder.events, "verify-stopped:app") {
-		t.Fatalf("stopped ISO service absence was not verified: %#v", recorder.events)
+		t.Fatalf("stopped iso service absence was not verified: %#v", recorder.events)
 	}
 }
 
@@ -1851,7 +1851,7 @@ func TestTransitionAwayFromISOCommitsOnlyAfterVerifiedCleanup(t *testing.T) {
 		t.Fatalf("transition events = %#v, want %#v", recorder.events, want)
 	}
 	if !recorder.startSawCommitted {
-		t.Fatal("replacement started before atomic network commit released ISO")
+		t.Fatal("replacement started before atomic network commit released iso")
 	}
 	dv, err := server.cfg.DB.Get()
 	if err != nil {
@@ -1859,7 +1859,7 @@ func TestTransitionAwayFromISOCommitsOnlyAfterVerifiedCleanup(t *testing.T) {
 	}
 	service := dv.Services().Get("app")
 	if service.ISO().Valid() || !service.SvcNetwork().Valid() {
-		t.Fatalf("committed replacement = %#v, want svc network and no ISO", service.AsStruct())
+		t.Fatalf("committed replacement = %#v, want svc network and no iso", service.AsStruct())
 	}
 	artifacts := service.AsStruct().Artifacts
 	if got := artifacts[db.ArtifactDockerComposeFile].Refs["latest"]; got != "/srv/app/compose.yml" {
@@ -1869,7 +1869,7 @@ func TestTransitionAwayFromISOCommitsOnlyAfterVerifiedCleanup(t *testing.T) {
 		t.Fatalf("replacement network artifact = %q, want prepared replacement", got)
 	}
 	if _, ok := artifacts[db.ArtifactNetNSResolv]; ok {
-		t.Fatalf("retired ISO network artifact survived transition: %#v", artifacts[db.ArtifactNetNSResolv])
+		t.Fatalf("retired iso network artifact survived transition: %#v", artifacts[db.ArtifactNetNSResolv])
 	}
 }
 
@@ -1895,7 +1895,7 @@ func TestCommitReplacementNetworkPersistsFullDesiredConfiguration(t *testing.T) 
 		t.Fatalf("desired network = %#v, want %#v", got, &desired)
 	}
 	if view.ISO().Valid() {
-		t.Fatalf("ISO allocation survived replacement commit: %#v", view.ISO().AsStruct())
+		t.Fatalf("iso allocation survived replacement commit: %#v", view.ISO().AsStruct())
 	}
 }
 
@@ -1939,7 +1939,7 @@ func TestCommitReplacementNetworkRejectsConcurrentServiceChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepared := isoReplacementNetwork{Modes: []string{"host"}, Desired: (&db.ServiceNetworkConfig{Modes: []string{"host"}}), Expected: expected}
-	if err := server.commitReplacementNetwork("app", prepared); err == nil || !strings.Contains(err.Error(), "changed before ISO replacement commit") {
+	if err := server.commitReplacementNetwork("app", prepared); err == nil || !strings.Contains(err.Error(), "changed before iso replacement commit") {
 		t.Fatalf("commitReplacementNetwork error = %v", err)
 	}
 	got, err := server.serviceView("app")
@@ -2030,7 +2030,7 @@ func TestTransitionAwayFromISORejectsInvalidPreparedBoundaryBeforeStop(t *testin
 				t.Fatal(getErr)
 			}
 			if allocation := dv.Services().Get("app").ISO(); !allocation.Valid() || allocation.State() != string(iso.StateStopped) {
-				t.Fatalf("ISO state changed after prepared boundary rejection: %#v", allocation.AsStruct())
+				t.Fatalf("iso state changed after prepared boundary rejection: %#v", allocation.AsStruct())
 			}
 		})
 	}
@@ -2073,7 +2073,7 @@ func TestTransitionAwayFromISORetainsTombstoneWhenAbsenceIsUncertain(t *testing.
 	}
 	service := dv.Services().Get("app")
 	if !service.ISO().Valid() || service.ISO().State() != string(iso.StateTombstoned) || service.SvcNetwork().Valid() {
-		t.Fatalf("failed transition state = %#v, want retained ISO tombstone only", service.AsStruct())
+		t.Fatalf("failed transition state = %#v, want retained iso tombstone only", service.AsStruct())
 	}
 }
 

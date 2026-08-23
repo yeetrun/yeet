@@ -102,10 +102,10 @@ func TestVMISONetworkPlanUsesDedicatedTap(t *testing.T) {
 	}
 	iface := plan.Interfaces[0]
 	if iface.Mode != "iso" || iface.Tap != "yi-devbox" || iface.Bridge != "" || iface.Parent != "" || iface.VLANDevice != "" {
-		t.Fatalf("ISO interface attachment = %#v", iface)
+		t.Fatalf("iso interface attachment = %#v", iface)
 	}
 	if iface.GuestIP != "172.30.0.2/30" || iface.Gateway != "172.30.0.1" || iface.DHCP {
-		t.Fatalf("ISO guest configuration = %#v", iface)
+		t.Fatalf("iso guest configuration = %#v", iface)
 	}
 	metadata := plan.MetadataNetworks()[0]
 	if !reflect.DeepEqual(metadata.Nameservers, []string{"172.30.0.1"}) {
@@ -168,10 +168,10 @@ func TestVMNetworkPlanFromDBRehydratesISOAllocation(t *testing.T) {
 	}
 	iface := plan.Interfaces[0]
 	if iface.GuestIP != "172.30.0.2/30" || iface.Gateway != "172.30.0.1" || iface.Tap != "yi-devbox" {
-		t.Fatalf("rehydrated ISO interface = %#v", iface)
+		t.Fatalf("rehydrated iso interface = %#v", iface)
 	}
 	if _, err := vmNetworkSetupCommands(plan); err != nil {
-		t.Fatalf("rehydrated ISO plan is not executable: %v", err)
+		t.Fatalf("rehydrated iso plan is not executable: %v", err)
 	}
 }
 
@@ -302,10 +302,10 @@ func TestReconcileVMISONetworkPreservesStoppedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := getTestService(t, server, "devbox").ISO.State; got != string(iso.StateStopped) {
-		t.Fatalf("ISO state = %q, want stopped", got)
+		t.Fatalf("iso state = %q, want stopped", got)
 	}
 	if got := getTestService(t, server, "devbox").ISO.Interface; got != allocation.Interface {
-		t.Fatalf("ISO interface = %q, want %q", got, allocation.Interface)
+		t.Fatalf("iso interface = %q, want %q", got, allocation.Interface)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestEnsureVMISONetworkRejectsIncompleteProvisionBeforeAttachment(t *testing
 		t.Fatalf("EnsureVMNetwork error = %v", err)
 	}
 	if attached {
-		t.Fatal("incomplete VM reached ISO attachment")
+		t.Fatal("incomplete VM reached iso attachment")
 	}
 	_, _, err = server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
 		service.VM.SetupState = "ready"
@@ -356,7 +356,7 @@ func TestEnsureVMISONetworkRejectsIncompleteProvisionBeforeAttachment(t *testing
 		t.Fatalf("EnsureVMNetwork removal error = %v", err)
 	}
 	if attached {
-		t.Fatal("removing VM reached ISO attachment")
+		t.Fatal("removing VM reached iso attachment")
 	}
 }
 

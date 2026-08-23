@@ -21,9 +21,9 @@ const (
 )
 
 var (
-	ErrLinkCapacity      = errors.New("ISO link capacity exhausted")
-	ErrProjectCapacity   = errors.New("ISO project capacity exhausted")
-	ErrComponentCapacity = errors.New("ISO project supports at most 29 active components")
+	ErrLinkCapacity      = errors.New("iso link capacity exhausted")
+	ErrProjectCapacity   = errors.New("iso project capacity exhausted")
+	ErrComponentCapacity = errors.New("iso project supports at most 29 active components")
 )
 
 type Layout struct {

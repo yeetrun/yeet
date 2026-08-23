@@ -56,10 +56,10 @@ func reserveISOAllocationInData(name string, req isoReservationRequest, data *db
 		return nil, err
 	}
 	if service.ISO.RemoveRequested {
-		return nil, fmt.Errorf("service %q has ISO removal in progress", name)
+		return nil, fmt.Errorf("service %q has iso removal in progress", name)
 	}
 	if service.ISO.State == string(iso.StateTombstoned) {
-		return nil, fmt.Errorf("service %q has an ISO cleanup tombstone: %s", name, service.ISO.LastError)
+		return nil, fmt.Errorf("service %q has an iso cleanup tombstone: %s", name, service.ISO.LastError)
 	}
 	if err := planISOComponents(req.Components, service.ISO); err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func reserveISOAllocationInData(name string, req isoReservationRequest, data *db
 
 func isoLayoutForPool(pool *db.ISOPool) (iso.Layout, error) {
 	if pool == nil {
-		return iso.Layout{}, fmt.Errorf("ISO pool is not configured")
+		return iso.Layout{}, fmt.Errorf("iso pool is not configured")
 	}
 	return iso.NewLayout(pool.Prefix)
 }
@@ -81,7 +81,7 @@ func isoLayoutForPool(pool *db.ISOPool) (iso.Layout, error) {
 func ensureISOAllocation(name string, req isoReservationRequest, layout iso.Layout, services map[string]*db.Service, service *db.Service) error {
 	if service.ISO != nil {
 		if service.ISO.Kind != string(req.Kind) {
-			return fmt.Errorf("service %q ISO payload kind is %q, cannot reserve %q", name, service.ISO.Kind, req.Kind)
+			return fmt.Errorf("service %q iso payload kind is %q, cannot reserve %q", name, service.ISO.Kind, req.Kind)
 		}
 		return nil
 	}
@@ -105,7 +105,7 @@ func ensureISOAllocation(name string, req isoReservationRequest, layout iso.Layo
 func planISOComponents(components []string, allocation *db.ISOAllocation) error {
 	if !allocation.Project.IsValid() {
 		if len(components) != 0 {
-			return fmt.Errorf("ISO %s allocation does not support components", allocation.Kind)
+			return fmt.Errorf("iso %s allocation does not support components", allocation.Kind)
 		}
 		return nil
 	}
@@ -128,7 +128,7 @@ func planISOComponents(components []string, allocation *db.ISOAllocation) error 
 func (s *Server) markISOState(name, state string, cause error) error {
 	_, _, err := s.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
 		if service.ISO == nil {
-			return fmt.Errorf("service %q has no ISO allocation", name)
+			return fmt.Errorf("service %q has no iso allocation", name)
 		}
 		service.ISO.State = state
 		service.ISO.LastError = ""

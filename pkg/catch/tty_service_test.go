@@ -1225,12 +1225,12 @@ func TestStopISOServiceRetainsAllocationAndMarksStopped(t *testing.T) {
 	}
 	got := dv.Services().Get("app").ISO().AsStruct()
 	if got.State != string(iso.StateStopped) || got.LastError != "" {
-		t.Fatalf("stopped ISO state = %#v, want stopped without error", got)
+		t.Fatalf("stopped iso state = %#v, want stopped without error", got)
 	}
 	got.State = wantAllocation.State
 	got.LastError = wantAllocation.LastError
 	if !reflect.DeepEqual(got, wantAllocation) {
-		t.Fatalf("ordinary stop changed stable ISO allocation:\n got %#v\nwant %#v", got, wantAllocation)
+		t.Fatalf("ordinary stop changed stable iso allocation:\n got %#v\nwant %#v", got, wantAllocation)
 	}
 	if !reflect.DeepEqual(runner.calls, []string{"stop"}) {
 		t.Fatalf("runner calls = %#v, want stop", runner.calls)
@@ -1268,6 +1268,12 @@ func TestQuarantinedNativeISOStartAndRestartRejectBeforeSystemdMutation(t *testi
 			if err == nil || !strings.Contains(err.Error(), "quarantined") || !strings.Contains(err.Error(), allocation.LastError) {
 				t.Fatalf("%s error = %v, want quarantine diagnostic", tc.name, err)
 			}
+			if strings.Contains(err.Error(), "service readmit") || !strings.Contains(err.Error(), "manual Catch-host recovery") {
+				t.Fatalf("%s error = %v, want manual recovery without readmit command", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "iso allocation") || strings.Contains(err.Error(), "ISO allocation") {
+				t.Fatalf("%s error = %v, want lowercase iso terminology", tc.name, err)
+			}
 			if installerCalls != 0 || len(runner.calls) != 0 {
 				t.Fatalf("%s mutations = installer %d, runner %v; want zero", tc.name, installerCalls, runner.calls)
 			}
@@ -1302,7 +1308,7 @@ func TestStopQuarantinedISOPreservesDiagnostic(t *testing.T) {
 	}
 }
 
-func TestServiceReadmitUsesExplicitQuarantineRecovery(t *testing.T) {
+func TestServiceCommandRejectsReadmit(t *testing.T) {
 	server := newTestServer(t)
 	allocation := testISONativeRuntimeAllocation("app", iso.StateQuarantined)
 	allocation.LastError = "runtime boundary missing"
@@ -1310,30 +1316,13 @@ func TestServiceReadmitUsesExplicitQuarantineRecovery(t *testing.T) {
 		Name: "app", ServiceType: db.ServiceTypeSystemd,
 		Generation: 2, LatestGeneration: 2, ISO: allocation,
 	})
-	var events []string
 	execer := &ttyExecer{
 		ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
-		preflightSandboxGenerationActivationFunc: func(_ context.Context, record *db.Service, generation int) error {
-			events = append(events, "static-preflight")
-			if record.Name != "app" || generation != 2 {
-				t.Fatalf("preflight record/generation = %q/%d, want app/2", record.Name, generation)
-			}
-			return nil
-		},
-		readmitNativeISOFunc: func(_ context.Context, record *db.Service) error {
-			events = append(events, "readmit")
-			if record.ISO == nil || record.ISO.State != string(iso.StateQuarantined) {
-				t.Fatalf("readmit record = %#v, want quarantined ISO", record)
-			}
-			return nil
-		},
 	}
 
-	if err := execer.serviceCmdFunc([]string{"readmit"}); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(events, []string{"static-preflight", "readmit"}) {
-		t.Fatalf("readmission events = %v", events)
+	err := execer.serviceCmdFunc([]string{"readmit", "app"})
+	if err == nil || !strings.Contains(err.Error(), `unknown service command "readmit"`) {
+		t.Fatalf("service readmit error = %v, want unknown command", err)
 	}
 }
 
@@ -1373,7 +1362,7 @@ func TestStartAndRestartISOServiceUseFullInstallerLifecycle(t *testing.T) {
 				t.Fatalf("installed generation = %d, want 3", installedGeneration)
 			}
 			if len(runner.calls) != 0 {
-				t.Fatalf("ISO %s used raw runner calls: %#v", tc.name, runner.calls)
+				t.Fatalf("iso %s used raw runner calls: %#v", tc.name, runner.calls)
 			}
 		})
 	}
@@ -1409,7 +1398,7 @@ func TestStartAndRestartISOVMUseVMRunner(t *testing.T) {
 				ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
 				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
 				serviceInstallGenFunc: func(InstallerCfg, int) error {
-					t.Fatal("ISO VM action used the service installer")
+					t.Fatal("iso VM action used the service installer")
 					return nil
 				},
 			}
@@ -2096,10 +2085,10 @@ func TestRemoveCmdFuncISODelegatesWithoutGenericRunnerRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !delegated {
-		t.Fatal("ISO removal did not delegate to authoritative server coordinator")
+		t.Fatal("iso removal did not delegate to authoritative server coordinator")
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("ISO removal called generic runner before coordinator: %#v", runner.calls)
+		t.Fatalf("iso removal called generic runner before coordinator: %#v", runner.calls)
 	}
 }
 

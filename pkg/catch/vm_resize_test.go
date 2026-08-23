@@ -379,14 +379,14 @@ func TestVMSetMigratesStoppedVMToISOBehindVerifiedPolicy(t *testing.T) {
 	})
 	withServiceSetVMNetworkVerifier(t, func(_ context.Context, plan vmNetworkPlan) error {
 		if !plan.hasNetworkMode("iso") {
-			t.Fatalf("verified plan = %#v, want ISO", plan)
+			t.Fatalf("verified plan = %#v, want iso", plan)
 		}
 		events = append(events, "verify-tap")
 		return nil
 	})
 	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
 		if len(metadata.Networks) != 1 || metadata.Networks[0].Mode != "iso" {
-			t.Fatalf("metadata networks = %#v, want ISO", metadata.Networks)
+			t.Fatalf("metadata networks = %#v, want iso", metadata.Networks)
 		}
 		events = append(events, "metadata")
 		return nil
@@ -405,13 +405,13 @@ func TestVMSetMigratesStoppedVMToISOBehindVerifiedPolicy(t *testing.T) {
 	}
 	service := getTestService(t, server, "devbox")
 	if service.ISO == nil || service.ISO.State != string(iso.StateStopped) {
-		t.Fatalf("ISO allocation = %#v, want stopped until the VM actually starts", service.ISO)
+		t.Fatalf("iso allocation = %#v, want stopped until the VM actually starts", service.ISO)
 	}
 	if service.SvcNetwork != nil {
 		t.Fatalf("SvcNetwork = %#v, want nil", service.SvcNetwork)
 	}
 	if len(service.VM.Networks) != 1 || service.VM.Networks[0].Mode != "iso" || service.VM.Networks[0].IP != service.ISO.PeerIP {
-		t.Fatalf("VM networks = %#v, want ISO guest %s", service.VM.Networks, service.ISO.PeerIP)
+		t.Fatalf("VM networks = %#v, want iso guest %s", service.VM.Networks, service.ISO.PeerIP)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestVMSetTransitionsAwayFromISOOnlyAfterVerifiedTapCleanup(t *testing.T) {
 	})
 	withServiceSetVMTransitionPolicy(t, func(_ context.Context, got *Server) error {
 		if service := getTestService(t, got, "devbox"); service.ISO != nil {
-			t.Fatalf("policy rendered before ISO allocation release: %#v", service.ISO)
+			t.Fatalf("policy rendered before iso allocation release: %#v", service.ISO)
 		}
 		events = append(events, "verify-policy-without-iso")
 		return nil

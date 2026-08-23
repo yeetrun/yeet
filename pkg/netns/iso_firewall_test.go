@@ -287,7 +287,7 @@ func TestEnsureISOPolicyNFTAtomicallyReplacesOwnedTablesOnRepeatedApply(t *testi
 		script := string(input)
 		mutations = append(mutations, script)
 		if strings.Contains(script, "flush ruleset") || strings.Contains(script, "flush table") {
-			return nil, errors.New("ISO apply flushed firewall state")
+			return nil, errors.New("iso apply flushed firewall state")
 		}
 		family := "ip"
 		if strings.Contains(script, "table ip6 "+isoNFTTable) {
