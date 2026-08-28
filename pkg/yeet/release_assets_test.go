@@ -47,11 +47,17 @@ func TestReleaseAssetsMatchCurrentCLI(t *testing.T) {
 	}
 
 	readme := assets["README.md"]
-	if !strings.Contains(strings.ToLower(readme), "legacy") {
-		t.Error("README does not explain legacy native sandbox state")
+	for _, historicalText := range []string{
+		"legacy",
+		"/root/yeet-data",
+		"yeet upgrade --version v",
+	} {
+		if strings.Contains(strings.ToLower(readme), strings.ToLower(historicalText)) {
+			t.Errorf("README contains historical compatibility text %q", historicalText)
+		}
 	}
 	if !strings.Contains(readme, "service set") {
-		t.Error("README does not document service set sandbox migration")
+		t.Error("README does not document current service set sandbox controls")
 	}
 
 	runStart := strings.Index(help, "## Command: run\n")

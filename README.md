@@ -31,7 +31,7 @@ Yeet can deploy:
 - Cron jobs
 - Linux VMs on KVM-capable hosts
 
-Yeet fits single-operator homelabs and small private infrastructure, and it expects Linux hosts with systemd. New native binaries, scripts, and cron jobs run as the unprivileged `yeet-svc` account by default. Docker and VM identities stay in their own runtimes, where they belong.
+Yeet fits single-operator homelabs and small private infrastructure, and it expects Linux hosts with systemd. Native binaries, scripts, and cron jobs run as the unprivileged `yeet-svc` account by default. Docker and VM identities stay in their own runtimes, where they belong.
 
 This is for hosts you control. It is not a multi-tenant platform, and we don't want the convenience of the tool to suggest otherwise.
 
@@ -120,7 +120,7 @@ Interactive setup asks for the Tailscale OAuth client secret. Catch stores its s
 /var/lib/yeet
 ```
 
-By default, the service root is `<data-dir>/services`, which makes it `/var/lib/yeet/services` with the default data directory. If the host needs a different filesystem path, set `--data-dir` or `--services-root` during init. Yeet preserves explicit custom roots during upgrades and guided migrations; choosing a real storage layout should not become a temporary suggestion on the next upgrade.
+By default, the service root is `<data-dir>/services`, which makes it `/var/lib/yeet/services` with the default data directory. If the host needs a different filesystem path, set `--data-dir` or `--services-root` during init. Yeet records explicit custom roots and reuses them whenever you run `yeet init` again.
 
 If Docker is missing on a Debian/Ubuntu-style host, interactive setup asks before installing it. If the host can run VMs, setup can ask about VM tools too.
 
@@ -130,20 +130,7 @@ If the host has ZFS and you want service data on datasets:
 yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>
 ```
 
-Rerunning `yeet init` upgrades Catch without changing explicit custom or ZFS roots. When an interactive upgrade finds the exact legacy home-directory layout, it can offer to move that state to `/var/lib/yeet`. If init cannot prompt, run the same migration explicitly:
-
-```bash
-yeet host set \
-  --data-dir=/var/lib/yeet \
-  --services-root=/var/lib/yeet/services \
-  --migrate-services=all \
-  --yes
-yeet host cleanup --from=/root/yeet-data --yes
-```
-
-`yeet host set` moves and validates the active state, but it deliberately leaves the old tree alone. Cleanup is separate because "the new copy looks good" and "delete the old copy" are not the same decision. Cleanup refuses arbitrary paths, revalidates the active Catch and service state, and removes only the journaled inactive source. If deletion alone fails, rerun the same cleanup command to resume it safely.
-
-ZFS datasets are not copied or deleted implicitly. Dataset-backed data and nested datasets stay put until you manage them explicitly.
+Rerunning `yeet init` updates Catch without changing explicit custom or ZFS roots. ZFS datasets are not copied or deleted implicitly. Dataset-backed data and nested datasets stay put until you manage them explicitly.
 
 ### 4. Confirm the host works
 
@@ -250,14 +237,14 @@ yeet run <svc> ./script.sh -- --app-flag value
 
 ### Native sandboxing
 
-Native processes are where "just run this binary" quietly becomes "let this binary see the host." Fresh native binaries, shebang scripts, and scheduled jobs therefore run through Bubblewrap by default. Existing native services stay in the `legacy` state until you choose `on` or `off` for each one:
+Native processes are where "just run this binary" quietly becomes "let this binary see the host." Native binaries, shebang scripts, and scheduled jobs therefore run through Bubblewrap by default. To choose direct execution for a service, or turn sandboxing back on:
 
 ```bash
 yeet service set api --sandbox=on
 yeet service set api --sandbox=off
 ```
 
-`legacy` describes what happened before the choice existed; it is not a value accepted by `--sandbox`. `--sandbox=off` is the explicit escape hatch. That choice is independent of `--run-as=root` and the selected network mode because filesystem visibility, process identity, and networking are different boundaries.
+`--sandbox=off` is the explicit escape hatch. That choice is independent of `--run-as=root` and the selected network mode because filesystem visibility, process identity, and networking are different boundaries.
 
 The default sandbox mounts the service data directory read-write, then mounts the payload and required host runtime files read-only. `/tmp` and `/run` are private. `/root`, `/home`, `/var`, `/sys`, and other services simply are not there unless the fixed runtime policy or an explicit exposure requires them.
 
@@ -282,9 +269,9 @@ yeet service set api --sandbox=off --sandbox-ro=/etc/api
 
 Sandboxed workloads get new user, PID, IPC, and UTS namespaces while inheriting the network mode and systemd cgroup Yeet already selected. That sharply limits filesystem and process visibility. It does not turn a process into a VM. A root workload still shares the host kernel, so an escape still has host-root consequences.
 
-Catch installs and probes Bubblewrap for a fresh Catch installation, or when a new or changed native service ends up with sandbox state `on`. On compatible Ubuntu hosts where AppArmor restricts unprivileged user namespaces, Catch also installs and loads the exact Yeet-owned profile at `/etc/apparmor.d/yeet-bwrap`, then repeats the probe as a non-root user. Debian and hosts without that restriction need only the Bubblewrap package. Catch never disables AppArmor or changes a host-wide user-namespace sysctl. If the file at the managed path differs from Yeet's profile, Catch preserves it and blocks activation with recovery guidance instead of winning the argument by overwriting it.
+Catch installs and probes Bubblewrap during Catch setup and before starting a native service with sandboxing enabled. On compatible Ubuntu hosts where AppArmor restricts unprivileged user namespaces, Catch also installs and loads the exact Yeet-owned profile at `/etc/apparmor.d/yeet-bwrap`, then repeats the probe as a non-root user. Debian and hosts without that restriction need only the Bubblewrap package. Catch never disables AppArmor or changes a host-wide user-namespace sysctl. If the file at the managed path differs from Yeet's profile, Catch preserves it and blocks activation with recovery guidance instead of winning the argument by overwriting it.
 
-Ordinary Yeet or Catch upgrades do not install the dependency, and neither do services that remain `legacy` or explicitly `off`. An exposure-only edit of an `off` service results in `on`, so it also runs the dependency readiness work; include `--sandbox=off` in that edit if you only want to prepare dormant exposures. The [native sandboxing guide](https://yeetrun.com/docs/concepts/native-sandboxing) has the complete policy and troubleshooting steps.
+A service with `--sandbox=off` does not require Bubblewrap. An exposure-only edit changes an `off` service to `on`, so it also runs the dependency readiness work; include `--sandbox=off` in that edit if you only want to prepare dormant exposures. The [native sandboxing guide](https://yeetrun.com/docs/concepts/native-sandboxing) has the complete policy and troubleshooting steps.
 
 ### Scheduled job
 
@@ -294,7 +281,7 @@ yeet run backup ./backup --cron="0 3 * * *" --run-as=backup --net=iso -- --full
 
 Scheduling is the same native deployment model with a clock attached. It works for native binaries and shebang scripts, and scheduled runs deploy or redeploy the payload with native service options such as `--run-as`, `--net=iso`, environment files, custom service roots, ZFS, snapshots, and payload arguments after `--`.
 
-If you rerun a scheduled service without `--cron`, yeet preserves the installed schedule. A new non-empty `--cron` value replaces it. A scheduled name does not silently become an ordinary service: remove it with `yeet rm`, then recreate it without `--cron`.
+If you rerun a scheduled service without `--cron`, yeet preserves the installed schedule. Passing a non-empty `--cron` value replaces it. A scheduled name does not silently become an ordinary service: remove it with `yeet rm`, then recreate it without `--cron`.
 
 Change only the schedule of an installed scheduled native service without a
 payload:
@@ -335,7 +322,7 @@ yeet ssh <vm>
 
 VMs add a boundary that a native sandbox cannot: a separate kernel. Yeet launches Firecracker through the matching Firecracker jailer. Catch prepares the VM's host resources as root, then the jailer runs the VMM as the static, non-login `yeet-vm` host account. That host account is separate from both the VM guest login user and native-service `--run-as` identities.
 
-Yeet creates `yeet-vm` automatically during the first VM preparation, or during an upgrade that finds VMs. Custom data roots, custom service roots, and ZFS-backed VM storage continue to work because Yeet derives their paths from stored configuration instead of assuming the default layout.
+Yeet creates `yeet-vm` automatically before it prepares a VM. Yeet derives VM paths from stored configuration, so custom data roots, custom service roots, and ZFS-backed VM storage are supported.
 
 The host Firecracker and jailer pair has its own lifecycle. It is not the guest root filesystem, guest packages, guest kernel, or guest login user, even though an incautious "upgrade the VM" can make those layers sound like one thing. See what each VM has running, configured, staged, and available for rollback:
 
@@ -353,7 +340,7 @@ yeet vm runtime upgrade <vm> --restart
 yeet vm runtime rollback <vm> --restart
 ```
 
-A guest package upgrade cannot request a host runtime change. A normal guest reboot can consume a runtime that an operator or host policy already staged, but it cannot select or download one. Catch upgrades leave running VMs alone too. The optional `stage-on-restart` policy stages promoted releases without restarting VMs. Guest activity crosses that boundary only after an operator or host policy has placed something on the other side of it.
+A guest package upgrade cannot request a host runtime change. A normal guest reboot can consume a runtime that an operator or host policy already staged, but it cannot select or download one. Upgrading Catch leaves running VMs alone. The optional `stage-on-restart` policy stages promoted releases without restarting VMs. Guest activity crosses that boundary only after an operator or host policy has placed something on the other side of it.
 
 Create and restore a VM disk recovery point on a ZFS-backed VM:
 
@@ -529,7 +516,7 @@ yeet upgrade --nightly
 Install a specific public release:
 
 ```bash
-yeet upgrade --version v0.6.1 --force
+yeet upgrade --version <version> --force
 ```
 
 `--nightly` and `--version` select different targets. Use one per command; asking for two kinds of "latest" cannot end well.
