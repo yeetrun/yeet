@@ -27,10 +27,12 @@ func TestRunFilePayloadComposeBranches(t *testing.T) {
 		wantExecArgs    []string
 	}{
 		{
-			name:            "local compose rejects publish",
+			name:            "local compose allows publish",
 			pushLocalImages: true,
 			args:            []string{"-p", "8080:80"},
-			wantErr:         "-p/--publish is not supported for docker compose payloads",
+			wantPushLocal:   true,
+			wantExec:        true,
+			wantExecArgs:    []string{"run", "-p", "8080:80"},
 		},
 		{
 			name:         "remote image compose allows publish",

@@ -1010,7 +1010,7 @@ func TestAuthKeyRedactionAcrossErrorPreviewRPCInfoAndSavedConfig(t *testing.T) {
 	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldFetch })
 	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
-			Network: catchrpc.ServiceNetwork{Modes: []string{"ts"}, Desired: &desired},
+			ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Modes: []string{"ts"}, Desired: &desired},
 		}}, nil
 	}
 	guardErr := rejectExistingRunNetworkChange(context.Background(), ServiceEntry{Name: "app", Host: "catch.example"}, runArgs)

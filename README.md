@@ -204,6 +204,11 @@ yeet run --web <svc> ./compose.yml
 yeet run <svc> ./compose.yml
 ```
 
+Set port mappings in the Compose file or pass `-p HOST:CONTAINER` for the
+Compose service named `<svc>`. Saved `ports` in `yeet.toml` are reapplied on
+redeploy. Use `--env-file=./app.env` to upload the environment before the
+payload; the first payload can still choose its initial `--net` settings.
+
 ### Container image
 
 ```bash

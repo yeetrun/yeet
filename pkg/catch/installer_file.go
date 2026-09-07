@@ -459,7 +459,7 @@ func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ 
 	cfg.ServiceRoot = resolvedRoot.Root
 	printServiceRootWarnings(cfg, resolvedRoot.Warnings)
 	i := newPreparedFileInstaller(s, cfg, existingService, resolvedRoot, releaseServiceLock)
-	i.persistInitialNetwork = !existingService.Valid()
+	i.persistInitialNetwork = !serviceRunInitialized(existingService)
 	i.serviceRootCreated = resolvedRoot.Created || !rootExisted
 	i.serviceRootDatasetCreated = resolvedRoot.Created
 	constructorComplete := false
@@ -510,8 +510,14 @@ func validateFileInstallerSandboxCarrier(cfg FileInstallerCfg, existing db.Servi
 	return errors.New(sandboxNativePayloadOnlyMessage)
 }
 
+// Env uploads can create a record before the first payload. A type or any
+// generation history means run must preserve the service's network settings.
+func serviceRunInitialized(service db.ServiceView) bool {
+	return service.Valid() && (service.ServiceType() != "" || service.Generation() != 0 || service.LatestGeneration() != 0)
+}
+
 func validateExistingRunNetwork(cfg FileInstallerCfg, existing db.ServiceView) error {
-	if !existing.Valid() || cfg.EnvFile || cfg.ServiceName == CatchService || cfg.ServiceName == SystemService {
+	if !serviceRunInitialized(existing) || cfg.EnvFile || cfg.ServiceName == CatchService || cfg.ServiceName == SystemService {
 		return nil
 	}
 	requested, err := desiredNetworkConfigFromOpts(cfg.Network)

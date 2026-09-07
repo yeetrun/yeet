@@ -1723,7 +1723,7 @@ func runFilePayloadContext(ctx context.Context, file string, args []string, push
 }
 
 func runFilePayloadContextWithOutput(ctx context.Context, stdout io.Writer, file string, args []string, pushLocalImages bool) (ok bool, _ error) {
-	upload, err := prepareRunFileUpload(file, args, pushLocalImages)
+	upload, err := prepareRunFileUpload(file, args)
 	if err != nil {
 		return false, err
 	}
@@ -1745,7 +1745,7 @@ func runFilePayloadContextWithOutput(ctx context.Context, stdout io.Writer, file
 	return true, nil
 }
 
-func prepareRunFileUpload(file string, args []string, pushLocalImages bool) (runFileUpload, error) {
+func prepareRunFileUpload(file string, args []string) (runFileUpload, error) {
 	goos, goarch, err := remoteCatchOSAndArchFn()
 	if err != nil {
 		return runFileUpload{}, err
@@ -1754,7 +1754,7 @@ func prepareRunFileUpload(file string, args []string, pushLocalImages bool) (run
 	if err != nil {
 		return runFileUpload{}, err
 	}
-	if err := validateRunFileArgs(ft, args, pushLocalImages); err != nil {
+	if err := validateRunFileArgs(ft, args); err != nil {
 		cleanup()
 		return runFileUpload{}, err
 	}
@@ -1767,18 +1767,12 @@ func prepareRunFileUpload(file string, args []string, pushLocalImages bool) (run
 	}, nil
 }
 
-func validateRunFileArgs(ft ftdetect.FileType, args []string, pushLocalImages bool) error {
+func validateRunFileArgs(ft ftdetect.FileType, args []string) error {
 	if ft != ftdetect.DockerCompose {
 		return nil
 	}
-	flags, _, err := cli.ParseRun(args)
-	if err != nil {
-		return err
-	}
-	if len(flags.Publish) > 0 && pushLocalImages {
-		return fmt.Errorf("-p/--publish is not supported for docker compose payloads")
-	}
-	return nil
+	_, _, err := cli.ParseRun(args)
+	return err
 }
 
 func pushRunFileLocalImages(ctx context.Context, svc string, upload runFileUpload, pushLocalImages bool) error {

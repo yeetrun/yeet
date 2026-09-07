@@ -2837,6 +2837,133 @@ func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
 	}
 }
 
+func TestEnvOnlyServiceAllowsInitialComposeNetworkAndRetry(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/api": {Mountpoint: root, Exists: true},
+	}).Run
+	installCfg := InstallerCfg{ServiceName: "api", ServiceRoot: "tank/apps/api", ServiceRootZFS: true}
+	envInstaller, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: installCfg, EnvFile: true, StageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := envInstaller.Write([]byte("TEST_VALUE=fixture\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstaller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := testService(t, server, "api").Clone()
+	if before.ServiceType != "" || before.Generation != 0 || before.LatestGeneration != 0 || before.Network != nil {
+		t.Fatal("env upload initialized payload or network state")
+	}
+	envPath := stagedArtifactPath(t, before, db.ArtifactEnvFile)
+	cfg := FileInstallerCfg{
+		InstallerCfg: installCfg,
+		StageOnly:    true,
+		Network: NetworkOpts{
+			Interfaces: "lan,ts", Modes: []string{"lan", "ts"},
+			Macvlan:   MacvlanOpts{Parent: "eth0"},
+			Tailscale: TailscaleOpts{Version: "1.101.284", Tags: []string{"tag:app"}, AuthKey: "tskey-auth-fixture"},
+		},
+	}
+	first, err := NewFileInstaller(server, cfg)
+	if err != nil {
+		t.Fatalf("compose after env upload: %v", err)
+	}
+	first.Fail()
+	if err := first.Close(); err == nil {
+		t.Fatal("failed upload unexpectedly succeeded")
+	}
+	if !reflect.DeepEqual(testService(t, server, "api"), before) {
+		t.Fatal("failed payload upload changed the env-only service record")
+	}
+	if _, err := os.Stat(envPath); err != nil {
+		t.Fatalf("failed payload upload removed the staged env file: %v", err)
+	}
+
+	// Cache the daemon so staging exercises network planning without downloading.
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-1.101.284"), []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := NewFileInstaller(server, cfg)
+	if err != nil {
+		t.Fatalf("retry after interrupted upload: %v", err)
+	}
+	if _, err := retry.Write([]byte("services:\n  api:\n    image: alpine\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.Close(); err != nil {
+		t.Fatalf("stage compose with initial network: %v", err)
+	}
+	staged := testService(t, server, "api")
+	if staged.ServiceType != db.ServiceTypeDockerCompose || staged.Macvlan == nil || staged.TSNet == nil {
+		t.Fatal("compose retry did not stage the requested network")
+	}
+	if staged.ServiceRoot != root || staged.ServiceRootZFS != "tank/apps/api" || stagedArtifactPath(t, staged, db.ArtifactEnvFile) != envPath {
+		t.Fatal("compose retry changed the service root or staged env file")
+	}
+	if staged.Network != nil {
+		t.Fatal("desired network was committed before activation")
+	}
+
+	// Exercise the post-activation database transition without starting workloads.
+	si, err := server.NewInstaller(installCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, activated, err := si.commitGen(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.installedGeneration = activated.Generation
+	if err := retry.persistInitialDesiredNetwork(); err != nil {
+		t.Fatal(err)
+	}
+	installed := testService(t, server, "api")
+	wantNetwork := &db.ServiceNetworkConfig{
+		Modes: []string{"lan", "ts"}, TSVersion: "1.101.284", TSTags: []string{"tag:app"}, MacvlanParent: "eth0",
+	}
+	if !reflect.DeepEqual(installed.Network, wantNetwork) {
+		t.Fatalf("desired network = %#v, want %#v", installed.Network, wantNetwork)
+	}
+	if strings.Contains(asJSON(installed), "tskey-auth-fixture") {
+		t.Fatal("transient auth key leaked into the service record")
+	}
+	cfg.Network.Tailscale.AuthKey = ""
+	if err := validateExistingRunNetwork(cfg, installed.View()); err != nil {
+		t.Fatalf("unchanged redeploy after initial activation: %v", err)
+	}
+	cfg.Network.Tailscale.Tags = []string{"tag:changed"}
+	if err := validateExistingRunNetwork(cfg, installed.View()); err == nil {
+		t.Fatal("installed compose service allowed a network mutation through run")
+	}
+}
+
+func TestExistingRunNetworkGuardProtectsInitializedRecords(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		service db.Service
+	}{
+		{name: "staged compose", service: db.Service{ServiceType: db.ServiceTypeDockerCompose}},
+		{name: "unknown type", service: db.Service{ServiceType: "future-type"}},
+		{name: "active generation without type", service: db.Service{Generation: 1}},
+		{name: "historical generation without type", service: db.Service{LatestGeneration: 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}, Network: NetworkOpts{Interfaces: "lan,ts"}}
+			if err := validateExistingRunNetwork(cfg, tt.service.View()); err == nil {
+				t.Fatal("initialized record allowed a network mutation through run")
+			}
+		})
+	}
+}
+
 func TestExistingRunNetworkGuardRejectsChangedPersistentSettingsBeforePreparingRoot(t *testing.T) {
 	server := newTestServer(t)
 	addTestServices(t, server, db.Service{

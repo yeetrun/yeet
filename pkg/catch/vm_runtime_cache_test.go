@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -208,6 +209,8 @@ func TestVMRuntimeCacheConcurrentEnsurePublishesOnce(t *testing.T) {
 
 func TestVMRuntimeCacheCompetingPublishersUseNoReplaceWinner(t *testing.T) {
 	fixture := newVMRuntimeCacheFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	root := t.TempDir()
 	parent, err := ensureTrustedVMRuntimeCacheTree(root, fixture.manifest.Architecture, fixture.ref.RuntimeID)
 	if err != nil {
@@ -216,6 +219,13 @@ func TestVMRuntimeCacheCompetingPublishersUseNoReplaceWinner(t *testing.T) {
 	final := filepath.Join(parent, fixture.ref.ManifestSHA)
 	ready := make(chan struct{}, 2)
 	release := make(chan struct{})
+	releasePublishers := sync.OnceFunc(func() { close(release) })
+	var publishers sync.WaitGroup
+	defer func() {
+		cancel()
+		releasePublishers()
+		publishers.Wait()
+	}()
 	var successes atomic.Int64
 	var conflicts atomic.Int64
 	cache := vmRuntimeCache{
@@ -240,17 +250,24 @@ func TestVMRuntimeCacheCompetingPublishersUseNoReplaceWinner(t *testing.T) {
 	}
 	results := make(chan result, 2)
 	for range 2 {
-		go func() {
+		publishers.Go(func() {
 			artifact, publishErr := cache.publish(
-				context.Background(), parent, final, fixture.manifestRaw,
+				ctx, parent, final, fixture.manifestRaw,
 				fixture.manifest, fixture.ref, false,
 			)
 			results <- result{artifact: artifact, err: publishErr}
-		}()
+		})
 	}
-	<-ready
-	<-ready
-	close(release)
+	for range 2 {
+		select {
+		case <-ready:
+		case result := <-results:
+			t.Fatalf("publish failed before synchronization: %v", result.err)
+		case <-ctx.Done():
+			t.Fatalf("waiting for publishers: %v", ctx.Err())
+		}
+	}
+	releasePublishers()
 
 	var winner db.VMRuntimeArtifactConfig
 	for range 2 {

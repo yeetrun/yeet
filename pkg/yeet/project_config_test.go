@@ -1030,6 +1030,68 @@ func TestRunFromProjectConfigRehydratesPorts(t *testing.T) {
 	}
 }
 
+func TestRunFromProjectConfigComposePortsWithInitialEnvAndRetry(t *testing.T) {
+	for _, envStaged := range []bool{false, true} {
+		name := "first deploy"
+		if envStaged {
+			name = "retry after env upload"
+		}
+		t.Run(name, func(t *testing.T) {
+			preserveSvcCommandGlobals(t)
+			tmp := useTempSvcCwd(t)
+			serviceOverride = "api"
+			loadedPrefs.DefaultHost = "catch.example"
+			remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+			isTerminalFn = func(int) bool { return false }
+			compose := "services:\n  api:\n    image: alpine\n    ports:\n      - '8080:80'\n"
+			if err := os.WriteFile(filepath.Join(tmp, "compose.yml"), []byte(compose), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			envPath := filepath.Join(tmp, ".env")
+			if err := os.WriteFile(envPath, []byte("TEST_VALUE=fixture\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				return catchrpc.ServiceInfoResponse{Found: envStaged, Info: catchrpc.ServiceInfo{Staged: envStaged}}, nil
+			}
+			fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+				// Artifact hashes describe the active generation, so an env-only
+				// record still needs an env upload when the deploy is retried.
+				return catchrpc.ArtifactHashesResponse{Found: envStaged}, true, nil
+			}
+			pushAllLocalImagesFn = func(context.Context, string, string, string) error { return nil }
+			loc := writeSvcBranchConfig(t, tmp, ServiceEntry{
+				Name: "api", Host: "catch.example", Type: serviceTypeRun, Payload: "compose.yml", PayloadKind: "compose",
+				EnvFile: ".env", ServiceRoot: "tank/apps/api", ServiceRootZFS: true,
+				Ports: []string{"8080:80"}, Args: []string{"--net=lan,ts", "--ts-tags=tag:app"},
+			})
+			var calls [][]string
+			execRemoteFn = func(_ context.Context, service string, args []string, stdin io.Reader, _ bool) error {
+				if service != "api" {
+					t.Fatalf("service = %q, want api", service)
+				}
+				calls = append(calls, append([]string{}, args...))
+				_, err := io.Copy(io.Discard, stdin)
+				return err
+			}
+			if err := runFromProjectConfig(loc, "catch.example"); err != nil {
+				t.Fatal(err)
+			}
+			want := [][]string{
+				{"env", "copy", "--service-root=tank/apps/api", "--zfs"},
+				{"run", "--service-root=tank/apps/api", "--zfs", "-p", "8080:80", "--net=lan,ts", "--ts-tags=tag:app"},
+			}
+			if !reflect.DeepEqual(calls, want) {
+				t.Fatalf("remote calls = %#v, want %#v", calls, want)
+			}
+			entry, ok := loc.Config.ServiceEntry("api", "catch.example")
+			if !ok || !reflect.DeepEqual(entry.Ports, []string{"8080:80"}) || entry.EnvFile != ".env" || entry.ServiceRoot != "tank/apps/api" || !entry.ServiceRootZFS {
+				t.Fatal("deployment lost persisted ports, env file, or service root")
+			}
+		})
+	}
+}
+
 func TestSaveRunConfigStoresZFSServiceRoot(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()

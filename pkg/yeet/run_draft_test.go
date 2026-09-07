@@ -164,7 +164,7 @@ func TestRunDraftWithoutLocalEntryUsesRemoteNetworkAuthority(t *testing.T) {
 					t.Fatalf("service info target = %s/%s, want catch.example/api", host, service)
 				}
 				desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
-				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
+				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
 			}
 			runs := 0
 			tryRunRemoteImageWithOutputFn = func(context.Context, io.Writer, string, []string) (bool, error) {

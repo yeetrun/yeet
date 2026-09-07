@@ -732,7 +732,7 @@ func inspectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry,
 	if err != nil {
 		return catchrpc.ServiceInfoResponse{}, err
 	}
-	if !response.Found {
+	if !runServiceInitialized(response) {
 		return response, nil
 	}
 	if err := rejectExistingRunNetworkSettings(requested, authKeySet, response.Info.Network); err != nil {
@@ -742,6 +742,13 @@ func inspectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry,
 		return catchrpc.ServiceInfoResponse{}, err
 	}
 	return response, nil
+}
+
+// Env-only uploads create a record without initializing a payload. Preserve
+// protections for typed services and for any existing generation history.
+func runServiceInitialized(response catchrpc.ServiceInfoResponse) bool {
+	info := response.Info
+	return response.Found && (info.ServiceType != "" || info.Generation != 0 || info.LatestGeneration != 0)
 }
 
 func parseProtectedRunSettings(runArgs []string) (cli.RunFlags, catchrpc.ServiceNetworkSettings, bool, error) {

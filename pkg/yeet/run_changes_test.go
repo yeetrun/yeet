@@ -196,7 +196,7 @@ func TestRunRejectsExistingNetworkChangesBeforeRunner(t *testing.T) {
 				if host != "catch.example" || service != "api" {
 					t.Fatalf("service info target = %s/%s, want catch.example/api", host, service)
 				}
-				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &tt.desired}}}, nil
+				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Desired: &tt.desired}}}, nil
 			}
 			runs := 0
 			err := runWithChangesToWithContextRunner(
@@ -251,10 +251,49 @@ func TestRunNetworkGuardAllowsUnchangedNetworkAndInitialDeploy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
-				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{Network: tt.remote}}, nil
+				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose", Network: tt.remote}}, nil
 			}
 			if err := rejectExistingRunNetworkChange(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, tt.runArgs); err != nil {
 				t.Fatalf("rejectExistingRunNetworkChange error: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunProtectedChangesDistinguishesEnvOnlyFromInitializedServices(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldInfo })
+	for _, tt := range []struct {
+		name    string
+		info    catchrpc.ServiceInfo
+		wantErr bool
+	}{
+		{name: "env only", info: catchrpc.ServiceInfo{Staged: true}},
+		{name: "compose with no active generation", info: catchrpc.ServiceInfo{ServiceType: "docker-compose", Staged: true}, wantErr: true},
+		{name: "native service", info: catchrpc.ServiceInfo{ServiceType: "systemd", Generation: 1}, wantErr: true},
+		{name: "unknown type", info: catchrpc.ServiceInfo{ServiceType: "future-type"}, wantErr: true},
+		{name: "active generation without type", info: catchrpc.ServiceInfo{Generation: 1}, wantErr: true},
+		{name: "historical generation without type", info: catchrpc.ServiceInfo{LatestGeneration: 1}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			response := catchrpc.ServiceInfoResponse{Found: true, Info: tt.info}
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				return response, nil
+			}
+			got, err := inspectExistingRunProtectedChanges(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{
+				"--net=lan,ts", "--ts-tags=tag:app", "--ts-auth-key=fixture", "--sandbox=off",
+			})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "yeet service set") {
+					t.Fatalf("error = %v, want service-set guidance", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("initial payload settings after env upload: %v", err)
+			}
+			if !reflect.DeepEqual(got, response) {
+				t.Fatal("initial payload check lost the env-only service response")
 			}
 		})
 	}
@@ -280,7 +319,7 @@ func TestRunUnchangedNetworkAllowsOtherRedeploymentChanges(t *testing.T) {
 	}
 	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
 		desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
-		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
 	}
 	runs := 0
 	err = runWithChangesToWithContextRunner(
