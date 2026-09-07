@@ -2381,7 +2381,7 @@ func renderFreshRegularTailscaleArtifacts(fi *FileInstaller, root string, plan t
 		if err != nil {
 			return err
 		}
-		path, err := writeOwnedRegularNetworkArtifact(fi.networkArtifactTxn, artifact.name, root, "bin", strings.ReplaceAll(string(artifact.name), ".", "-")+"-", filepath.Ext(artifact.source), raw, artifact.mode)
+		path, err := writeOwnedRegularNetworkArtifact(fi.networkArtifactTxn, artifact.name, root, "bin", regularNetworkArtifactPrefix(artifact.name), filepath.Ext(artifact.source), raw, artifact.mode)
 		if err != nil {
 			return err
 		}
@@ -2421,6 +2421,12 @@ func stageRegularDockerComposeNetwork(installer *FileInstaller, env netns.Servic
 	return nil
 }
 
+const regularNetworkArtifactRandomBytes = 16
+
+func regularNetworkArtifactPrefix(name db.ArtifactName) string {
+	return strings.ReplaceAll(string(name), ".", "-") + "-"
+}
+
 func writeFreshRegularNetworkArtifact(root, dir, prefix, suffix string, raw []byte, mode os.FileMode) (string, error) {
 	rootHandle, err := os.OpenRoot(root)
 	if err != nil {
@@ -2431,7 +2437,7 @@ func writeFreshRegularNetworkArtifact(root, dir, prefix, suffix string, raw []by
 		return "", err
 	}
 	for range 16 {
-		var random [16]byte
+		var random [regularNetworkArtifactRandomBytes]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return "", err
 		}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -271,6 +272,73 @@ func TestPlanTailscaleResolverIsolationFleetRejectsGenerationArtifactPathAliases
 
 				assertTailscaleResolverPlanRejected(t, fixture, "versioned filename")
 			})
+		}
+	})
+}
+
+func TestPlanTailscaleResolverIsolationFleetRejectsMutationArtifactImpostors(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		name     string
+		artifact db.ArtifactName
+		relative string
+		want     string
+	}{
+		{"unversioned unit", db.ArtifactTSService, "bin/tailscale-service.service", "unmanaged generation filename"},
+		{"short ID", db.ArtifactTSService, "bin/tailscale-service-" + id[:31] + ".service", "unmanaged generation filename"},
+		{"long ID", db.ArtifactTSService, "bin/tailscale-service-" + id + "0.service", "unmanaged generation filename"},
+		{"uppercase ID", db.ArtifactTSService, "bin/tailscale-service-" + strings.ToUpper(id) + ".service", "unmanaged generation filename"},
+		{"nonhex ID", db.ArtifactTSService, "bin/tailscale-service-z" + id[1:] + ".service", "unmanaged generation filename"},
+		{"unit outside bin", db.ArtifactTSService, "tailscale/tailscale-service-" + id + ".service", "exact managed location"},
+		{"nested unit", db.ArtifactTSService, "bin/nested/tailscale-service-" + id + ".service", "exact managed location"},
+		{"other service timestamp", db.ArtifactTSService, "bin/yeet-other-ts-20260725010101.service", "unmanaged generation filename"},
+		{"env outside bin", db.ArtifactTSEnv, "tailscale/tailscale-env-" + id + ".env", "exact managed location"},
+		{"config outside bin", db.ArtifactTSConfig, "tailscale/tailscaled-json-" + id + ".json", "exact managed location"},
+		{"wrong env prefix", db.ArtifactTSEnv, "bin/tailscaled-json-" + id + ".env", "versioned filename"},
+		{"wrong config prefix", db.ArtifactTSConfig, "bin/tailscale-env-" + id + ".json", "versioned filename"},
+		{"timestamp in mutation directory", db.ArtifactTSEnv, "bin/tailscaled-20260725010101.env", "exact managed location"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTailscaleResolverPlanFixture(t, "api", tailscaleResolverGenerationCurrent, "")
+			retargetTailscaleResolverArtifact(t, &fixture, test.artifact, filepath.Join(fixture.service.ServiceRoot, test.relative))
+			assertTailscaleResolverPlanRejected(t, fixture, test.want)
+		})
+	}
+}
+
+func FuzzTailscaleResolverGenerationLocations(f *testing.F) {
+	const root = "/managed/services/api"
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`^/managed/services/api/bin/(yeet-api-ts-[0-9]{14}|tailscale-service-[0-9a-f]{32})\.service$`),
+		regexp.MustCompile(`^/managed/services/api/(tailscale/tailscaled-[0-9]{14}|bin/tailscale-env-[0-9a-f]{32})\.env$`),
+		regexp.MustCompile(`^/managed/services/api/(tailscale/tailscaled-[0-9]{14}|bin/tailscaled-json-[0-9a-f]{32})\.json$`),
+	}
+	for kind, paths := range [][]string{
+		{"bin/yeet-api-ts-20260725010101.service", "bin/tailscale-service-0123456789abcdef0123456789abcdef.service", "bin/tailscale-service-deadbeef.service"},
+		{"tailscale/tailscaled-20260725010101.env", "bin/tailscale-env-0123456789abcdef0123456789abcdef.env", "tailscale/tailscale-env-0123456789abcdef0123456789abcdef.env"},
+		{"tailscale/tailscaled-20260725010101.json", "bin/tailscaled-json-0123456789abcdef0123456789abcdef.json", "bin/../bin/tailscaled-json-0123456789abcdef0123456789abcdef.json"},
+	} {
+		for _, path := range paths {
+			f.Add(root+"/"+path, uint8(kind))
+		}
+	}
+	f.Add("", uint8(0))
+	f.Add("/outside/bin/tailscale-env-0123456789abcdef0123456789abcdef.env", uint8(1))
+	f.Fuzz(func(t *testing.T, path string, kind uint8) {
+		kind %= 3
+		service := db.Service{Name: "api", ServiceRoot: root}
+		var err error
+		if kind == 0 {
+			_, err = tailscaleResolverUnitLocations(service, tailscaleResolverServiceRecordProof{TSServiceArtifact: path}, tailscaleSidecarInstalledUnitPath("api"))
+		} else {
+			suffix := ".env"
+			if kind == 2 {
+				suffix = ".json"
+			}
+			_, err = tailscaleResolverGenerationDataLocation(service, path, suffix)
+		}
+		if want := patterns[kind].MatchString(path); (err == nil) != want {
+			t.Fatalf("generation location %q kind %d: err = %v, want accepted = %t", path, kind, err, want)
 		}
 	})
 }

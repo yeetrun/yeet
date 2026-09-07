@@ -553,7 +553,7 @@ func tailscaleResolverUnitLocations(
 		canonicalBase,
 		"yeet-"+service.Name+"-ts-",
 		".service",
-	) {
+	) && !validRegularNetworkArtifactFilename(canonicalBase, db.ArtifactTSService, ".service") {
 		return nil, fmt.Errorf("canonical Tailscale unit has an unmanaged generation filename: %q", record.TSServiceArtifact)
 	}
 	canonical, err := newTailscaleResolverManagedLocation(
@@ -626,15 +626,26 @@ func tailscaleResolverGenerationDataLocation(
 	suffix string,
 ) (tailscaleResolverManagedLocation, error) {
 	base := filepath.Base(path)
+	dir := "tailscale"
 	if !validTailscaleResolverVersionedFilename(base, "tailscaled-", suffix) {
-		return tailscaleResolverManagedLocation{}, fmt.Errorf(
-			"tailscaled generation artifact must have a versioned filename: %q",
-			path,
-		)
+		var artifact db.ArtifactName
+		switch suffix {
+		case ".env":
+			artifact = db.ArtifactTSEnv
+		case ".json":
+			artifact = db.ArtifactTSConfig
+		}
+		if artifact == "" || !validRegularNetworkArtifactFilename(base, artifact, suffix) {
+			return tailscaleResolverManagedLocation{}, fmt.Errorf(
+				"tailscaled generation artifact must have a versioned filename: %q",
+				path,
+			)
+		}
+		dir = "bin"
 	}
 	return newTailscaleResolverManagedLocation(
 		service.ServiceRoot,
-		filepath.Join("tailscale", base),
+		filepath.Join(dir, base),
 		path,
 		"managed generation artifact location",
 	)
@@ -668,6 +679,25 @@ func validTailscaleResolverVersionedFilename(name, prefix, suffix string) bool {
 	}
 	for _, char := range version {
 		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Network mutations use exclusively created random filenames instead of the
+// installer's timestamps. Location and provenance checks still apply separately.
+func validRegularNetworkArtifactFilename(name string, artifact db.ArtifactName, suffix string) bool {
+	prefix := regularNetworkArtifactPrefix(artifact)
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if len(id) != 2*regularNetworkArtifactRandomBytes {
+		return false
+	}
+	for _, char := range id {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}
