@@ -256,6 +256,7 @@ func vmJailerCommandArgs(cfg VMConsoleProxyConfig, identity vmRuntimeIdentity) [
 		"--",
 		"--api-sock", cfg.APISocket,
 		"--config-file", cfg.ConfigFile,
+		"--level", "Warning",
 	}
 	return args
 }

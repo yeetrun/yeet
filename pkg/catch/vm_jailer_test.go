@@ -120,6 +120,7 @@ func TestVMJailerCommandArgsDropIdentityAndPreserveSystemdCgroup(t *testing.T) {
 		"--",
 		"--api-sock", "/srv/vms/devbox/run/firecracker.sock",
 		"--config-file", "/srv/vms/devbox/run/firecracker.json",
+		"--level", "Warning",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
