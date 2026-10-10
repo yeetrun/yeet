@@ -1512,13 +1512,19 @@ func (s *Server) newConcreteISORemoveSteps(service string, options RemoveOptions
 		return nil, err
 	}
 	record := view.AsStruct()
+	if record.ISO != nil {
+		options.CleanData = options.CleanData || record.ISO.RemoveCleanData
+	}
 	isVM, isNative, err := classifyISORemoveRecord(record)
 	if err != nil {
 		return nil, err
 	}
-	compose, err := s.isoRemoveComposeService(service, isVM, isNative)
-	if err != nil {
-		return nil, err
+	compose := options.compose
+	if compose == nil {
+		compose, err = s.isoRemoveComposeService(service, isVM, isNative)
+		if err != nil {
+			return nil, err
+		}
 	}
 	spec, err := s.loadISORuntimeSpec(service)
 	if err != nil {
@@ -1562,6 +1568,14 @@ func (r *isoConcreteRemoveSteps) StopWorkload(ctx context.Context, _ string) err
 	}
 	if r.native {
 		return stopAndVerifyISONativeUnits(ctx, r.service)
+	}
+	if r.options.CleanData {
+		if err := r.compose.StopProjectWorkload(ctx); err != nil {
+			return err
+		}
+		if err := r.compose.PrepareVolumeRemoval(ctx); err != nil {
+			return err
+		}
 	}
 	return r.compose.StopProjectContainers(ctx)
 }
@@ -1723,7 +1737,17 @@ func (r *isoConcreteRemoveSteps) VerifyGlobalPolicy(ctx context.Context, service
 	return verifyISOPolicyForRuntime(ctx, rules)
 }
 
-func (r *isoConcreteRemoveSteps) BeforeDelete(_ context.Context, _ string) error {
+func (r *isoConcreteRemoveSteps) BeforeDelete(ctx context.Context, _ string) error {
+	if r.options.CleanData && r.compose != nil {
+		// A retry may request data cleanup after an earlier preserve-data
+		// removal already verified that containers were gone.
+		if err := r.compose.PrepareVolumeRemoval(ctx); err != nil {
+			return err
+		}
+		if err := r.compose.RemoveVolumes(ctx); err != nil {
+			return err
+		}
+	}
 	if err := r.cleanVMJailBeforeDelete(); err != nil {
 		return err
 	}

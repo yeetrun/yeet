@@ -184,7 +184,7 @@ Remove it:
 yeet rm --clean hello
 ```
 
-Read the prompt. `--clean` means what it says: it deletes service data, including VM disks for VM services, and removes the local `yeet.toml` entry.
+Read the prompt. `--clean` means what it says: it deletes service data, including VM disks and exclusively owned Docker volumes, and removes the local `yeet.toml` entry.
 
 ## Common deploys
 
@@ -403,7 +403,7 @@ yeet start <svc>
 yeet rm <svc>
 ```
 
-`yeet rm <svc>` keeps service data by default and prompts before removing the local config entry. Add `--clean` only when you mean to remove the data too.
+`yeet rm <svc>` keeps service data by default and prompts before removing the local config entry. Add `--clean` only when you mean to remove the data too. For Docker services, `--clean-data` and `--clean` also delete project-owned named volumes and anonymous volumes attached to the removed containers. External volumes, volumes used by another container, and bind-mounted data outside the service root remain. Docker images stay cached.
 
 If a native `--net=iso` service is quarantined, `start` and `restart` leave it stopped and preserve the recorded diagnostic. That is intentional: automatically retrying a workload after its isolation boundary failed would turn a loud failure into a quiet policy change. Correct the reported failure, then inspect the service before recovering the quarantined record manually on the Catch host:
 

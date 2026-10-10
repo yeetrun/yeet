@@ -36,6 +36,7 @@ type DockerComposeService struct {
 	Name          string
 	cfg           *db.Service
 	DataDir       string
+	RunDir        string
 	NewCmd        func(name string, arg ...string) *exec.Cmd
 	NewCmdContext func(ctx context.Context, name string, arg ...string) *exec.Cmd
 	sd            dockerSystemdService
@@ -289,6 +290,16 @@ func dockerProjectLabelStopContext(parent context.Context) (context.Context, con
 }
 
 func (s *DockerComposeService) stopProjectContainersByLabel(ctx context.Context) error {
+	return s.runProjectContainerCommand(ctx, "rm", "--force")
+}
+
+// StopProjectWorkload stops the exact project without deleting containers or
+// mount evidence. iso removal uses this before preparing destructive cleanup.
+func (s *DockerComposeService) StopProjectWorkload(ctx context.Context) error {
+	return s.runProjectContainerCommand(ctx, "stop", "--time", "10")
+}
+
+func (s *DockerComposeService) runProjectContainerCommand(ctx context.Context, action ...string) error {
 	ids, err := s.projectContainerIDs(ctx)
 	if err != nil || len(ids) == 0 {
 		return err
@@ -297,13 +308,13 @@ func (s *DockerComposeService) stopProjectContainersByLabel(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	args := append([]string{"rm", "--force"}, ids...)
+	args := append(action, ids...)
 	cmd := s.newDockerCommand(ctx, dockerPath, args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("force-remove Compose project %q containers: %w: %s", s.composeProjectName(), err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%s Compose project %q containers: %w: %s", action[0], s.composeProjectName(), err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -432,14 +443,43 @@ func (s *DockerComposeService) Update() error {
 }
 
 func (s *DockerComposeService) Remove() error {
-	if err := s.Down(); err != nil {
-		return fmt.Errorf("failed to stop service: %v", err)
+	return s.RemoveWithData(context.Background(), false)
+}
+
+// RemoveWithData removes the project and, when requested, its exclusively owned
+// volumes. Capture anonymous mounts before down and retain the plan on failure.
+func (s *DockerComposeService) RemoveWithData(ctx context.Context, cleanData bool) error {
+	if err := s.prepareDockerRemoval(ctx, cleanData); err != nil {
+		return err
+	}
+	if err := s.DownRemoveOrphans(ctx); err != nil {
+		return fmt.Errorf("failed to stop service: %w", err)
+	}
+	if cleanData {
+		if err := s.RemoveVolumes(ctx); err != nil {
+			return err
+		}
 	}
 	stopErr := s.stopSystemdService()
 	if s.sd == nil {
 		return stopErr
 	}
 	return joinErrors(stopErr, s.sd.Uninstall())
+}
+
+func (s *DockerComposeService) prepareDockerRemoval(ctx context.Context, cleanData bool) error {
+	if cleanData {
+		return s.PrepareVolumeRemoval(ctx)
+	}
+	if s.RunDir == "" {
+		return nil
+	}
+	if _, err := s.loadVolumeRemovalPlan(); err == nil {
+		return fmt.Errorf("unfinished Docker volume cleanup; retry removal with --clean-data")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (s *DockerComposeService) Down() error {

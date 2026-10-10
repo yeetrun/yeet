@@ -80,6 +80,8 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 		{name: "run as", args: []string{"run", "--run-as=app", "./api"}, want: permissionManage},
 		{name: "run cron", args: []string{"run", "--cron=0 3 * * *", "./job"}, want: permissionManage},
 		{name: "remove", args: []string{"remove", "--clean"}, want: permissionManage},
+		{name: "remove volumes", args: []string{"remove", "--yes", "--clean-data"}, want: permissionManage},
+		{name: "remove preserve", args: []string{"remove", "--yes"}, want: permissionManage},
 	}
 
 	if _, err := ttyCommandPermissions([]string{"service", "readmit", "app"}); err == nil || !strings.Contains(err.Error(), `unclassified service command "readmit"`) {

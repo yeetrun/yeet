@@ -61,6 +61,7 @@ func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir s
 		return nil, err
 	}
 	return &DockerComposeService{
+		RunDir:        runDir,
 		Name:          cfg.Name(),
 		cfg:           cfg.AsStruct(),
 		DataDir:       dataDir,

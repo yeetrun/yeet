@@ -620,7 +620,6 @@ func TestDockerComposeRemovePropagatesSystemdStopErrorAfterCleanup(t *testing.T)
 		t.Fatalf("systemd Uninstall called %d times, want 1", sd.uninstallCalls)
 	}
 	assertCallOrder(t, calls,
-		callSpec{composeSubcmd: "ps"},
 		callSpec{composeSubcmd: "down"},
 	)
 }

@@ -1345,6 +1345,8 @@ func (s *Server) isVMServiceRunning(name string) (bool, error) {
 type RemoveOptions struct {
 	CleanData bool
 	Trace     func(string, ...any)
+	// The TTY runner retains its command streams and cancellation context.
+	compose *svc.DockerComposeService
 }
 
 var (
@@ -1401,6 +1403,9 @@ func (s *Server) removeServiceWithOptionsLocked(name string, opts RemoveOptions)
 		return report, fmt.Errorf("determine iso removal state for %q: %w", name, serviceViewErr)
 	}
 	isISO := serviceViewErr == nil && serviceView.ISO().Valid()
+	if isISO {
+		opts.CleanData = opts.CleanData || serviceView.ISO().RemoveCleanData()
+	}
 	doneServiceRoot := removeTraceBlock(opts, "remove service root lookup")
 	serviceRoot, err := s.serviceRootDir(name)
 	doneServiceRoot()
@@ -1448,6 +1453,9 @@ func (s *Server) removeISOServicePrepared(name string, opts RemoveOptions, repor
 }
 
 func (s *Server) removeOrdinaryServicePrepared(name string, opts RemoveOptions, report *RemoveReport, serviceRootZFS, tsStableID, serviceRoot string, removeDirs bool) (*RemoveReport, error) {
+	if err := s.removeOrdinaryDockerService(name, opts); err != nil {
+		return report, fmt.Errorf("remove Docker service (configuration retained for retry): %w", err)
+	}
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")
@@ -1475,6 +1483,31 @@ func (s *Server) removeOrdinaryServicePrepared(name string, opts RemoveOptions, 
 		doneDirs()
 	}
 	return report, nil
+}
+
+var dockerComposeServiceForRemoval = func(server *Server, name string) (*svc.DockerComposeService, error) {
+	return server.dockerComposeService(name)
+}
+
+func (s *Server) removeOrdinaryDockerService(name string, opts RemoveOptions) error {
+	view, err := s.serviceView(name)
+	if errors.Is(err, errServiceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if view.ServiceType() != db.ServiceTypeDockerCompose {
+		return nil
+	}
+	compose := opts.compose
+	if compose == nil {
+		compose, err = dockerComposeServiceForRemoval(s, name)
+		if err != nil {
+			return err
+		}
+	}
+	return compose.RemoveWithData(context.Background(), opts.CleanData)
 }
 
 func (s *Server) cleanupVMNetworkForRemoval(report *RemoveReport, name string) {

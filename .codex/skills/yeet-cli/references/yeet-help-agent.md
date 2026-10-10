@@ -1145,7 +1145,7 @@ Service name
 
 ### `--clean`
 
-Delete service data and the matching yeet.toml entry
+Delete service data, owned Docker volumes, and the matching yeet.toml entry
 
 - **Type**: `bool`
 
@@ -1163,7 +1163,7 @@ Delete the matching yeet.toml entry without prompting
 
 ### `--clean-data`
 
-Delete service data; skips the data-deletion prompt
+Delete service data and owned Docker volumes; skips the data-deletion prompt
 
 - **Type**: `bool`
 

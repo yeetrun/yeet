@@ -1158,33 +1158,43 @@ func (e *ttyExecer) confirmRemoveData(flags cli.RemoveFlags) (cli.RemoveFlags, e
 	return flags, nil
 }
 
-func (e *ttyExecer) removeRunner(runner ServiceRunner) {
+func (e *ttyExecer) removeRunner(runner ServiceRunner) error {
 	if err := runner.Remove(); err != nil {
 		if errors.Is(err, svc.ErrNotInstalled) {
 			e.printf("warning: %s %q was not installed\n", e.managedTargetLabel(), e.sn)
 		} else {
-			e.printf("warning: failed to stop/remove %s %q: %v\n", e.managedTargetLabel(), e.sn, err)
+			return fmt.Errorf("failed to stop/remove %s %q (configuration retained for retry): %w", e.managedTargetLabel(), e.sn, err)
 		}
 	}
+	return nil
 }
 
 func (e *ttyExecer) removeRunnerAndServiceConfig(runner ServiceRunner, flags cli.RemoveFlags) error {
 	return WithVMRuntimeTransactionLock(context.Background(), &e.s.cfg, func() error {
 		doneRunnerRemove := e.traceBlock("remove runner")
-		if !e.serviceHasISOAllocation() {
-			e.removeRunner(runner)
+		view, viewErr := e.s.serviceView(e.sn)
+		serverRemovesDocker := viewErr == nil && view.ServiceType() == db.ServiceTypeDockerCompose
+		if !e.serviceHasISOAllocation() && !serverRemovesDocker {
+			if err := e.removeRunner(runner); err != nil {
+				doneRunnerRemove()
+				return err
+			}
 		}
 		doneRunnerRemove()
-		return e.removeServiceConfigLocked(flags)
+		opts := RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef}
+		if docker, ok := runner.(*dockerComposeServiceRunner); ok {
+			opts.compose = docker.DockerComposeService
+		}
+		return e.removeServiceConfigLocked(opts)
 	})
 }
 
-func (e *ttyExecer) removeServiceConfigLocked(flags cli.RemoveFlags) error {
+func (e *ttyExecer) removeServiceConfigLocked(opts RemoveOptions) error {
 	if e.removeServiceFunc != nil {
-		report, err := e.removeServiceFunc(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+		report, err := e.removeServiceFunc(e.sn, opts)
 		return e.finishRemoveServiceConfig(report, err)
 	}
-	report, err := e.s.removeServiceWithOptionsLocked(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+	report, err := e.s.removeServiceWithOptionsLocked(e.sn, opts)
 	return e.finishRemoveServiceConfig(report, err)
 }
 

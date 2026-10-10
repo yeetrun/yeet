@@ -485,10 +485,10 @@ type serviceSyncFlagsParsed struct {
 }
 
 type removeFlagsParsed struct {
-	Clean       bool `flag:"clean" help:"Delete service data and the matching yeet.toml entry"`
+	Clean       bool `flag:"clean" help:"Delete service data, owned Docker volumes, and the matching yeet.toml entry"`
 	Yes         bool `flag:"yes" short:"y" help:"Skip removal prompts; does not imply --clean or --clean-data"`
 	CleanConfig bool `flag:"clean-config" help:"Delete the matching yeet.toml entry without prompting"`
-	CleanData   bool `flag:"clean-data" help:"Delete service data; skips the data-deletion prompt"`
+	CleanData   bool `flag:"clean-data" help:"Delete service data and owned Docker volumes; skips the data-deletion prompt"`
 }
 
 type stageFlagsParsed struct {

@@ -2212,7 +2212,7 @@ func TestConfirmRemoveDataUsesVMLabel(t *testing.T) {
 	}
 }
 
-func TestRemoveRunnerPrintsWarnings(t *testing.T) {
+func TestRemoveRunnerReturnsFailuresAndWarnsWhenNotInstalled(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -2226,7 +2226,16 @@ func TestRemoveRunnerPrintsWarnings(t *testing.T) {
 			var out bytes.Buffer
 			execer := &ttyExecer{sn: "svc-remove", rw: &out}
 
-			execer.removeRunner(runner)
+			err := execer.removeRunner(runner)
+			if tc.err != svc.ErrNotInstalled {
+				if !errors.Is(err, tc.err) {
+					t.Fatalf("remove error = %v, want %v", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got := out.String(); !strings.Contains(got, tc.want) {
 				t.Fatalf("remove warning = %q, want %q", got, tc.want)
 			}

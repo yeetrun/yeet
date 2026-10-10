@@ -759,7 +759,7 @@ func TestRemoveServiceSkipsAdoptedVMJailWithInvalidConfiguredRuntime(t *testing.
 	}
 }
 
-func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
+func TestRemoveCmdRetainsConfigAfterRunnerError(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-remove"
 
@@ -787,19 +787,16 @@ func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
 		},
 	}
 
-	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
-		t.Fatalf("removeCmdFunc: %v", err)
-	}
-	if !strings.Contains(out.String(), "warning: failed to stop/remove service") {
-		t.Fatalf("expected warning about remove failure, got %q", out.String())
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("removeCmdFunc error = %v, want stop failure", err)
 	}
 
 	dv, err := server.cfg.DB.Get()
 	if err != nil {
 		t.Fatalf("db get: %v", err)
 	}
-	if _, ok := dv.Services().GetOk(name); ok {
-		t.Fatalf("service still present in db")
+	if _, ok := dv.Services().GetOk(name); !ok {
+		t.Fatal("service recovery record lost after runner failure")
 	}
 }
 
