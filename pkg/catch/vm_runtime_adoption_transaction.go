@@ -375,6 +375,11 @@ func buildVMRuntimeAdoptionJournalRecords(cfg *Config, data *db.Data, preparatio
 		if err != nil {
 			return nil, err
 		}
+		if preparation.RecoveredDescriptor != nil {
+			// Retain exact bytes, including the digest bound to the live marker.
+			newDescriptor = oldDescriptor
+			newUnit = oldUnit
+		}
 		records = append(records, vmRuntimeJournalRecord{
 			Schema: vmRuntimeJournalSchema, SchemaVersion: vmRuntimeJournalSchemaVersion,
 			TransactionID: transactionID, Members: append([]string(nil), members...),
@@ -521,7 +526,7 @@ func (cohort *vmRuntimeAdoptionDescriptorCohort) verify(ctx context.Context, wan
 		if err != nil {
 			return err
 		}
-		if classification != want {
+		if classification != want && (classification != vmRuntimeDescriptorRawOld || !equalVMRuntimeDescriptorRawFiles(tx.old, tx.new)) {
 			return fmt.Errorf("VM runtime descriptor %s is %s, want %s", tx.path, classification, want)
 		}
 	}

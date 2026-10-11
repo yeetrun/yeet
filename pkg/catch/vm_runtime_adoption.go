@@ -98,20 +98,21 @@ type vmRuntimeAdoptionSummary struct {
 }
 
 type vmRuntimeAdoptionPreparation struct {
-	Service            string
-	ServiceRoot        string
-	Classification     vmRuntimeAdoptionClassification
-	BlockedReason      string
-	OldDB              vmRuntimeJournalDBProjection
-	NewDB              vmRuntimeJournalDBProjection
-	Components         *db.VMComponentsConfig
-	EffectiveUnit      vmRuntimeAdoptionLoadedUnit
-	EffectiveKernel    string
-	EffectiveRuntime   db.VMRuntimeArtifactConfig
-	Evidence           vmRuntimeAdoptionPreconditionEvidence
-	PreconditionSHA256 string
-	Composition        vmLegacyCompositionRecord
-	CompositionSHA256  string
+	RecoveredDescriptor *vmRuntimeDescriptor
+	Service             string
+	ServiceRoot         string
+	Classification      vmRuntimeAdoptionClassification
+	BlockedReason       string
+	OldDB               vmRuntimeJournalDBProjection
+	NewDB               vmRuntimeJournalDBProjection
+	Components          *db.VMComponentsConfig
+	EffectiveUnit       vmRuntimeAdoptionLoadedUnit
+	EffectiveKernel     string
+	EffectiveRuntime    db.VMRuntimeArtifactConfig
+	Evidence            vmRuntimeAdoptionPreconditionEvidence
+	PreconditionSHA256  string
+	Composition         vmLegacyCompositionRecord
+	CompositionSHA256   string
 }
 
 type vmRuntimeAdoptionInventory struct {
@@ -372,6 +373,9 @@ func (inventory *vmRuntimeAdoptionServiceInventory) inventoryLoadedUnit() error 
 		return fmt.Errorf("load effective VM systemd unit: %w", err)
 	}
 	inventory.unit = unit
+	if recovered, recoveryErr := inventory.recoverDescriptorUnit(); recovered || recoveryErr != nil {
+		return recoveryErr
+	}
 	inventory.unitArgs, err = validateVMRuntimeAdoptionUnit(
 		unit, inventory.service.Name, inventory.root, inventory.configPath, inventory.activeDiskPath,
 		vmJailerBaseForDataRoot(inventory.cfg.RootDir),
@@ -460,6 +464,11 @@ func (inventory *vmRuntimeAdoptionServiceInventory) inventoryRuntimePair() error
 }
 
 func (inventory *vmRuntimeAdoptionServiceInventory) inventorySource() error {
+	if inventory.preparation.RecoveredDescriptor != nil {
+		// Measure guest and kernel provenance independently of the selected runtime.
+		inventory.source.classification = vmRuntimeAdoptionCustomLegacy
+		return nil
+	}
 	manifest, err := inspectVMRuntimeAdoptionManifest(inventory.rootFSPath, inventory.deps.evidence)
 	if err != nil {
 		return err
@@ -535,6 +544,10 @@ func (inventory *vmRuntimeAdoptionServiceInventory) composeComponents() error {
 		},
 	}
 	preparation := inventory.preparation
+	if descriptor := preparation.RecoveredDescriptor; descriptor != nil {
+		components.Runtime.Configured = descriptor.Configured
+		components.Runtime.Previous = cloneVMRuntimeArtifact(descriptor.Previous)
+	}
 	preparation.Classification = inventory.source.classification
 	preparation.Components = components.Clone()
 	preparation.Composition = composition

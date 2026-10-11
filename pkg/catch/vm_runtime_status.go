@@ -126,9 +126,9 @@ func (s *Server) vmRuntimeStatusRows(ctx context.Context, serviceName string) ([
 		return nil, err
 	}
 	data := dv.AsStruct()
-	names := adoptedVMRuntimeStatusNames(data, serviceName)
+	names := vmRuntimeStatusNames(data, serviceName)
 	if serviceName != "" && len(names) == 0 {
-		return nil, fmt.Errorf("service %q is not an adopted VM", serviceName)
+		return nil, fmt.Errorf("service %q is not a VM", serviceName)
 	}
 	slices.Sort(names)
 	if len(names) == 0 {
@@ -149,10 +149,10 @@ func (s *Server) vmRuntimeStatusRows(ctx context.Context, serviceName string) ([
 	return rows, nil
 }
 
-func adoptedVMRuntimeStatusNames(data *db.Data, selected string) []string {
+func vmRuntimeStatusNames(data *db.Data, selected string) []string {
 	names := make([]string, 0, len(data.Services))
 	for name, service := range data.Services {
-		if service != nil && service.ServiceType == db.ServiceTypeVM && service.VM != nil && service.VM.Components != nil && (selected == "" || name == selected) {
+		if service != nil && service.ServiceType == db.ServiceTypeVM && service.VM != nil && (selected == "" || name == selected) {
 			names = append(names, name)
 		}
 	}
@@ -160,6 +160,12 @@ func adoptedVMRuntimeStatusNames(data *db.Data, selected string) []string {
 }
 
 func (s *Server) vmRuntimeStatusRow(ctx context.Context, deps vmRuntimeCommandDeps, host *db.VMHostConfig, service *db.Service, catalog vmRuntimeCatalog, catalogErr error) (vmRuntimeStatusRow, error) {
+	if service.VM.Components == nil {
+		return vmRuntimeStatusRow{
+			Service: service.Name, State: "metadata-missing",
+			RecommendedAction: "run Catch install/upgrade to verify and recover component metadata; inspect adoption warnings if blocked",
+		}, nil
+	}
 	runtimeState := service.VM.Components.Runtime
 	row, err := initialVMRuntimeStatusRow(host, service, catalog, catalogErr)
 	if err != nil {

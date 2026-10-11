@@ -235,9 +235,6 @@ func prepareVMRuntimeDescriptorRawTransaction(
 	if oldFile.Path != newFile.Path {
 		return nil, fmt.Errorf("old and new VM runtime descriptor paths differ")
 	}
-	if equalVMRuntimeDescriptorRawFiles(oldFile, newFile) {
-		return nil, fmt.Errorf("old and new raw VM runtime descriptor states are identical")
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -539,6 +536,10 @@ func (tx *vmRuntimeDescriptorRawTransaction) PublishAndVerify(ctx context.Contex
 }
 
 func (tx *vmRuntimeDescriptorRawTransaction) publishClassifiedLocked(ctx context.Context, classification vmRuntimeDescriptorRawClassification, current vmRuntimeDescriptorRawCurrent) error {
+	if equalVMRuntimeDescriptorRawFiles(tx.old, tx.new) {
+		// Metadata-only recovery retains the live descriptor digest and inode.
+		return tx.syncVisibleLocked(ctx, vmRuntimeDescriptorRawNew)
+	}
 	switch classification {
 	case vmRuntimeDescriptorRawNew:
 		return tx.resyncNewRawLocked(ctx)

@@ -336,6 +336,8 @@ yeet vm runtime status
 yeet vm runtime status <vm> --format=json-pretty
 ```
 
+Runtime status includes VMs with missing component metadata as `metadata-missing`. Catch install/upgrade verifies and recovers existing descriptor-backed launch configurations without restarting guests; unverifiable VMs remain unchanged with an adoption warning.
+
 Runtime policy is manual by default. `yeet vm runtime update` refreshes the host runtime cache without staging or restarting a VM. `upgrade` stages an exact runtime for the next start. Add `--restart` only when downtime is acceptable:
 
 ```bash

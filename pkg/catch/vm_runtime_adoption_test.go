@@ -471,13 +471,13 @@ func TestVMRuntimeAdoptionInventoryAcceptsStoppedUnitEvidence(t *testing.T) {
 	}
 }
 
-func TestVMRuntimeAdoptionInventoryRejectsEveryDescriptorModeFlag(t *testing.T) {
+func TestVMRuntimeAdoptionInventoryRejectsIncompleteDescriptorModeFlags(t *testing.T) {
 	for _, name := range []string{"--runtime-descriptor", "--runtime-running-marker", "--runtime-trial-result"} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newVMRuntimeAdoptionFixture(t, false)
 			fixture.unitExec = append(fixture.unitExec, name, "")
 			vm := fixture.onlyVM(t)
-			if vm.Classification != vmRuntimeAdoptionBlocked || !strings.Contains(vm.BlockedReason, "descriptor-mode flag "+name) {
+			if vm.Classification != vmRuntimeAdoptionBlocked || !strings.Contains(vm.BlockedReason, name) {
 				t.Fatalf("descriptor flag result = %#v", vm)
 			}
 		})
