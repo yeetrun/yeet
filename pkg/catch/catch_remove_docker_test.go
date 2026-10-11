@@ -108,6 +108,116 @@ func TestRemoveRunnerFailureRetainsConfigAndData(t *testing.T) {
 	}
 }
 
+func TestRemoveRunningDockerService(t *testing.T) {
+	for _, route := range []string{"server", "tty"} {
+		for _, clean := range []bool{false, true} {
+			t.Run(route+map[bool]string{true: " clean", false: " preserve"}[clean], func(t *testing.T) {
+				server := newTestServer(t)
+				compose := removalTestCompose(t, server, "app")
+				// The old coordinator probes status before using the prepared runner.
+				path := filepath.Join(strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0], "docker")
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf 'app,running\\n'\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(filepath.Dir(path), "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				running, verified := true, false
+				compose.NewCmdContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+					output := ""
+					switch {
+					case slices.Contains(args, "down"):
+						running = false
+					case slices.Contains(args, "config"):
+						output = `{}`
+					case slices.Contains(args, "ps") && slices.Contains(args, "--format"):
+						if running {
+							output = "app,running\n"
+						} else {
+							verified = true
+						}
+					}
+					cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$REMOVE_TEST_OUTPUT"`)
+					cmd.Env = append(os.Environ(), "REMOVE_TEST_OUTPUT="+output)
+					return cmd
+				}
+				old := dockerComposeServiceForRemoval
+				dockerComposeServiceForRemoval = func(*Server, string) (*svc.DockerComposeService, error) { return compose, nil }
+				t.Cleanup(func() { dockerComposeServiceForRemoval = old })
+				var output bytes.Buffer
+				if route == "server" {
+					report, err := server.RemoveServiceWithOptions("app", RemoveOptions{CleanData: clean})
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, warning := range report.Warnings {
+						if strings.Contains(warning.Error(), "running") {
+							t.Fatalf("stale running warning: %v", warning)
+						}
+					}
+				} else {
+					e := &ttyExecer{s: server, sn: "app", rw: &output, serviceRunnerFn: func() (ServiceRunner, error) {
+						return &dockerComposeServiceRunner{DockerComposeService: compose}, nil
+					}}
+					if err := e.removeCmdFunc(cli.RemoveFlags{Yes: true, CleanData: clean}); err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(output.String(), "running") {
+						t.Fatalf("stale running warning: %s", &output)
+					}
+				}
+				if running || !verified {
+					t.Fatalf("shutdown not verified: running=%v verified=%v", running, verified)
+				}
+				if _, err := server.serviceView("app"); !errors.Is(err, errServiceNotFound) {
+					t.Fatalf("service remains: %v", err)
+				}
+				_, err := os.Stat(compose.DataDir)
+				if clean && !errors.Is(err, os.ErrNotExist) || !clean && err != nil {
+					t.Fatalf("data cleanup clean=%v: %v", clean, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRemoveDockerUnverifiedShutdownRetainsService(t *testing.T) {
+	for _, output := range []string{"app,running\n", "probe failure"} {
+		t.Run(strings.TrimSpace(output), func(t *testing.T) {
+			server := newTestServer(t)
+			compose := removalTestCompose(t, server, "app")
+			bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+			if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			compose.NewCmdContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+				if slices.Contains(args, "ps") {
+					cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$REMOVE_TEST_OUTPUT"; exit "$REMOVE_TEST_STATUS"`)
+					status := "0"
+					if output == "probe failure" {
+						status = "1"
+					}
+					cmd.Env = append(os.Environ(), "REMOVE_TEST_OUTPUT="+output, "REMOVE_TEST_STATUS="+status)
+					return cmd
+				}
+				return exec.CommandContext(ctx, "sh", "-c", "exit 0")
+			}
+			e := &ttyExecer{s: server, sn: "app", rw: &bytes.Buffer{}, serviceRunnerFn: func() (ServiceRunner, error) {
+				return &dockerComposeServiceRunner{DockerComposeService: compose}, nil
+			}}
+			if err := e.removeCmdFunc(cli.RemoveFlags{Yes: true}); err == nil || !strings.Contains(err.Error(), "retained for retry") || !strings.Contains(err.Error(), "verify Docker shutdown") {
+				t.Fatalf("removal error=%v", err)
+			}
+			if _, err := server.serviceView("app"); err != nil {
+				t.Fatalf("service record lost: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(compose.RunDir, "compose.yml")); err != nil {
+				t.Fatalf("recovery Compose file lost: %v", err)
+			}
+		})
+	}
+}
+
 type isoDockerRemoveTestSteps struct {
 	*isoRemoveRecorder
 	concrete *isoConcreteRemoveSteps

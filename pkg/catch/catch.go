@@ -1389,9 +1389,6 @@ func (s *Server) removeServiceWithOptionsLocked(name string, opts RemoveOptions)
 	doneRemove := removeTraceBlock(opts, "remove service")
 	defer doneRemove()
 	report := &RemoveReport{}
-	doneRunning := removeTraceBlock(opts, "remove running warning")
-	s.addRunningServiceWarning(report, name)
-	doneRunning()
 	doneStableID := removeTraceBlock(opts, "remove tailscale stable id")
 	tsStableID := s.tailscaleStableIDForService(report, name)
 	doneStableID()
@@ -1456,6 +1453,9 @@ func (s *Server) removeOrdinaryServicePrepared(name string, opts RemoveOptions, 
 	if err := s.removeOrdinaryDockerService(name, opts); err != nil {
 		return report, fmt.Errorf("remove Docker service (configuration retained for retry): %w", err)
 	}
+	doneRunning := removeTraceBlock(opts, "remove running warning")
+	s.addRunningServiceWarning(report, name)
+	doneRunning()
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")
@@ -1507,7 +1507,17 @@ func (s *Server) removeOrdinaryDockerService(name string, opts RemoveOptions) er
 			return err
 		}
 	}
-	return compose.RemoveWithData(context.Background(), opts.CleanData)
+	if err := compose.RemoveWithData(context.Background(), opts.CleanData); err != nil {
+		return err
+	}
+	running, err := compose.AnyRunningContext(context.Background())
+	if err != nil {
+		return fmt.Errorf("verify Docker shutdown: %w", err)
+	}
+	if running {
+		return fmt.Errorf("verify Docker shutdown: service %q is still running", name)
+	}
+	return nil
 }
 
 func (s *Server) cleanupVMNetworkForRemoval(report *RemoveReport, name string) {
@@ -1616,6 +1626,11 @@ func removeTraceBlock(opts RemoveOptions, label string) func() {
 }
 
 func (s *Server) addRunningServiceWarning(report *RemoveReport, name string) {
+	// Docker removal verifies shutdown through its prepared runner. iso removal
+	// verifies cleanup through its own lifecycle and does not call this helper.
+	if view, err := s.serviceView(name); err == nil && view.ServiceType() == db.ServiceTypeDockerCompose {
+		return
+	}
 	if s.serviceIsStagedOnlyEnvPlaceholder(name) {
 		return
 	}

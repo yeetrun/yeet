@@ -405,7 +405,7 @@ yeet start <svc>
 yeet rm <svc>
 ```
 
-`yeet rm <svc>` keeps service data by default and prompts before removing the local config entry. Add `--clean` only when you mean to remove the data too. For Docker services, `--clean-data` and `--clean` also delete project-owned named volumes and anonymous volumes attached to the removed containers. External volumes, volumes used by another container, and bind-mounted data outside the service root remain. Docker images stay cached.
+`yeet rm <svc>` stops a running service before removing it, keeps service data by default, and prompts before removing the local config entry. If Docker shutdown fails or cannot be verified, the service configuration remains available for retrying removal. Add `--clean` only when you mean to remove the data too. For Docker services, `--clean-data` and `--clean` also delete project-owned named volumes and anonymous volumes attached to the removed containers. External volumes, volumes used by another container, and bind-mounted data outside the service root remain. Docker images stay cached.
 
 If a native `--net=iso` service is quarantined, `start` and `restart` leave it stopped and preserve the recorded diagnostic. That is intentional: automatically retrying a workload after its isolation boundary failed would turn a loud failure into a quiet policy change. Correct the reported failure, then inspect the service before recovering the quarantined record manually on the Catch host:
 
