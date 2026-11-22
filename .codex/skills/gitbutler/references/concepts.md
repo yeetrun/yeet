@@ -58,17 +58,37 @@ Stacks:     m0, n0          (auto-generated, 2–3 chars)
 
 **Reading status output:** the first token on each line is that line's ID. Verbose commit lines append an informational `(sha …)` after the timestamp — it changes on every amend; do not pass it to commands.
 
-**Stability:** File/hunk IDs copied from the current output generally remain usable across ordinary commits, so you can reference several in a row, including across chained `but commit` calls. If an ID stops resolving, re-read the diff and continue. Commit IDs are change-ID prefixes when the commit has a change ID and sha prefixes otherwise. Change-ID refs survive history edits (`amend`, `squash`, `move`, `uncommit`, `reword`); sha refs and `#N`-suffixed refs do not — a stale sha can silently resolve to the wrong commit. History edits may run in sequence off one status read when every ref involved is a change-ID ref; otherwise run them one at a time with `--status-after` to get the next ref.
+**Stability:** Branch short IDs identify branches only within the workspace snapshot that produced them; branch names remain stable across unrelated workspace mutations. File/hunk IDs copied from the current output generally remain usable across ordinary commits, so you can reference several in a row, including across chained `but commit` calls. If an ID stops resolving, re-read the diff and continue. Commit IDs are change-ID prefixes when the commit has a change ID and sha prefixes otherwise. Change-ID refs survive history edits (`amend`, `squash`, `move`, `uncommit`, `reword`); sha refs and `#N`-suffixed refs do not — a stale sha can silently resolve to the wrong commit. History edits may run in sequence off one status read when every ref involved is a change-ID ref; otherwise run them one at a time with `--status-after` to get the next ref.
 
 **Usage:** Pass these IDs as arguments to commands:
 
 ```bash
-but commit -b <branch-id> -m "message" <file-or-hunk-id>   # Commit selected changes to a branch
+but commit -b <branch-name> -m "message" <file-or-hunk-id>   # Commit selected changes to a branch
 but amend -t <commit-id> <file-or-hunk-id> <file-or-hunk-id>  # Amend file(s) or hunk(s) into commit
 but squash <commit-id> -t <commit-id> -m "message"         # Squash commits
 ```
 
 IDs are positional and space-separated. `but help cli-ids` documents every ID kind in detail.
+
+**Linked worktrees** (experimental, only with the `worktreeManipulation` feature flag on): each
+active linked worktree gets its own ID and is drawn in `but status` as a lane — a braced
+`{<branch>}` heading (the worktree name when its `HEAD` is detached) nested above the commit the
+worktree rests on — another worktree's commit included, lanes nest recursively — or standing on
+its own below the stacks when it rests outside the workspace.
+The lane lists that checkout's uncommitted files and the commits the worktree owns; in `--json`
+they appear in a top-level `worktrees` array. The worktree ID on the heading names its whole
+uncommitted area the way `zz` names the main worktree's, and `<worktree-name>:<path>` scopes a
+filename to that checkout — `zz:<path>` keeps meaning the main worktree. A filename dirty in
+several checkouts at once is ambiguous; the error suggests the scoped forms. A worktree file or
+heading ID — like `zz` for the main checkout — works as a `but commit` change and a `but amend`
+source: the change lands on the target and leaves that worktree's uncommitted area. Without a
+target flag, worktree changes commit to the tip of the worktree's own branch; an explicit target
+commit or branch does not have to be the worktree's own. One operation reads from one checkout
+at a time — a selection mixing checkouts is refused. A worktree is also a target: `but commit`,
+`but move`, and `but pick` with `-b <worktree-id-or-its-branch-name>` or `--below <worktree-id>`
+place the commit on the tip of the branch the worktree has checked out (`--above` is refused —
+that is its uncommitted area). A worktree's own commits carry ordinary commit IDs: `reword`, `move`,
+`squash`, and `pick` accept them, and the worktree's branch and checkout follow the rewrite.
 
 ## Parallel vs Stacked Branches
 
@@ -132,15 +152,16 @@ is a flag. `zz` is a special ID meaning "the uncommitted area".
 | Sources          | Target (`-t`) | Operation                         | Example                       |
 | ---------------- | ------------- | --------------------------------- | ----------------------------- |
 | Commit(s)        | Commit        | Squash commits together           | `but squash mm -t nn -m "…"`  |
-| Branch           | Commit        | Squash a branch into a commit     | `but squash bu -t nn -m "…"`  |
-| Commit(s)        | Branch        | Squash into the branch's newest   | `but squash mm -t bu -m "…"`  |
-| Branch           | *(none)*      | Squash the branch into one commit | `but squash bu -m "…"`        |
+| Branch           | Commit        | Squash a branch into a commit     | `but squash <branch-name> -t nn -m "…"` |
+| Commit(s)        | Branch        | Squash into the branch's newest   | `but squash mm -t <branch-name> -m "…"` |
+| Branch           | *(none)*      | Squash the branch into one commit | `but squash <branch-name> -m "…"`       |
 | Uncommitted file | Commit        | Amend the change into a commit    | `but squash a1 -t nn`         |
 | `zz`             | Commit        | Amend everything into a commit    | `but squash zz -t nn`         |
 | Commit           | `zz`          | Uncommit the commit               | `but squash mm -t zz`         |
+| Branch           | `zz`          | Uncommit and remove the branch    | `but squash <branch-name> -t zz`         |
 | Committed file   | Commit        | Move the file to another commit   | `but squash nn:a -t mm`       |
 
-**Message flags:** the rows whose sources are commits or branches compose a NEW message, so without
+**Message flags:** commits or branches compose a NEW message unless the target is `zz`, so without
 `-m` they open an editor and block — always pass one. The remaining rows reuse the target's message
 and need no flag, and `-t zz` rejects message flags outright.
 
@@ -151,8 +172,8 @@ which `amend` does not accept.
 The other editing commands are narrower entry points on the same model:
 
 - `but amend -t <commit> <changes>` — amend uncommitted files/hunks into a known commit
-- `but uncommit <commits-or-committed-files>` — move committed work back to uncommitted; committed
-  files in one call must come from one commit
+- `but uncommit <commits-branches-or-committed-files>` — move committed work back to uncommitted;
+  branches are removed, and committed files in one call must come from one commit
 - `but move <sources> --above|--below|--branch|--unstack` — relocate commits, committed files, or a
   branch; this is the command with position control
 - `but discard <changes>` — drop work instead of relocating it
@@ -256,7 +277,7 @@ Branches can be in two states:
 
 ```bash
 but apply <branch-name>    # Make branch active
-but unapply <id>           # Make branch inactive
+but unapply <branch-name>  # Make branch inactive
 ```
 
 **Use cases:**
