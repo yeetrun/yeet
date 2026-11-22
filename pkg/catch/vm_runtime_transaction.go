@@ -82,11 +82,15 @@ func prepareVMRuntimeStageRequest(cfg *Config, service string, target vmRuntimeR
 }
 
 func stageVMRuntimeWithJournal(ctx context.Context, cfg *Config, service string, target vmRuntimeResolvedTarget, deps vmRuntimeAdoptionCoordinatorDeps, journal *vmRuntimeJournalStore) (_ vmRuntimeTransitionResult, retErr error) {
-	view, err := cfg.DB.Get()
-	if err != nil {
+	// Kernel sync can update the database through another store. Reload while
+	// holding the runtime journal lock so the transaction starts from that state.
+	var data *db.Data
+	if err := cfg.DB.WithLatestDataLocked(func(view db.DataView) error {
+		data = view.AsStruct()
+		return nil
+	}); err != nil {
 		return vmRuntimeTransitionResult{}, fmt.Errorf("read VM runtime state: %w", err)
 	}
-	data := view.AsStruct()
 	stored, err := validateVMRuntimeTransitionTarget(ctx, cfg, data, service, target)
 	if err != nil {
 		return vmRuntimeTransitionResult{}, err

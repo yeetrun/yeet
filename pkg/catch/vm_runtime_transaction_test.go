@@ -70,6 +70,45 @@ func TestStageVMRuntimePreservesRunningAndStoppedVMState(t *testing.T) {
 	}
 }
 
+func TestStageVMRuntimeImmediatelyAfterKernelSync(t *testing.T) {
+	ctx := context.Background()
+	fixture, deps, _ := newVMRuntimeAdoptionTransactionFixture(t, true)
+	adoptVMRuntimeTransitionFixture(t, fixture, deps)
+
+	// Warm Catch's store before kernel sync commits through a separate store.
+	cached, err := fixture.store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKernel := cached.AsStruct().Services["devbox"].VM.Components.Kernel
+	newKernel := db.VMKernelArtifactConfig{
+		ID:             "kernel-linux-7.3.5-yeet-v1",
+		Source:         "official",
+		ManifestSHA256: strings.Repeat("a", 64),
+		SHA256:         vmRuntimeSHA256Bytes([]byte("synced kernel")),
+		Path:           filepath.Join(serviceDataDirForRoot(fixture.serviceRoot), "kernels", "vmlinux"),
+	}
+	writeVMRuntimeAdoptionTestFile(t, newKernel.Path, "synced kernel", 0o644)
+	configPath := filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "firecracker.json")
+	if err := WithVMRuntimeTransactionLock(ctx, &fixture.cfg, func() error {
+		return commitVMComponentKernelSync(fixture.dataRoot, fixture.servicesRoot, "devbox", configPath, oldKernel, newKernel)
+	}); err != nil {
+		t.Fatalf("commit kernel sync: %v", err)
+	}
+
+	target, resolved := newVMRuntimeTransitionTarget(t, fixture)
+	if _, err := stageVMRuntimeWithDeps(ctx, &fixture.cfg, "devbox", resolved, deps); err != nil {
+		t.Fatalf("stage runtime immediately after kernel sync: %v", err)
+	}
+	vm := readLatestVMRuntimeAdoptionData(t, fixture.store).Services["devbox"].VM
+	if vm.Components.Kernel != newKernel || vm.Image.Kernel != newKernel.Path {
+		t.Fatalf("runtime staging did not preserve the synced kernel: kernel=%#v image path=%q", vm.Components.Kernel, vm.Image.Kernel)
+	}
+	if staged := vm.Components.Runtime.Staged; staged == nil || *staged != target {
+		t.Fatalf("staged runtime = %#v, want %#v", staged, target)
+	}
+}
+
 func TestStageVMRuntimeCommitsPolicyMutationWithCandidateAtomically(t *testing.T) {
 	fixture, deps, _ := newVMRuntimeAdoptionTransactionFixture(t, false)
 	adoptVMRuntimeTransitionFixture(t, fixture, deps)
