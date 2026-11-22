@@ -972,7 +972,8 @@ func TestRegularNetworkComposeRestoreHonorsRecoveryDeadline(t *testing.T) {
 	}
 	fakeBin := t.TempDir()
 	docker := filepath.Join(fakeBin, "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
+	// Replace the shell so canceling the fake Docker process also closes its pipes.
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
