@@ -1,6 +1,6 @@
 module github.com/yeetrun/yeet
 
-go 1.26.9
+go 1.27.4
 
 require (
 	charm.land/huh/v2 v2.0.3
@@ -10,13 +10,13 @@ require (
 	github.com/containerd/containerd/v2 v2.3.6
 	github.com/containerd/errdefs v1.0.0
 	github.com/creack/pty v1.1.24
-	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced
+	github.com/go-json-experiment/json v1.27.2
 	github.com/google/addlicense v1.2.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hugomd/ascii-live v0.0.0-20231008062449-0e53a4799f1e
-	github.com/klauspost/compress v1.18.5
+	github.com/klauspost/compress v1.20.2
 	github.com/miekg/dns v1.1.58
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
