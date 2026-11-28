@@ -427,10 +427,10 @@ func TestVMBalloonMutationBoundaryStopsAfterDynamicResolverBlock(t *testing.T) {
 	errs := server.applyVMBalloonTargets(
 		context.Background(),
 		api,
-		vmBalloonControllerPlan{Targets: map[string]int64{"alpha": 1, "bravo": 2}},
-		map[string]vmBalloonReconcileCandidate{
-			"alpha": {service: "alpha", socket: "alpha.sock"},
-			"bravo": {service: "bravo", socket: "bravo.sock"},
+		map[string]int64{"alpha": 0, "bravo": 2 << 20},
+		[]vmBalloonReclaimCandidate{
+			{Service: "alpha", Socket: "alpha.sock", CurrentTarget: 1 << 20},
+			{Service: "bravo", Socket: "bravo.sock"},
 		},
 	)
 	if len(errs) == 0 {

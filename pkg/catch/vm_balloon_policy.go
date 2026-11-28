@@ -34,10 +34,14 @@ type vmMemoryAdmissionInput struct {
 
 type vmBalloonReclaimCandidate struct {
 	Service       string
+	Socket        string
 	MaxBytes      int64
 	MinBytes      int64
 	CurrentTarget int64
+	ActualBytes   int64
 	FreeBytes     int64
+	Stalled       bool
+	BackingOff    bool
 }
 
 func normalizeVMBalloonMode(raw string) (string, error) {
