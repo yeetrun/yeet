@@ -1,5 +1,17 @@
 # yeet
 
+Yeet development and releases have moved to [yeetrun/yeet-os](https://github.com/yeetrun/yeet-os). The last standalone Catch release is [v0.11.18](https://github.com/yeetrun/yeet/releases/tag/v0.11.18).
+
+To switch an existing Mac or Linux CLI, run this once. Your configured hosts and workspaces carry over.
+
+```sh
+curl -fsSL https://github.com/yeetrun/yeet-os/releases/latest/download/install.sh | sh -s -- --dir "$(dirname "$(command -v yeet)")"
+```
+
+Afterward, use `yeet upgrade` on the workstation. The current CLI can manage existing standalone hosts. For new hosts, follow the [Yeet OS installation guide](https://github.com/yeetrun/yeet-os#install-yeet-os).
+
+## Standalone v0.11.18 documentation
+
 Deploy containers, VMs, binaries, scripts, and cron jobs from your workstation to Linux hosts.
 
 The normal way to run a little infrastructure is to accidentally build a platform. You start with SSH, add some shell scripts, decide you need a deploy box, invent a secrets story, bolt on a dashboard, and eventually discover that the dashboard is mostly a slower way to run SSH.
