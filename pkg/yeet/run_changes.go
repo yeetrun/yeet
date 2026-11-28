@@ -31,8 +31,9 @@ type runChangeSummary struct {
 }
 
 type runChangeResult struct {
-	sandbox      *clientSandboxPolicy
-	catchChanged bool
+	inheritedNetwork *catchrpc.ServiceNetworkSettings
+	sandbox          *clientSandboxPolicy
+	catchChanged     bool
 }
 
 func (s runChangeSummary) hasChanges() bool {
@@ -614,12 +615,17 @@ func runWithChangesToContext(ctx context.Context, stdout io.Writer, payload stri
 }
 
 func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) error {
-	_, err := runWithChangesToWithContextRunnerResult(ctx, stdout, payload, runArgs, envFile, entry, forceDeploy, runner, alwaysDeployPayload)
+	_, err := runWithChangesToWithContextRunnerResult(ctx, stdout, payload, runArgs, envFile, entry, forceDeploy, runner, runChangeOptions{alwaysDeployPayload: alwaysDeployPayload})
 	return err
 }
 
-func runWithChangesToWithContextRunnerResult(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) (runChangeResult, error) {
-	response, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs)
+type runChangeOptions struct {
+	alwaysDeployPayload bool
+	inheritSavedNetwork bool
+}
+
+func runWithChangesToWithContextRunnerResult(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, options runChangeOptions) (runChangeResult, error) {
+	response, inherited, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs, options.inheritSavedNetwork)
 	if err != nil {
 		return runChangeResult{}, err
 	}
@@ -633,15 +639,20 @@ func runWithChangesToWithContextRunnerResult(ctx context.Context, stdout io.Writ
 	})
 	comparisonArgs := removeRunSandboxControlFlags(runArgs)
 	storedComparisonArgs := normalizeRunArgs(storedArgs)
-	summary, err := detectRunChangesWithOptions(ctx, payload, comparisonArgs, envFile, storedComparisonArgs, alwaysDeployPayload)
+	summary, err := detectRunChangesWithOptions(ctx, payload, comparisonArgs, envFile, storedComparisonArgs, options.alwaysDeployPayload)
 	if err != nil {
 		return runChangeResult{}, err
+	}
+	if inherited != nil {
+		runArgs = runArgsWithNetworkSettings(runArgs, *inherited)
 	}
 	if err := applyRunChangeSummary(ctx, stdout, payload, runArgs, envFile, summary, forceDeploy, runner); err != nil {
 		return runChangeResult{}, err
 	}
 	runApplied := summary.requiresRun() || (!summary.hasChanges() && forceDeploy)
-	return captureRunSandboxResult(ctx, payload, entry, response, runApplied, runApplied || summary.envChanged)
+	result, err := captureRunSandboxResult(ctx, payload, entry, response, runApplied, runApplied || summary.envChanged)
+	result.inheritedNetwork = inherited
+	return result, err
 }
 
 func captureRunSandboxResult(ctx context.Context, payload string, entry ServiceEntry, response catchrpc.ServiceInfoResponse, runApplied, catchChanged bool) (runChangeResult, error) {
@@ -716,32 +727,68 @@ var fetchRunChangeServiceInfoFn = func(ctx context.Context, host, service string
 }
 
 func rejectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry, runArgs []string) error {
-	_, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs)
+	_, _, err := inspectExistingRunProtectedChanges(ctx, entry, runArgs, false)
 	return err
 }
 
-func inspectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry, runArgs []string) (catchrpc.ServiceInfoResponse, error) {
+func inspectExistingRunProtectedChanges(ctx context.Context, entry ServiceEntry, runArgs []string, inheritSaved bool) (catchrpc.ServiceInfoResponse, *catchrpc.ServiceNetworkSettings, error) {
 	if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Host) == "" || serviceEntryIsVM(entry) {
-		return catchrpc.ServiceInfoResponse{}, nil
+		return catchrpc.ServiceInfoResponse{}, nil, nil
 	}
 	flags, requested, authKeySet, err := parseProtectedRunSettings(runArgs)
 	if err != nil {
-		return catchrpc.ServiceInfoResponse{}, err
+		return catchrpc.ServiceInfoResponse{}, nil, err
 	}
 	response, err := fetchRunChangeServiceInfoFn(ctx, entry.Host, entry.Name)
 	if err != nil {
-		return catchrpc.ServiceInfoResponse{}, err
+		return catchrpc.ServiceInfoResponse{}, nil, err
 	}
 	if !runServiceInitialized(response) {
-		return response, nil
+		return response, nil, nil
 	}
-	if err := rejectExistingRunNetworkSettings(requested, authKeySet, response.Info.Network); err != nil {
-		return catchrpc.ServiceInfoResponse{}, err
+	inherited, err := resolveExistingRunNetwork(requested, authKeySet, response.Info.Network, inheritSaved || !hasRunNetworkOptions(runArgs))
+	if err != nil {
+		return catchrpc.ServiceInfoResponse{}, nil, err
 	}
 	if err := rejectExistingRunSandboxChange(entry.Name, flags.Sandbox, response.Info.Sandbox); err != nil {
-		return catchrpc.ServiceInfoResponse{}, err
+		return catchrpc.ServiceInfoResponse{}, nil, err
 	}
-	return response, nil
+	return response, inherited, nil
+}
+
+func resolveExistingRunNetwork(requested catchrpc.ServiceNetworkSettings, authKeySet bool, remote catchrpc.ServiceNetwork, inherit bool) (*catchrpc.ServiceNetworkSettings, error) {
+	if !inherit {
+		return nil, rejectExistingRunNetworkSettings(requested, authKeySet, remote)
+	}
+	current := authoritativeRunNetworkSettings(remote)
+	if authKeySet || !reflect.DeepEqual(requested, current) {
+		return &current, nil
+	}
+	return nil, nil
+}
+
+// Inspect only Yeet flags. A payload can have its own --net argument after --.
+func hasRunNetworkOptions(args []string) bool {
+	flags, _ := splitRunArgsForParsing(args)
+	for i := 0; i < len(flags); i++ {
+		switch flagName(flags[i]) {
+		case "--net", "--ts-ver", "--ts-exit", "--ts-tags", "--ts-auth-key", "--macvlan-parent", "--macvlan-mac", "--macvlan-vlan":
+			return true
+		}
+		scanRunFlag(flags, &i, true)
+	}
+	return false
+}
+
+// Reuse the same mapping as service sync, preserving the payload argument boundary.
+func runArgsWithNetworkSettings(args []string, settings catchrpc.ServiceNetworkSettings) []string {
+	removals, updates := serviceSetNetworkRunFlagChanges(serviceSetFlagsForNetworkSettings(settings))
+	flags, _ := splitRunArgsForParsing(args)
+	out := removeRunFlags(flags, removals)
+	for _, update := range updates {
+		out = append(out, update.Name+"="+update.Value)
+	}
+	return append(out, args[len(flags):]...)
 }
 
 // Env-only uploads create a record without initializing a payload. Preserve

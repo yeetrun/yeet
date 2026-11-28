@@ -463,7 +463,9 @@ yeet service set <svc> --ts-exit=
 
 `--net` replaces the complete mode set. Other supplied network flags patch one setting, and an explicit empty value clears an optional setting. Any result that includes `ts` must keep at least one Tailscale tag. The mutation restarts the service immediately. If Catch changes the live service but the local config cannot be saved, `yeet service sync <svc>` makes the workspace agree with the host again.
 
-Rerunning `yeet run` can still update a payload or unrelated configuration, but it rejects network drift for an existing service and points you to `service set`. VM network changes stay under `vm set`; stop the VM before changing it:
+To replace an image with a Compose file, use the same service name. For example, after deploying `yeet run web nginx:alpine`, run `yeet run web ./compose.yaml`. Yeet reads the network settings from the host and keeps the service’s Tailscale identity and addresses. Use `yeet service set` to change the network.
+
+Stop a VM before changing its network with `yeet vm set`:
 
 ```bash
 yeet stop <vm>

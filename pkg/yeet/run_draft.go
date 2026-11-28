@@ -17,28 +17,29 @@ import (
 )
 
 type RunDraft struct {
-	Service        string            `json:"service"`
-	Host           string            `json:"host"`
-	Payload        string            `json:"payload"`
-	PayloadKind    string            `json:"payloadKind,omitempty"`
-	EnvFile        string            `json:"envFile,omitempty"`
-	RunAs          string            `json:"runAs,omitempty"`
-	RunAsSet       bool              `json:"runAsSet,omitempty"`
-	Pull           bool              `json:"pull,omitempty"`
-	EnvFileArg     string            `json:"-"`
-	EnvFileSet     bool              `json:"-"`
-	PayloadArgs    []string          `json:"payloadArgs,omitempty"`
-	Cron           RunDraftCron      `json:"cron,omitempty"`
-	VM             RunDraftVM        `json:"vm,omitempty"`
-	Network        RunDraftNetwork   `json:"network"`
-	Storage        RunDraftStorage   `json:"storage"`
-	Snapshots      RunDraftSnapshots `json:"snapshots"`
-	SnapshotChange bool              `json:"-"`
-	NewServiceOnly bool              `json:"newServiceOnly,omitempty"`
-	ForceDeploy    bool              `json:"forceDeploy,omitempty"`
-	RunArgs        []string          `json:"-"`
-	RunArgsSet     bool              `json:"-"`
-	ExistingEntry  ServiceEntry      `json:"-"`
+	inheritSavedNetwork bool
+	Service             string            `json:"service"`
+	Host                string            `json:"host"`
+	Payload             string            `json:"payload"`
+	PayloadKind         string            `json:"payloadKind,omitempty"`
+	EnvFile             string            `json:"envFile,omitempty"`
+	RunAs               string            `json:"runAs,omitempty"`
+	RunAsSet            bool              `json:"runAsSet,omitempty"`
+	Pull                bool              `json:"pull,omitempty"`
+	EnvFileArg          string            `json:"-"`
+	EnvFileSet          bool              `json:"-"`
+	PayloadArgs         []string          `json:"payloadArgs,omitempty"`
+	Cron                RunDraftCron      `json:"cron,omitempty"`
+	VM                  RunDraftVM        `json:"vm,omitempty"`
+	Network             RunDraftNetwork   `json:"network"`
+	Storage             RunDraftStorage   `json:"storage"`
+	Snapshots           RunDraftSnapshots `json:"snapshots"`
+	SnapshotChange      bool              `json:"-"`
+	NewServiceOnly      bool              `json:"newServiceOnly,omitempty"`
+	ForceDeploy         bool              `json:"forceDeploy,omitempty"`
+	RunArgs             []string          `json:"-"`
+	RunArgsSet          bool              `json:"-"`
+	ExistingEntry       ServiceEntry      `json:"-"`
 }
 
 type RunDraftNetwork struct {
@@ -124,27 +125,28 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 	}
 
 	return RunDraft{
-		Service:        getService(),
-		Host:           host,
-		Payload:        payload,
-		PayloadKind:    payloadKind,
-		EnvFile:        envFile,
-		RunAs:          effectiveParsed.RunAs,
-		RunAsSet:       effectiveParsed.RunAsSet,
-		Pull:           effectiveParsed.Pull,
-		EnvFileArg:     flags.EnvFileArg,
-		EnvFileSet:     flags.EnvFileSet,
-		PayloadArgs:    payloadArgsFromRunArgs(effectiveArgs),
-		Cron:           RunDraftCron{Schedule: effectiveParsed.Cron},
-		VM:             runDraftVMFromRunFlags(effectiveParsed),
-		Network:        runDraftNetworkFromRunFlags(effectiveParsed),
-		Storage:        RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
-		Snapshots:      runDraftSnapshotsFromOptions(snapshots),
-		SnapshotChange: flags.SnapshotChange,
-		ForceDeploy:    flags.ForceDeploy,
-		RunArgs:        append([]string{}, filteredArgs...),
-		RunArgsSet:     true,
-		ExistingEntry:  entry,
+		inheritSavedNetwork: hasEntry && !hasRunNetworkOptions(flags.Args),
+		Service:             getService(),
+		Host:                host,
+		Payload:             payload,
+		PayloadKind:         payloadKind,
+		EnvFile:             envFile,
+		RunAs:               effectiveParsed.RunAs,
+		RunAsSet:            effectiveParsed.RunAsSet,
+		Pull:                effectiveParsed.Pull,
+		EnvFileArg:          flags.EnvFileArg,
+		EnvFileSet:          flags.EnvFileSet,
+		PayloadArgs:         payloadArgsFromRunArgs(effectiveArgs),
+		Cron:                RunDraftCron{Schedule: effectiveParsed.Cron},
+		VM:                  runDraftVMFromRunFlags(effectiveParsed),
+		Network:             runDraftNetworkFromRunFlags(effectiveParsed),
+		Storage:             RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
+		Snapshots:           runDraftSnapshotsFromOptions(snapshots),
+		SnapshotChange:      flags.SnapshotChange,
+		ForceDeploy:         flags.ForceDeploy,
+		RunArgs:             append([]string{}, filteredArgs...),
+		RunArgsSet:          true,
+		ExistingEntry:       entry,
 	}, nil
 }
 
@@ -462,6 +464,9 @@ func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, dra
 }
 
 func saveRunDraftExecutionConfigWithResult(cfgLoc *projectConfigLocation, host string, draft RunDraft, runArgs []string, result runChangeResult) error {
+	if result.inheritedNetwork != nil {
+		runArgs = runArgsWithNetworkSettings(runArgs, *result.inheritedNetwork)
+	}
 	configRunArgs := runArgsWithoutSensitiveRunOptions(runArgs)
 	if err := saveRunConfigWithPayloadKindResult(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS, result); err != nil {
 		if draft.RunAsSet {
@@ -587,7 +592,7 @@ func runDraftWithChangesToResult(ctx context.Context, stdout io.Writer, draft Ru
 	}
 	alwaysDeploy := draft.PayloadKind == "local-image" || draft.PayloadKind == serviceTypeVM
 	entry := runDraftNetworkGuardEntry(draft)
-	return runWithChangesToWithContextRunnerResult(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, entry, forceDeploy, runner, alwaysDeploy)
+	return runWithChangesToWithContextRunnerResult(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, entry, forceDeploy, runner, runChangeOptions{alwaysDeployPayload: alwaysDeploy, inheritSavedNetwork: draft.inheritSavedNetwork})
 }
 
 func runDraftNetworkGuardEntry(draft RunDraft) ServiceEntry {

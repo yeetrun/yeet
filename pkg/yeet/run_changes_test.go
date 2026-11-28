@@ -280,9 +280,9 @@ func TestRunProtectedChangesDistinguishesEnvOnlyFromInitializedServices(t *testi
 			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
 				return response, nil
 			}
-			got, err := inspectExistingRunProtectedChanges(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{
+			got, _, err := inspectExistingRunProtectedChanges(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{
 				"--net=lan,ts", "--ts-tags=tag:app", "--ts-auth-key=fixture", "--sandbox=off",
-			})
+			}, false)
 			if tt.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "yeet service set") {
 					t.Fatalf("error = %v, want service-set guidance", err)
@@ -332,6 +332,51 @@ func TestRunUnchangedNetworkAllowsOtherRedeploymentChanges(t *testing.T) {
 	}
 	if runs != 1 {
 		t.Fatalf("runner calls = %d, want 1 for non-network config change", runs)
+	}
+}
+
+func TestRunInheritsCurrentServiceNetworkWhenReplacingPayload(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldInfo })
+	network := catchrpc.ServiceNetworkSettings{
+		Modes: []string{"lan", "ts"}, TSTags: []string{"tag:api", "tag:web"},
+		TSVersion: "1.2.3", TSExitNode: "gateway", MacvlanParent: "eno1",
+		MacvlanVLAN: 10, MacvlanMAC: "02:00:00:00:00:01",
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "docker-compose", Network: catchrpc.ServiceNetwork{Desired: &network},
+		}}, nil
+	}
+	for _, tt := range []struct {
+		name      string
+		savedArgs []string
+	}{
+		{name: "no workspace"},
+		{name: "outdated workspace", savedArgs: []string{"--net", "ts", "--ts-tags=tag:old", "--ts-auth-key=old"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := ServiceEntry{Name: "api", Host: "box", Args: tt.savedArgs}
+			args := append(append([]string{}, tt.savedArgs...), "--pull", "--", "--net=host")
+			called := false
+			runner := func(_ context.Context, _ string, got []string) error {
+				called = true
+				flags, desired, authKey, err := parseProtectedRunSettings(got)
+				if err != nil || authKey || !flags.Pull || !reflect.DeepEqual(desired, network) {
+					t.Fatalf("forwarded flags %q gave network %+v, auth key %v, error %v", got, desired, authKey, err)
+				}
+				if !reflect.DeepEqual(payloadArgsFromRunArgs(got), []string{"--net=host"}) {
+					t.Fatalf("payload argument changed in %q", got)
+				}
+				return nil
+			}
+			result, err := runWithChangesToWithContextRunnerResult(context.Background(), io.Discard,
+				"compose.yaml", args, "", entry, false, runner,
+				runChangeOptions{alwaysDeployPayload: true, inheritSavedNetwork: tt.savedArgs != nil})
+			if err != nil || !called || !reflect.DeepEqual(result.inheritedNetwork, &network) {
+				t.Fatalf("runner called %v, inherited %+v, error %v", called, result.inheritedNetwork, err)
+			}
+		})
 	}
 }
 
@@ -689,7 +734,7 @@ func TestSuccessfulFreshNativeRunPersistsCatchSandboxInsteadOfRequestFlags(t *te
 	runs := 0
 	result, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, payload, runArgs, "", ServiceEntry{Name: "api", Host: "host-a"}, false,
-		func(context.Context, string, []string) error { runs++; return nil }, false,
+		func(context.Context, string, []string) error { runs++; return nil }, runChangeOptions{},
 	)
 	if err != nil {
 		t.Fatalf("runWithChangesToWithContextRunner: %v", err)
@@ -937,7 +982,7 @@ func TestExistingNativeRunTransitionRefreshesNonNativeSandboxBeforeConfigSave(t 
 			runArgs := []string{"--net=host", "--sandbox=on", "--sandbox-ro=/old/read"}
 			result, err := runWithChangesToWithContextRunnerResult(
 				context.Background(), io.Discard, payload, runArgs, "", entry, false,
-				func(context.Context, string, []string) error { runs++; return nil }, false,
+				func(context.Context, string, []string) error { runs++; return nil }, runChangeOptions{},
 			)
 			if err != nil {
 				t.Fatalf("runWithChangesToWithContextRunner: %v", err)
@@ -1072,7 +1117,7 @@ func TestRunSandboxResultStaysMatchedAcrossInterleavedSameServiceRuns(t *testing
 	nativeResult, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, nativePayload, []string{"--net=host", "--sandbox=on", "--sandbox-ro=/native/read:/read"}, "",
 		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file", Args: []string{"--net=host"}, Sandbox: "on", SandboxRO: []string{"/native/read:/read"}}, false,
-		func(context.Context, string, []string) error { return nil }, false,
+		func(context.Context, string, []string) error { return nil }, runChangeOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1086,7 +1131,7 @@ func TestRunSandboxResultStaysMatchedAcrossInterleavedSameServiceRuns(t *testing
 	containerResult, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, containerPayload, []string{"--net=host"}, "",
 		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "remote-image", Args: []string{"--net=host"}}, false,
-		func(context.Context, string, []string) error { return nil }, false,
+		func(context.Context, string, []string) error { return nil }, runChangeOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1130,7 +1175,7 @@ func TestRunSandboxResultDoesNotSurviveFailedRunOrRetry(t *testing.T) {
 	}
 	failedResult, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, nativePayload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
-		func(context.Context, string, []string) error { return errors.New("remote run failed") }, false,
+		func(context.Context, string, []string) error { return errors.New("remote run failed") }, runChangeOptions{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "remote run failed") {
 		t.Fatalf("failed run error = %v", err)
@@ -1148,7 +1193,7 @@ func TestRunSandboxResultDoesNotSurviveFailedRunOrRetry(t *testing.T) {
 	containerPayload := "ghcr.io/example/api:retry"
 	retryResult, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, containerPayload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "remote-image"}, false,
-		func(context.Context, string, []string) error { return nil }, false,
+		func(context.Context, string, []string) error { return nil }, runChangeOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1192,7 +1237,7 @@ func TestRunSandboxResultDiscardedByNoConfigCannotLeakIntoBackendRun(t *testing.
 	}
 	result, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, payload, nil, "", ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
-		func(context.Context, string, []string) error { return nil }, false,
+		func(context.Context, string, []string) error { return nil }, runChangeOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1213,7 +1258,7 @@ func TestRunSandboxResultDiscardedByNoConfigCannotLeakIntoBackendRun(t *testing.
 	vmResult, err := runWithChangesToWithContextRunnerResult(
 		context.Background(), io.Discard, "vm://ubuntu/26.04", nil, "",
 		ServiceEntry{Name: "api", Host: "host-a", PayloadKind: serviceTypeVM}, false,
-		func(context.Context, string, []string) error { return nil }, true,
+		func(context.Context, string, []string) error { return nil }, runChangeOptions{alwaysDeployPayload: true},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1445,7 +1490,7 @@ func TestFreshFilePythonAndTypeScriptSkipNativePostSuccessFetch(t *testing.T) {
 			result, err := runWithChangesToWithContextRunnerResult(
 				context.Background(), io.Discard, payload, nil, "",
 				ServiceEntry{Name: "api", Host: "host-a", PayloadKind: "file"}, false,
-				func(context.Context, string, []string) error { runs++; return nil }, false,
+				func(context.Context, string, []string) error { runs++; return nil }, runChangeOptions{},
 			)
 			if err != nil {
 				t.Fatalf("run returned unnecessary post-success fetch error: %v", err)
